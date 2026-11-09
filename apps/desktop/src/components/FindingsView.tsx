@@ -89,6 +89,18 @@ export function FindingsView() {
                 ))}
               </dl>
             )}
+            {selected.flows.length > 0 && (
+              <div data-testid="taint-flows">
+                <h4>污点来源（过程内近似）</h4>
+                <ul>
+                  {selected.flows.map((p) => (
+                    <li key={`${p.line}:${p.column}`}>
+                      第 {p.line} 行第 {p.column} 列 → 当前 sink
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </aside>
         )}
       </div>

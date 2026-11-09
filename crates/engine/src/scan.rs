@@ -23,6 +23,7 @@ pub struct Engine {
     metric_configs: Vec<(MetricKind, Vec<(String, f64)>)>,
     /// 度量规则的原始声明（UI 规则列表展示用）。
     pub metric_specs: Vec<RuleSpec>,
+    taint_rules: Vec<crate::compile::TaintRule>,
     pub engine_version: String,
 }
 
@@ -90,6 +91,7 @@ impl Engine {
         let mut text_rules = Vec::new();
         let mut metric_configs = Vec::new();
         let mut metric_specs = Vec::new();
+        let mut taint_rules = Vec::new();
         for rule in compiled {
             match rule {
                 CompiledRule::Ast(r) => ast_rules.push(r),
@@ -98,6 +100,7 @@ impl Engine {
                     metric_configs.push((r.kind, r.options.clone()));
                     metric_specs.push(r.spec);
                 }
+                CompiledRule::Taint(r) => taint_rules.push(r),
             }
         }
 
@@ -106,6 +109,7 @@ impl Engine {
             text_rules,
             metric_configs,
             metric_specs,
+            taint_rules,
             engine_version: env!("CARGO_PKG_VERSION").to_string(),
         })
     }
@@ -140,6 +144,17 @@ impl Engine {
                 ),
             ));
         }
+        for rule in &self.taint_rules {
+            out.push(catalog_entry(
+                &rule.spec,
+                format!(
+                    "污点：{} source → {} sink（sanitizer {}）",
+                    rule.source_queries.len(),
+                    rule.sink_queries.len(),
+                    rule.sanitizer_queries.len()
+                ),
+            ));
+        }
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
     }
@@ -152,6 +167,7 @@ impl Engine {
             .map(|r| r.spec.id.clone())
             .chain(self.text_rules.iter().map(|r| r.spec.id.clone()))
             .chain(self.metric_specs.iter().map(|s| s.id.clone()))
+            .chain(self.taint_rules.iter().map(|r| r.spec.id.clone()))
             .collect();
         ids.sort();
         ids
@@ -340,6 +356,16 @@ impl Engine {
         }
         for rule in &self.text_rules {
             findings.extend(run_text_rule(rule, source, rel, degraded));
+        }
+        for rule in &self.taint_rules {
+            if let RuleLanguage::One(l) = rule.spec.language {
+                if l != lang {
+                    continue;
+                }
+                findings.extend(crate::taint::taint_findings(
+                    rule, lang, tree, source, rel, degraded,
+                ));
+            }
         }
         findings.extend(metrics::file_metrics(
             lang,
@@ -532,6 +558,7 @@ fn run_ast_rule(
             match_text,
             captures,
             degraded,
+            flows: Vec::new(),
             fingerprint: String::new(),
         });
     }
@@ -593,6 +620,7 @@ fn run_text_rule(rule: &TextRule, source: &str, path: &str, degraded: bool) -> V
             match_text: m.as_str().to_string(),
             captures: Vec::new(),
             degraded,
+            flows: Vec::new(),
             fingerprint: String::new(),
         });
     }

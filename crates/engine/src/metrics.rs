@@ -11,18 +11,20 @@ const METRIC_SEVERITY: Severity = Severity::Warning;
 const METRIC_DIMENSION: Dimension = Dimension::Quality;
 
 /// 各语法 node 名档位。未知 node 类型不计数（宁少报不误报）。
-struct Profile {
-    functions: &'static [&'static str],
-    blocks: &'static [&'static str],
-    terminal: &'static [&'static str],
-    decisions: &'static [&'static str],
+pub(crate) struct Profile {
+    pub(crate) functions: &'static [&'static str],
+    pub(crate) blocks: &'static [&'static str],
+    pub(crate) terminal: &'static [&'static str],
+    pub(crate) decisions: &'static [&'static str],
     /// binary/boolean 运算节点名（按运算符文本再筛）。
-    logic_ops: &'static [&'static str],
+    pub(crate) logic_ops: &'static [&'static str],
     /// 语句序列的直接子节点若是包装层（Java 的 block_statement），经它取内层。
-    statement_wrapper: Option<&'static str>,
+    pub(crate) statement_wrapper: Option<&'static str>,
+    /// 赋值/声明传播节点：(kind, lhs 字段, rhs 字段)。污点分析用（Domain §4a）。
+    pub(crate) assignments: &'static [(&'static str, &'static str, &'static str)],
 }
 
-fn profile(lang: Language) -> Profile {
+pub(crate) fn profile(lang: Language) -> Profile {
     match lang {
         Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Jsx => Profile {
             functions: &[
@@ -51,7 +53,12 @@ fn profile(lang: Language) -> Profile {
                 "ternary_expression",
             ],
             logic_ops: &["binary_expression"],
-            statement_wrapper: None,
+                        statement_wrapper: None,
+            assignments: &[
+                ("assignment_expression", "left", "right"),
+                ("variable_declarator", "name", "value"),
+                ("augmented_assignment_expression", "left", "right"),
+            ],
         },
         Language::Python => Profile {
             functions: &["function_definition"],
@@ -72,7 +79,8 @@ fn profile(lang: Language) -> Profile {
                 "boolean_operator",
             ],
             logic_ops: &["boolean_operator"],
-            statement_wrapper: None,
+                        statement_wrapper: None,
+            assignments: &[("assignment", "left", "right")],
         },
         Language::Java => Profile {
             functions: &["method_declaration", "constructor_declaration"],
@@ -94,7 +102,11 @@ fn profile(lang: Language) -> Profile {
                 "ternary_expression",
             ],
             logic_ops: &["binary_expression"],
-            statement_wrapper: Some("block_statement"),
+                        statement_wrapper: Some("block_statement"),
+            assignments: &[
+                ("assignment_expression", "lhs", "value"),
+                ("variable_declarator", "name", "value"),
+            ],
         },
         Language::Go => Profile {
             functions: &["function_declaration", "method_declaration"],
@@ -108,7 +120,11 @@ fn profile(lang: Language) -> Profile {
                 "type_case",
             ],
             logic_ops: &["binary_expression"],
-            statement_wrapper: None,
+                        statement_wrapper: None,
+            assignments: &[
+                ("assignment_statement", "left", "right"),
+                ("short_var_declaration", "left", "right"),
+            ],
         },
         Language::Rust => Profile {
             functions: &["function_item"],
@@ -128,7 +144,11 @@ fn profile(lang: Language) -> Profile {
                 "match_arm",
             ],
             logic_ops: &["binary_expression"],
-            statement_wrapper: None,
+                        statement_wrapper: None,
+            assignments: &[
+                ("let_declaration", "name", "value"),
+                ("assignment_expression", "left", "value"),
+            ],
         },
     }
 }
@@ -152,6 +172,7 @@ fn finding(rule_id: &str, message: String, path: &str, span: Span, match_text: &
         match_text: match_text.into(),
         captures: Vec::new(),
         degraded,
+        flows: Vec::new(),
         fingerprint: String::new(),
     }
 }
@@ -184,7 +205,14 @@ fn named_children(node: Node<'_>) -> Vec<Node<'_>> {
     children
 }
 
-/// 遍历子树（含自身）的所有命名后代。
+/// 遍历子树（含自身）的所有命名后代。taint.rs 经 walk_all_pub 复用。
+pub(crate) fn walk_all_pub<'tree, F: FnMut(tree_sitter::Node<'tree>)>(
+    root: tree_sitter::Node<'tree>,
+    f: &mut F,
+) {
+    walk_all(root, f)
+}
+
 fn walk_all<'tree, F: FnMut(tree_sitter::Node<'tree>)>(
     root: tree_sitter::Node<'tree>,
     f: &mut F,

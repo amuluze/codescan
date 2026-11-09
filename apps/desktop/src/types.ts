@@ -16,6 +16,8 @@ export type Finding = {
   match_text: string;
   captures: [string, string][];
   degraded: boolean;
+  /** 污点链证据：sink 对应的 source 位置列表（过程内近似）。 */
+  flows: Position[];
   fingerprint: string;
 };
 

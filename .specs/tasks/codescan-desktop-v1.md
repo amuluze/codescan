@@ -48,7 +48,7 @@ task-id: `codescan-desktop-v1`
 ### 规则 fixture 格式（A2 的判定基础）
 
 - 位置：`rules/tests/<rule-id>/` 下按扩展名识别语言；同一 fixture 文件可服务多条规则。
-- 标注：期望命中行**紧邻上一行**的行注释——`// ruleid: <id>`（TS/TSX/JS/JSX/Java/Go/Rust）或 `# ruleid: <id>`（Python）；同文件多规则用多行堆叠标注。
+- 标注：期望命中行的其上连续行注释——`// ruleid: <id>`（TS/TSX/JS/JSX/Java/Go/Rust）或 `# ruleid: <id>`（Python）。连续多条标注共同指向其后**第一个非空且非标注**的行（支持同一行被多条规则命中的堆叠标注）；同文件多规则用多行堆叠标注。
 - 判定：runner 对每个 fixture 文件运行**全部同语言启用规则**；期望集合 = 标注的 (规则 id, 文件, 起始行) 全集；实际集合 = 全部发现的 (规则 id, 文件, 起始行) 全集；**两集合精确相等**才通过（未标注的命中 = 过度匹配，失败；标注了未命中 = 漏报，失败）。
 
 ## 验收标准（全部可客观判定）
@@ -74,3 +74,9 @@ task-id: `codescan-desktop-v1`
 - 自定义规则 `id` 与内置冲突：拒绝加载该目录并逐条报错（对应 Domain Spec §4.4）。
 - 空工作区/无匹配语言文件：扫描正常完成，发现为空，事件记录跳过统计。
 - 取消扫描：按「范围-引擎」取消条目执行；验收见 A11。
+
+## 结论（2026-11-09，已实施）
+
+v1 全量交付。57 条内置规则（AST 46：TS 15 / Py 8 / Java 8 / Go 7 / Rust 8；度量 5；文本 6）。验证：clippy 0 警告；`cargo test --workspace` 全绿（引擎单测 7、集成 7、规则套件全量、无头 4）；`tsc`、vitest 2、`vite build` 全绿；`pnpm tauri dev` 启动无 panic（A10 已启动验证）。Dogfood：axiom 本体 1029 文件 / 1602 发现 / 14.6s（debug）。
+
+遗留项：①fixture 判定对「同规则同文件同一行多命中」集合塌缩（reviewer P3）；②Windows/Linux 打包链路后置；③真实仓库 function-length/duplicate-block 阈值待调优。

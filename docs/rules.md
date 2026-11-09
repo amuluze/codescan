@@ -46,7 +46,7 @@ rules:
 
 目录：`crates/engine/rules/tests/<rule-id>/`，按文件扩展名识别语言。判定语义（Task Spec「规则 fixture 格式」）：
 
-- 期望命中行 = 其**紧邻上一行**的标注注释：`// ruleid: <id>`（TS/TSX/JS/JSX/Java/Go/Rust）或 `# ruleid: <id>`（Python）。
+- 期望命中行 = 标注注释所处连续块指向的**下一个非空且非标注行**：`// ruleid: <id>`（TS/TSX/JS/JSX/Java/Go/Rust）或 `# ruleid: <id>`（Python）。同一行被多条规则命中时，垂直堆叠多条标注即可（都指向同一目标行）。
 - Runner 对每个 fixture 目录运行**全部启用规则**；期望集合与实际命中的 `(规则 id, 文件, 起始行)` 三元组集合必须**精确相等**：标注了没命中 = 漏报；未标注的命中（含其他规则、度量的命中）= 过度匹配，同样失败。
 - 因此 fixture 必须「干净」：不触发无关规则与度量（函数保持短小；不引入重复 10 行块；不写真实密钥样式之外又撞上其他文本规则的内容）。
 
@@ -66,3 +66,36 @@ doSomethingSafe();
 - Go: `call_expression`(function/arguments)、`selector_expression`、`identifier`、`interpreted_string_literal`、`short_var_declaration`、`assignment_statement`。
 - Rust: `call_expression`(function/arguments)、`macro_invocation`、`field_expression`、`identifier`、`string_literal`、`let_declaration`。
 
+
+## 污点规则（v2.1，过程内近似）
+
+```yaml
+  - id: ts/taint-eval-param
+    language: typescript          # 必须具体语言（不允许 "*"）
+    dimension: security
+    severity: error
+    message: 不可信参数可能流入 eval()（过程内污点近似）
+    taint:
+      sources:                    # 必填，≥1；产生污点的结构模式
+        - |
+          (function_declaration
+            parameters: (formal_parameters
+              (required_parameter (identifier) @match))) @match
+      sinks:                      # 必填，≥1；汇聚点（发现 span = 该命中）
+        - |
+          (call_expression
+            function: (identifier) @fn (#eq? @fn "eval")) @match
+      sanitizers:                 # 可选；命中范围内的污点视为已清洗
+        - |
+          (call_expression
+            function: (identifier) @fn (#eq? @fn "parseInt")) @match
+```
+
+语义与限制（Domain Spec §4a）：
+
+1. **过程内**：以单函数体为边界；跨函数、堆别名、字段/路径敏感均不追踪。变量名扁平化（`obj.prop` 归约为其中标识符）。
+2. **传播**：赋值/声明（各语言内置表）把 RHS 的污点传给 LHS 标识符；source 直接出现在 sink 范围内也算命中。
+3. **sanitizer**：RHS 与 sanitizer 范围重叠则不传播；sink 内落在 sanitizer 范围内的标识符不算污点。
+4. `@match` 多捕获时取**跨度最小**者作为端点（同 patterns 内谓词可用 `@fn`/`@prop` 等别名）；sink 判定同时要求节点种类与字节范围相等，避免 block/expression_statement/call 共享范围导致重复报告。
+5. 发现证据：`flows` = sink 对应的 source 位置列表，UI 与 SARIF `properties.flows` 展示。
+6. 消息口径：只能表述「不可信数据可能到达」的过程内近似，不得声称跨过程或堆敏感证明。

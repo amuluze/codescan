@@ -26,6 +26,13 @@ pub struct MetricRule {
     pub options: Vec<(String, f64)>,
 }
 
+pub struct TaintRule {
+    pub spec: RuleSpec,
+    pub source_queries: Vec<Query>,
+    pub sink_queries: Vec<Query>,
+    pub sanitizer_queries: Vec<Query>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MetricKind {
     CyclomaticComplexity,
@@ -52,6 +59,7 @@ pub enum CompiledRule {
     Ast(AstRule),
     Text(TextRule),
     Metric(MetricRule),
+    Taint(TaintRule),
 }
 
 pub fn compile(specs: Vec<RuleSpec>) -> Result<Vec<CompiledRule>, Vec<RuleError>> {
@@ -63,12 +71,13 @@ pub fn compile(specs: Vec<RuleSpec>) -> Result<Vec<CompiledRule>, Vec<RuleError>
             spec.pattern.as_deref(),
             spec.text.as_deref(),
             spec.metric.as_deref(),
+            spec.taint.as_ref(),
         ) {
-            (Some(pattern), None, None) => match compile_ast(&spec, pattern) {
+            (Some(pattern), None, None, None) => match compile_ast(&spec, pattern) {
                 Ok(rule) => compiled.push(CompiledRule::Ast(rule)),
                 Err(mut errs) => errors.append(&mut errs),
             },
-            (None, Some(text), None) => match Regex::new(text) {
+            (None, Some(text), None, None) => match Regex::new(text) {
                 Ok(regex) => compiled.push(CompiledRule::Text(TextRule {
                     spec: clone_spec(&spec),
                     regex,
@@ -79,7 +88,7 @@ pub fn compile(specs: Vec<RuleSpec>) -> Result<Vec<CompiledRule>, Vec<RuleError>
                     message: e.to_string(),
                 }),
             },
-            (None, None, Some(metric)) => match MetricKind::parse(metric) {
+            (None, None, Some(metric), None) => match MetricKind::parse(metric) {
                 Some(kind) => compiled.push(CompiledRule::Metric(MetricRule {
                     spec: clone_spec(&spec),
                     kind,
@@ -91,11 +100,15 @@ pub fn compile(specs: Vec<RuleSpec>) -> Result<Vec<CompiledRule>, Vec<RuleError>
                     message: format!("未知度量 {metric:?}"),
                 }),
             },
+            (None, None, None, Some(taint)) => match compile_taint(&spec, taint) {
+                Ok(rule) => compiled.push(CompiledRule::Taint(rule)),
+                Err(mut errs) => errors.append(&mut errs),
+            },
             _ => {
                 // 互斥性已在 rules.rs 校验；防御性兜底。
                 errors.push(RuleError {
                     rule_id: spec.id.clone(),
-                    field: "pattern|text|metric".into(),
+                    field: "pattern|text|metric|taint".into(),
                     message: "body 形态不合法".into(),
                 });
             }
@@ -104,6 +117,56 @@ pub fn compile(specs: Vec<RuleSpec>) -> Result<Vec<CompiledRule>, Vec<RuleError>
 
     if errors.is_empty() {
         Ok(compiled)
+    } else {
+        Err(errors)
+    }
+}
+
+fn compile_taint(
+    spec: &RuleSpec,
+    taint: &crate::rules::TaintSpec,
+) -> Result<TaintRule, Vec<RuleError>> {
+    let lang = match spec.language {
+        RuleLanguage::One(lang) => lang,
+        RuleLanguage::All => {
+            return Err(vec![RuleError {
+                rule_id: spec.id.clone(),
+                field: "language".into(),
+                message: "污点规则必须指定具体语言".into(),
+            }])
+        }
+    };
+    let ts_lang = lang.tree_sitter_language();
+
+    let mut errors = Vec::new();
+    let compile_list = |queries: &[String], field: &str, errors: &mut Vec<RuleError>| -> Vec<Query> {
+        queries
+            .iter()
+            .filter_map(|q| match Query::new(&ts_lang, q) {
+                Ok(query) => Some(query),
+                Err(e) => {
+                    errors.push(RuleError {
+                        rule_id: spec.id.clone(),
+                        field: field.into(),
+                        message: format!("tree-sitter query 编译失败：{e}"),
+                    });
+                    None
+                }
+            })
+            .collect()
+    };
+
+    let source_queries = compile_list(&taint.sources, "taint.sources", &mut errors);
+    let sink_queries = compile_list(&taint.sinks, "taint.sinks", &mut errors);
+    let sanitizer_queries = compile_list(&taint.sanitizers, "taint.sanitizers", &mut errors);
+
+    if errors.is_empty() {
+        Ok(TaintRule {
+            spec: spec.clone(),
+            source_queries,
+            sink_queries,
+            sanitizer_queries,
+        })
     } else {
         Err(errors)
     }
@@ -119,6 +182,7 @@ fn clone_spec(spec: &RuleSpec) -> RuleSpec {
         pattern: None,
         text: None,
         metric: None,
+        taint: None,
         options: spec.options.clone(),
         filters_not: Vec::new(),
         filters_inside: Vec::new(),

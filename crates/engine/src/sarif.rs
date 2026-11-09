@@ -71,6 +71,9 @@ fn finding_to_result(f: &Finding) -> Value {
             "degraded": f.degraded,
             "fingerprint": f.fingerprint,
             "dimension": f.dimension,
+            "flows": f.flows.iter()
+                .map(|p| json!({ "startLine": p.line, "startColumn": p.column }))
+                .collect::<Vec<_>>(),
             "captures": f.captures.iter()
                 .map(|(k, v)| json!({ "name": k, "text": v }))
                 .collect::<Vec<_>>(),

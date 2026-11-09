@@ -20,6 +20,7 @@ fn finding(rule: &str, path: &str, line: usize, fingerprint: &str) -> Finding {
         match_text: "x".into(),
         captures: Vec::new(),
         degraded: false,
+        flows: Vec::new(),
         fingerprint: fingerprint.into(),
     }
 }

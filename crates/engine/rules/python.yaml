@@ -109,3 +109,77 @@ rules:
       - not:
           pattern: |
             (decorated_definition) @match
+
+  # ---------- 污点（v2.1，过程内近似，Domain §4a） ----------
+  - id: py/taint-eval-input
+    language: python
+    dimension: security
+    severity: error
+    message: input() 输入可能流入 eval()（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (call
+            function: (identifier) @fn (#eq? @fn "input")) @match
+      sinks:
+        - |
+          (call
+            function: (identifier) @fn (#eq? @fn "eval")) @match
+      sanitizers:
+        - |
+          (call
+            function: (identifier) @fn (#eq? @fn "int")) @match
+
+  - id: py/taint-eval-param
+    language: python
+    dimension: security
+    severity: error
+    message: 不可信参数可能流入 eval()（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (function_definition
+            parameters: (parameters (identifier) @match)) @match
+      sinks:
+        - |
+          (call
+            function: (identifier) @fn (#eq? @fn "eval")) @match
+      sanitizers:
+        - |
+          (call
+            function: (identifier) @fn (#eq? @fn "int")) @match
+
+  - id: py/taint-os-system-request
+    language: python
+    dimension: security
+    severity: error
+    message: request.args 可能流入 os.system（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (attribute
+            attribute: (identifier) @attr (#eq? @attr "args")) @match
+      sinks:
+        - |
+          (call
+            function: (attribute
+              attribute: (identifier) @attr (#eq? @attr "system"))) @match
+
+  - id: py/taint-exec-param
+    language: python
+    dimension: security
+    severity: error
+    message: 不可信参数可能流入 exec()（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (function_definition
+            parameters: (parameters (identifier) @match)) @match
+      sinks:
+        - |
+          (call
+            function: (identifier) @fn (#eq? @fn "exec")) @match
+      sanitizers:
+        - |
+          (call
+            function: (identifier) @fn (#eq? @fn "int")) @match

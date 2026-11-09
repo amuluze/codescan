@@ -24,6 +24,7 @@ fn parse_annotations(path: &Path, file_name: &str, source: &str) -> Vec<Expectat
         .unwrap_or_default();
     let marker = comment_marker(extension);
     let mut expected = Vec::new();
+    let mut pending: Vec<String> = Vec::new();
     for (idx, line) in source.lines().enumerate() {
         let trimmed = line.trim_start();
         let after_marker = trimmed
@@ -33,9 +34,17 @@ fn parse_annotations(path: &Path, file_name: &str, source: &str) -> Vec<Expectat
             if let Some(rule_id) = rest.strip_prefix("ruleid:") {
                 let rule_id = rule_id.trim().to_string();
                 if !rule_id.is_empty() {
-                    expected.push((rule_id, file_name.to_string(), idx + 2)); // 标注的下一行
+                    pending.push(rule_id);
                 }
+                continue; // 标注行本身不是目标行
             }
+        }
+        if trimmed.is_empty() {
+            continue; // 空行不消费待定标注
+        }
+        // 连续标注共同指向其后第一个非空且非标注行。
+        for rule_id in pending.drain(..) {
+            expected.push((rule_id, file_name.to_string(), idx + 1));
         }
     }
     expected

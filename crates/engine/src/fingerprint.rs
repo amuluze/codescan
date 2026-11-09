@@ -103,6 +103,7 @@ mod tests {
             match_text: text.into(),
             captures: Vec::new(),
             degraded: false,
+            flows: Vec::new(),
             fingerprint: String::new(),
         }
     }

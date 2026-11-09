@@ -13,6 +13,7 @@ pub mod model;
 pub mod rules;
 pub mod sarif;
 pub mod scan;
+pub mod taint;
 
 pub use model::{
     CancelToken, Dimension, Finding, Position, Progress, ScanError, ScanEvent, ScanReport,

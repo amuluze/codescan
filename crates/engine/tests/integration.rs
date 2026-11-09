@@ -24,8 +24,18 @@ fn build_corpus(root: &std::path::Path) {
         "src/b.py",
         "def calc(x):\n    if x > 1:\n        return x * 2\n    return x\n",
     );
+    // 污点流（过程内 param → eval）。
+    write_file(
+        root,
+        "src/taint.ts",
+        "function run(userInput: string): void {\n  eval(userInput);\n}\n",
+    );
     // 语法错误（容错解析，命中需标 degraded）。
-    write_file(root, "src/broken.ts", "function f( {\n  return 1;\n");
+    write_file(
+        root,
+        "src/broken.ts",
+        "function f( {\n  // TODO: 修复语法错误\n  return 1;\n",
+    );
     // 二进制。
     let bin_path = root.join("assets/blob.bin");
     std::fs::create_dir_all(bin_path.parent().unwrap()).unwrap();
@@ -253,3 +263,34 @@ fn cancelled_scan_returns_error_and_no_partial_report() {
 // 防未使用告警（PathBuf 供扩展用）。
 #[allow(dead_code)]
 fn _unused(_p: PathBuf) {}
+
+/// B4：污点发现携带 source 位置，SARIF properties.flows 一一对应。
+#[test]
+fn b4_sarif_flows() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "s.ts",
+        "function run(userInput: string): void {\n  eval(userInput);\n}\n",
+    );
+    let report = scan_root(dir.path());
+    let taint: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.rule_id == "ts/taint-eval-param")
+        .collect();
+    assert_eq!(taint.len(), 1, "污点规则应恰好命中一次：{:?}", report.findings);
+    assert_eq!(taint[0].span.start.line, 2, "发现 span 应落在 sink 行");
+    assert_eq!(taint[0].flows.len(), 1, "应携带一个 source 位置");
+    assert_eq!(taint[0].flows[0].line, 1, "source 为函数参数行");
+
+    let value = sarif::export(&report);
+    let results = value["runs"][0]["results"].as_array().unwrap();
+    let sarif_taint = results
+        .iter()
+        .find(|r| r["ruleId"] == "ts/taint-eval-param")
+        .expect("SARIF 应包含污点结果");
+    let flows = sarif_taint["properties"]["flows"].as_array().unwrap();
+    assert_eq!(flows.len(), 1);
+    assert_eq!(flows[0]["startLine"].as_u64().unwrap(), 1);
+}

@@ -61,6 +61,9 @@ pub struct Finding {
     /// 容错解析下的命中（Domain §3.2）。
     #[serde(default)]
     pub degraded: bool,
+    /// 污点链证据：sink 对应的 source 位置列表（Domain §4a.4）。非污点发现为空。
+    #[serde(default)]
+    pub flows: Vec<Position>,
     /// Domain §2.3 定义的指纹；同一报告内唯一。
     pub fingerprint: String,
 }

@@ -48,12 +48,13 @@ const finding = (overrides: Partial<Finding>) => ({
   match_text: "eval(x)",
   captures: [],
   degraded: false,
+  flows: [],
   fingerprint: "fp",
   ...overrides,
 });
 
 const findings = [
-  finding({ fingerprint: "fp-1" }),
+  finding({ fingerprint: "fp-1", flows: [{ line: 2, column: 5 }] }),
   finding({
     rule_id: "metric/long",
     dimension: "quality",
@@ -149,5 +150,8 @@ describe("App 主链路", () => {
     // 详情面板。
     await user.click(screen.getByText("src/a.ts:3"));
     expect(screen.getByTestId("match-text")).toHaveTextContent("eval(x)");
+    // B6：污点链渲染（source 位置列表）。
+    const flows = screen.getByTestId("taint-flows");
+    expect(flows.textContent).toContain("第 2 行");
   });
 });

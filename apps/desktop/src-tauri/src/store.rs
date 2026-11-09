@@ -83,7 +83,8 @@ impl Store {
                match_text TEXT NOT NULL,
                captures_json TEXT NOT NULL,
                degraded INTEGER NOT NULL,
-               fingerprint TEXT NOT NULL
+               fingerprint TEXT NOT NULL,
+               flows_json TEXT NOT NULL DEFAULT '[]'
              );
              CREATE INDEX IF NOT EXISTS idx_findings_scan ON findings(scan_id);
              CREATE TABLE IF NOT EXISTS rule_states(
@@ -102,6 +103,11 @@ impl Store {
                baseline_id INTEGER NOT NULL REFERENCES baselines(id) ON DELETE CASCADE
              );",
         )?;
+        // v1→v2 迁移：既有 findings 表补 flows_json 列（已存在则忽略）。
+        let _ = self.conn.execute(
+            "ALTER TABLE findings ADD COLUMN flows_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        );
         Ok(())
     }
 
@@ -124,11 +130,14 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "INSERT INTO findings(scan_id, rule_id, dimension, severity, path,
                 start_line, start_col, end_line, end_col, message, match_text,
-                captures_json, degraded, fingerprint)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                captures_json, degraded, fingerprint, flows_json)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
         )?;
         for f in &report.findings {
             let captures = serde_json::to_string(&f.captures).map_err(|e| {
+                StoreError::Db(rusqlite::Error::ToSqlConversionFailure(e.into()))
+            })?;
+            let flows = serde_json::to_string(&f.flows).map_err(|e| {
                 StoreError::Db(rusqlite::Error::ToSqlConversionFailure(e.into()))
             })?;
             stmt.execute(params![
@@ -146,6 +155,7 @@ impl Store {
                 captures,
                 f.degraded as i64,
                 f.fingerprint,
+                flows,
             ])?;
         }
         Ok(scan_id)
@@ -195,7 +205,7 @@ impl Store {
         }
         let mut stmt = self.conn.prepare(
             "SELECT rule_id, dimension, severity, path, start_line, start_col, end_line, end_col,
-                    message, match_text, captures_json, degraded, fingerprint
+                    message, match_text, captures_json, degraded, fingerprint, flows_json
              FROM findings WHERE scan_id = ?1 ORDER BY rowid",
         )?;
         let rows = stmt.query_map([scan_id], |row| {
@@ -213,6 +223,7 @@ impl Store {
                 captures_json: row.get(10)?,
                 degraded: row.get(11)?,
                 fingerprint: row.get(12)?,
+                flows_json: row.get(13)?,
             })
         })?;
         let mut findings = Vec::new();
@@ -226,6 +237,8 @@ impl Store {
             })?;
             let captures: Vec<(String, String)> =
                 serde_json::from_str(&r.captures_json).unwrap_or_default();
+            let flows: Vec<Position> =
+                serde_json::from_str(&r.flows_json).unwrap_or_default();
             findings.push(Finding {
                 rule_id: r.rule_id,
                 dimension,
@@ -245,6 +258,7 @@ impl Store {
                 match_text: r.match_text,
                 captures,
                 degraded: r.degraded != 0,
+                flows,
                 fingerprint: r.fingerprint,
             });
         }
@@ -380,4 +394,5 @@ struct FindingRow {
     captures_json: String,
     degraded: i64,
     fingerprint: String,
+    flows_json: String,
 }

@@ -230,3 +230,61 @@ rules:
     metavariables:
       - capture: prop
         regex: "^dangerouslySetInnerHTML$"
+
+  # ---------- 污点（v2.1，过程内近似，Domain §4a） ----------
+  - id: ts/taint-eval-param
+    language: typescript
+    dimension: security
+    severity: error
+    message: 不可信参数可能流入 eval()（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (function_declaration
+            parameters: (formal_parameters
+              (required_parameter (identifier) @match))) @match
+      sinks:
+        - |
+          (call_expression
+            function: (identifier) @fn (#eq? @fn "eval")) @match
+      sanitizers:
+        - |
+          (call_expression
+            function: (identifier) @fn (#eq? @fn "parseInt")) @match
+
+  - id: ts/taint-prompt-innerhtml
+    language: typescript
+    dimension: security
+    severity: warning
+    message: 用户输入可能写入 innerHTML（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (call_expression
+            function: (identifier) @fn (#eq? @fn "prompt")) @match
+      sinks:
+        - |
+          (assignment_expression
+            left: (member_expression
+              property: (property_identifier) @prop (#eq? @prop "innerHTML"))) @match
+
+  - id: ts/taint-sql-execute-param
+    language: typescript
+    dimension: security
+    severity: error
+    message: 不可信参数可能流入 SQL execute（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (function_declaration
+            parameters: (formal_parameters
+              (required_parameter (identifier) @match))) @match
+      sinks:
+        - |
+          (call_expression
+            function: (member_expression
+              property: (property_identifier) @prop (#eq? @prop "execute"))) @match
+      sanitizers:
+        - |
+          (call_expression
+            function: (identifier) @fn (#eq? @fn "parseInt")) @match

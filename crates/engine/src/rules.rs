@@ -15,10 +15,19 @@ pub struct RuleSpec {
     pub pattern: Option<String>,
     pub text: Option<String>,
     pub metric: Option<String>,
+    pub taint: Option<TaintSpec>,
     pub options: Vec<(String, f64)>,
     pub filters_not: Vec<String>,
     pub filters_inside: Vec<String>,
     pub metavariables: Vec<(String, String)>,
+}
+
+/// 污点端点声明（Domain §4a）：source/sink 必填，sanitizer 可选，均为该语言 query。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaintSpec {
+    pub sources: Vec<String>,
+    pub sinks: Vec<String>,
+    pub sanitizers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,11 +64,21 @@ struct RawRule {
     #[serde(default)]
     metric: Option<String>,
     #[serde(default)]
+    taint: Option<RawTaint>,
+    #[serde(default)]
     options: std::collections::BTreeMap<String, serde_yaml::Value>,
     #[serde(default)]
     filters: Vec<RawFilter>,
     #[serde(default)]
     metavariables: Vec<RawMetaVar>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawTaint {
+    sources: Vec<String>,
+    sinks: Vec<String>,
+    #[serde(default)]
+    sanitizers: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -158,14 +177,15 @@ pub fn parse_rule_set(yaml: &str) -> Result<Vec<RuleSpec>, Vec<RuleError>> {
             raw_rule.pattern.is_some(),
             raw_rule.text.is_some(),
             raw_rule.metric.is_some(),
+            raw_rule.taint.is_some(),
         ]
         .iter()
         .filter(|b| **b)
         .count();
         if body_kinds != 1 {
             push_error(
-                "pattern|text|metric",
-                "pattern / text / metric 必须且只能提供其一".into(),
+                "pattern|text|metric|taint",
+                "pattern / text / metric / taint 必须且只能提供其一".into(),
             );
         }
         if raw_rule.pattern.is_some() && language == RuleLanguage::All {
@@ -176,6 +196,17 @@ pub fn parse_rule_set(yaml: &str) -> Result<Vec<RuleSpec>, Vec<RuleError>> {
         }
         if raw_rule.metric.is_some() && raw_rule.language != "*" {
             push_error("language", "度量规则 language 必须为 `*`".into());
+        }
+        if let Some(taint) = &raw_rule.taint {
+            if language == RuleLanguage::All {
+                push_error("language", "污点规则不允许 `*`，必须指定具体语言".into());
+            }
+            if taint.sources.is_empty() {
+                push_error("taint.sources", "污点规则至少需要一个 source".into());
+            }
+            if taint.sinks.is_empty() {
+                push_error("taint.sinks", "污点规则至少需要一个 sink".into());
+            }
         }
 
         let mut filters_not = Vec::new();
@@ -207,6 +238,11 @@ pub fn parse_rule_set(yaml: &str) -> Result<Vec<RuleSpec>, Vec<RuleError>> {
             pattern: raw_rule.pattern,
             text: raw_rule.text,
             metric: raw_rule.metric,
+            taint: raw_rule.taint.map(|t| TaintSpec {
+                sources: t.sources,
+                sinks: t.sinks,
+                sanitizers: t.sanitizers,
+            }),
             options,
             filters_not,
             filters_inside,
