@@ -1,6 +1,7 @@
 //! Codescan 桌面应用壳：业务在 codescan-engine 与 store/manager（均无头可测）。
 
 pub mod commands;
+pub mod llm;
 pub mod manager;
 pub mod store;
 
@@ -37,6 +38,13 @@ pub fn run() {
             commands::gate_diff,
             commands::baseline_info,
             commands::export_sarif,
+            commands::set_provider_config,
+            commands::get_provider_config,
+            commands::set_api_key,
+            commands::clear_api_key,
+            commands::llm_triage,
+            commands::llm_generate_rule,
+            commands::save_custom_rule,
         ])
         .manage(AppState {
             manager: manager::ScanManager::new(store.clone()),

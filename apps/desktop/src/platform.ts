@@ -37,6 +37,24 @@ export type ScanSummary = {
 
 export type BaselineInfo = { engine_version: string; entries: number };
 
+export type ProviderInfo = {
+  kind: "openai" | "anthropic";
+  base_url: string;
+  model: string;
+  has_key: boolean;
+};
+
+export type TriageResult = {
+  assessment: "true-positive" | "likely-false-positive" | "uncertain";
+  rationale: string;
+};
+
+export type CandidateRule = {
+  yaml: string;
+  valid: boolean;
+  errors: string[];
+};
+
 export const platform = {
   invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     return tauriInvoke<T>(cmd, args);
@@ -79,6 +97,17 @@ export const api = {
   baselineInfo: () => platform.invoke<BaselineInfo | null>("baseline_info"),
   exportSarif: (scanId: number, dest: string) =>
     platform.invoke<void>("export_sarif", { scanId, dest }),
+  getProviderConfig: () => platform.invoke<ProviderInfo>("get_provider_config"),
+  setProviderConfig: (kind: string, baseUrl: string, model: string) =>
+    platform.invoke<void>("set_provider_config", { kind, baseUrl, model }),
+  setApiKey: (key: string) => platform.invoke<void>("set_api_key", { key }),
+  clearApiKey: () => platform.invoke<void>("clear_api_key"),
+  llmTriage: (scanId: number, fingerprint: string) =>
+    platform.invoke<TriageResult>("llm_triage", { scanId, fingerprint }),
+  llmGenerateRule: (scanId: number, fingerprint: string) =>
+    platform.invoke<CandidateRule>("llm_generate_rule", { scanId, fingerprint }),
+  saveCustomRule: (yaml: string) =>
+    platform.invoke<void>("save_custom_rule", { yaml }),
 };
 
 export type { Finding };

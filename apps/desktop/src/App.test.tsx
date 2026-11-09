@@ -34,6 +34,16 @@ vi.mock("./platform", () => {
     baselineInfo: () => platform.invoke("baseline_info"),
     exportSarif: (scanId: number, dest: string) =>
       platform.invoke("export_sarif", { scanId, dest }),
+    getProviderConfig: () => platform.invoke("get_provider_config"),
+    setProviderConfig: (kind: string, baseUrl: string, model: string) =>
+      platform.invoke("set_provider_config", { kind, baseUrl, model }),
+    setApiKey: (key: string) => platform.invoke("set_api_key", { key }),
+    clearApiKey: () => platform.invoke("clear_api_key"),
+    llmTriage: (scanId: number, fingerprint: string) =>
+      platform.invoke("llm_triage", { scanId, fingerprint }),
+    llmGenerateRule: (scanId: number, fingerprint: string) =>
+      platform.invoke("llm_generate_rule", { scanId, fingerprint }),
+    saveCustomRule: (yaml: string) => platform.invoke("save_custom_rule", { yaml }),
   };
   return { platform, api };
 });
@@ -89,6 +99,24 @@ beforeEach(() => {
         return null;
       case "get_scan":
         return findings;
+      case "get_provider_config":
+        return {
+          kind: "openai",
+          base_url: "https://api.openai.com/v1",
+          model: "test-model",
+          has_key: true,
+        };
+      case "llm_triage":
+        return {
+          assessment: "likely-false-positive",
+          rationale: "静态字符串，未流入危险汇聚点",
+        };
+      case "llm_generate_rule":
+        return {
+          yaml: "rules:\n  - id: custom/no-eval-param\n    language: typescript\n    dimension: security\n    severity: warning\n    message: m\n    pattern: |\n      (return_statement) @match\n",
+          valid: true,
+          errors: [],
+        };
       default:
         return null;
     }
@@ -110,6 +138,65 @@ describe("App 主链路", () => {
       expect(invokeMock).toHaveBeenCalledWith("set_rule_enabled", {
         ruleId: "ts/no-eval",
         enabled: false,
+      });
+    });
+  });
+
+  it("设置页加载并保存 Provider 配置，密钥状态可见", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("get_provider_config");
+    });
+    expect(screen.getByTestId("key-status")).toHaveTextContent("已配置");
+    const model = screen.getByLabelText("Model") as HTMLInputElement;
+    await waitFor(() => expect(model.value).toBe("test-model"));
+
+    await user.clear(model);
+    await user.type(model, "new-model");
+    await user.click(screen.getByRole("button", { name: "保存 Provider 配置" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("set_provider_config", {
+        kind: "openai",
+        baseUrl: "https://api.openai.com/v1",
+        model: "new-model",
+      });
+    });
+  });
+
+  it("分诊面板标注非确定性参考，候选规则可保存", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "选择工作区" }));
+    await user.click(screen.getByRole("button", { name: "开始扫描" }));
+    const finished = listeners.get("scan://finished");
+    await act(async () => {
+      finished!({ scanId: 7, stats: { files_scanned: 1 } });
+    });
+    await user.click(screen.getByRole("button", { name: "发现" }));
+    await user.click(await screen.findByText("src/a.ts:3"));
+
+    // 纪律标注始终可见。
+    expect(screen.getByText(/非确定性参考 · 不参与门禁/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "LLM 分诊" }));
+    const triage = await screen.findByTestId("triage-result");
+    expect(triage.textContent).toContain("likely-false-positive");
+    expect(invokeMock).toHaveBeenCalledWith("llm_triage", {
+      scanId: 7,
+      fingerprint: "fp-1",
+    });
+
+    await user.click(screen.getByRole("button", { name: "生成候选规则" }));
+    const candidate = await screen.findByTestId("candidate-rule");
+    expect(candidate.textContent).toContain("校验通过");
+    await user.click(screen.getByRole("button", { name: "保存为自定义规则" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("save_custom_rule", {
+        yaml: expect.stringContaining("custom/no-eval-param"),
       });
     });
   });

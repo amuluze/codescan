@@ -3,14 +3,16 @@ import { ScanView } from "./components/ScanView";
 import { FindingsView } from "./components/FindingsView";
 import { RulesView } from "./components/RulesView";
 import { HistoryView } from "./components/HistoryView";
+import { SettingsView } from "./components/SettingsView";
 
-type Tab = "scan" | "findings" | "rules" | "history";
+type Tab = "scan" | "findings" | "rules" | "history" | "settings";
 
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: "scan", label: "扫描" },
   { id: "findings", label: "发现" },
   { id: "rules", label: "规则" },
   { id: "history", label: "历史" },
+  { id: "settings", label: "设置" },
 ];
 
 export function App() {
@@ -33,6 +35,7 @@ export function App() {
       {tab === "findings" && <FindingsView />}
       {tab === "rules" && <RulesView />}
       {tab === "history" && <HistoryView />}
+      {tab === "settings" && <SettingsView />}
     </main>
   );
 }

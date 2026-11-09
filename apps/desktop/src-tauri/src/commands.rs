@@ -219,3 +219,207 @@ pub fn export_sarif(state: State<'_, AppState>, scan_id: i64, dest: String) -> R
     let content = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
     std::fs::write(dest, content).map_err(|e| e.to_string())
 }
+
+// ---------- v3：LLM 辅助层（Domain §3a） ----------
+
+use crate::llm;
+
+#[derive(Serialize)]
+pub struct ProviderInfo {
+    pub kind: String,
+    pub base_url: String,
+    pub model: String,
+    pub has_key: bool,
+}
+
+fn read_provider_config(store: &Store) -> llm::ProviderConfig {
+    store
+        .get_meta(llm::META_PROVIDER)
+        .ok()
+        .flatten()
+        .and_then(|json| llm::ProviderConfig::from_json(&json).ok())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub fn set_provider_config(
+    state: State<'_, AppState>,
+    kind: String,
+    base_url: String,
+    model: String,
+) -> Result<(), String> {
+    let kind = match kind.as_str() {
+        "openai" => llm::ProviderKind::OpenAi,
+        "anthropic" => llm::ProviderKind::Anthropic,
+        other => return Err(format!("不支持的 provider kind：{other}")),
+    };
+    let config = llm::ProviderConfig {
+        kind,
+        base_url: base_url.trim().to_string(),
+        model: model.trim().to_string(),
+    };
+    config.validate()?;
+    state
+        .store
+        .lock()
+        .unwrap()
+        .set_meta(llm::META_PROVIDER, &config.to_json())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_provider_config(state: State<'_, AppState>) -> Result<ProviderInfo, String> {
+    let store = state.store.lock().unwrap();
+    let config = read_provider_config(&store);
+    let has_key = store
+        .has_secret(llm::SECRET_API_KEY)
+        .map_err(|e| e.to_string())?;
+    Ok(ProviderInfo {
+        kind: match config.kind {
+            llm::ProviderKind::OpenAi => "openai".into(),
+            llm::ProviderKind::Anthropic => "anthropic".into(),
+        },
+        base_url: config.base_url,
+        model: config.model,
+        has_key,
+    })
+}
+
+#[tauri::command]
+pub fn set_api_key(state: State<'_, AppState>, key: String) -> Result<(), String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("API Key 不能为空".into());
+    }
+    state
+        .store
+        .lock()
+        .unwrap()
+        .set_secret(llm::SECRET_API_KEY, key)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn clear_api_key(state: State<'_, AppState>) -> Result<(), String> {
+    state
+        .store
+        .lock()
+        .unwrap()
+        .delete_secret(llm::SECRET_API_KEY)
+        .map_err(|e| e.to_string())
+}
+
+/// 读取一次 LLM 调用所需的全部上下文；Key 只在 Rust 内存中短暂存在。
+/// 与 Tauri State 解耦（无头测试覆盖 C2/C7 的错误路径）。
+pub fn prepare_llm_call(
+    store: &Store,
+    custom_rules_yaml: Option<&str>,
+    scan_id: i64,
+    fingerprint: &str,
+) -> Result<(llm::ProviderConfig, String, llm::FindingContext), String> {
+    let config = read_provider_config(store);
+    config.validate()?;
+    let key = store
+        .get_secret(llm::SECRET_API_KEY)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "未配置 API Key".to_string())?;
+    let findings = store.get_findings(scan_id).map_err(|e| e.to_string())?;
+    let finding = findings
+        .iter()
+        .find(|f| f.fingerprint == fingerprint)
+        .ok_or_else(|| "未找到该发现".to_string())?;
+
+    let engine = Engine::with_rules(custom_rules_yaml, &HashSet::new())
+        .map_err(|errs| errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))?;
+    let catalog = engine.rule_catalog();
+    let entry = catalog.iter().find(|(id, ..)| id == &finding.rule_id);
+    let (language, dimension, severity, rule_source) = match entry {
+        Some((_, language, dimension, severity, _, source)) => (
+            language.clone(),
+            dimension.clone(),
+            severity.clone(),
+            source.clone(),
+        ),
+        None => (
+            "*".to_string(),
+            serde_json::to_string(&finding.dimension).unwrap_or_default(),
+            serde_json::to_string(&finding.severity).unwrap_or_default(),
+            String::new(),
+        ),
+    };
+    let dimension = dimension.trim_matches('"').to_string();
+    let severity = severity.trim_matches('"').to_string();
+    Ok((
+        config,
+        key,
+        llm::FindingContext {
+            rule_id: finding.rule_id.clone(),
+            language,
+            dimension,
+            severity,
+            message: finding.message.clone(),
+            path: finding.path.clone(),
+            line: finding.span.start.line,
+            match_text: finding.match_text.clone(),
+            rule_source,
+        },
+    ))
+}
+
+#[tauri::command]
+pub async fn llm_triage(
+    state: State<'_, AppState>,
+    scan_id: i64,
+    fingerprint: String,
+) -> Result<llm::TriageResult, String> {
+    let custom = read_custom_rules();
+    let (config, key, context) = {
+        let store = state.store.lock().unwrap();
+        prepare_llm_call(&store, custom.as_deref(), scan_id, &fingerprint)?
+    };
+    let (system, user) = llm::triage_prompt(&context);
+    let reply = llm::complete(&config, &key, &system, &user).await?;
+    llm::parse_triage(&reply)
+}
+
+#[tauri::command]
+pub async fn llm_generate_rule(
+    state: State<'_, AppState>,
+    scan_id: i64,
+    fingerprint: String,
+) -> Result<llm::CandidateRule, String> {
+    let custom = read_custom_rules();
+    let (config, key, context) = {
+        let store = state.store.lock().unwrap();
+        prepare_llm_call(&store, custom.as_deref(), scan_id, &fingerprint)?
+    };
+    let (system, user) = llm::candidate_prompt(&context);
+    let reply = llm::complete(&config, &key, &system, &user).await?;
+    match llm::extract_rule_yaml(&reply) {
+        Ok(yaml) => {
+            let errors = llm::validate_candidate(&yaml);
+            Ok(llm::CandidateRule {
+                valid: errors.is_empty(),
+                errors,
+                yaml,
+            })
+        }
+        Err(e) => Ok(llm::CandidateRule {
+            yaml: reply,
+            valid: false,
+            errors: vec![e],
+        }),
+    }
+}
+
+#[tauri::command]
+pub fn save_custom_rule(state: State<'_, AppState>, yaml: String) -> Result<(), String> {
+    let _ = &state;
+    let existing = std::fs::read_to_string(custom_rules_path()).ok();
+    let merged = llm::merge_custom_rules(existing.as_deref(), &yaml)
+        .map_err(|errs| errs.join("\n"))?;
+    if let Some(parent) = custom_rules_path().parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(custom_rules_path(), merged).map_err(|e| e.to_string())
+}

@@ -101,6 +101,14 @@ impl Store {
              CREATE TABLE IF NOT EXISTS active_baseline(
                key INTEGER PRIMARY KEY CHECK(key = 1),
                baseline_id INTEGER NOT NULL REFERENCES baselines(id) ON DELETE CASCADE
+             );
+             CREATE TABLE IF NOT EXISTS secrets(
+               key TEXT PRIMARY KEY,
+               value TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS meta(
+               key TEXT PRIMARY KEY,
+               value TEXT NOT NULL
              );",
         )?;
         // v1→v2 迁移：既有 findings 表补 flows_json 列（已存在则忽略）。
@@ -360,6 +368,58 @@ impl Store {
             }
             None => Ok(None),
         }
+    }
+
+    /// 密钥写入/删除/状态（Domain §3a）。明文读取仅在 Rust 内部使用，
+    /// 不暴露为命令。
+    pub fn set_secret(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO secrets(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_secret(&self, key: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM secrets WHERE key = ?1", [key])?;
+        Ok(())
+    }
+
+    pub fn has_secret(&self, key: &str) -> Result<bool> {
+        let found: bool = self
+            .conn
+            .query_row("SELECT 1 FROM secrets WHERE key = ?1", [key], |_| Ok(true))
+            .optional()?
+            .unwrap_or(false);
+        Ok(found)
+    }
+
+    /// Rust 内部读取（命令面禁止暴露）。
+    pub fn get_secret(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM secrets WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()?)
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meta(key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_meta(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| row.get(0))
+            .optional()?)
     }
 
     /// 门禁差异：该扫描中不在当前基线内的发现。

@@ -43,6 +43,10 @@ npm run tauri dev        # 桌面应用（开发模式）
 
 规则编写与 fixture 规范见 [docs/rules.md](docs/rules.md)。
 
+## LLM 辅助层（v3）
+
+设置页配置 OpenAI/Anthropic 兼容 Provider（BYO Key，密钥仅存本地 SQLite secrets 表）。发现详情支持「LLM 分诊」（参考，不参与门禁）与「生成候选规则」（经编译校验、显式保存后写入自定义规则并影响后续扫描）。详见 [docs/llm.md](docs/llm.md)。
+
 ## 门禁语义
 
 任意历史扫描可设为基线；门禁差异 = 新扫描发现 \ 基线（仅指纹相等性）。指纹对行号漂移稳定，实体代码变更即视为新发现。SARIF 2.1.0 导出与内部发现一一对应。详见 Domain Spec。

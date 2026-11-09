@@ -149,3 +149,110 @@ fn successful_scan_persists() {
         .any(|f| f.rule_id == "text/todo-debt"));
     assert_eq!(store.lock().unwrap().list_scans().unwrap().len(), 1);
 }
+
+// ---------- v3：LLM 辅助层（Domain §3a） ----------
+
+use codescan_lib::commands::prepare_llm_call;
+use codescan_lib::llm;
+
+#[test]
+fn c1_secrets_boundary_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("test.db");
+    let store = Store::open(&db).unwrap();
+    assert!(!store.has_secret(llm::SECRET_API_KEY).unwrap());
+
+    store.set_secret(llm::SECRET_API_KEY, "sk-secret").unwrap();
+    assert!(store.has_secret(llm::SECRET_API_KEY).unwrap());
+    // Rust 内部可读；命令面只暴露 has_secret（结构保证，见 commands.rs）。
+    assert_eq!(
+        store.get_secret(llm::SECRET_API_KEY).unwrap().as_deref(),
+        Some("sk-secret")
+    );
+
+    store.delete_secret(llm::SECRET_API_KEY).unwrap();
+    assert!(!store.has_secret(llm::SECRET_API_KEY).unwrap());
+
+    // 持久化跨连接。
+    store.set_secret(llm::SECRET_API_KEY, "sk-2").unwrap();
+    drop(store);
+    let store2 = Store::open(&db).unwrap();
+    assert!(store2.has_secret(llm::SECRET_API_KEY).unwrap());
+}
+
+#[test]
+fn c2_provider_config_roundtrip_and_missing_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("test.db")).unwrap();
+    let config = llm::ProviderConfig {
+        kind: llm::ProviderKind::Anthropic,
+        base_url: "https://api.anthropic.com".into(),
+        model: "claude-x".into(),
+    };
+    store.set_meta(llm::META_PROVIDER, &config.to_json()).unwrap();
+    let loaded = llm::ProviderConfig::from_json(
+        &store.get_meta(llm::META_PROVIDER).unwrap().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(loaded, config);
+
+    // 无密钥 → 可读错误，且不发起任何请求（错误在 prepare 阶段返回）。
+    let scan_id = store
+        .insert_scan("/tmp/ws", &report(vec![finding("r/a", "a.ts", 1, "fp-a")]), 1, 1)
+        .unwrap();
+    let err = prepare_llm_call(&store, None, scan_id, "fp-a").unwrap_err();
+    assert!(err.contains("API Key"), "错误应提示未配置密钥：{err}");
+    assert!(!err.contains("sk-"), "错误不得包含密钥");
+
+    // 缺 finding / 非法配置同样在 prepare 阶段被拒。
+    store.set_secret(llm::SECRET_API_KEY, "sk-test").unwrap();
+    assert!(prepare_llm_call(&store, None, scan_id, "missing-fp").is_err());
+    store
+        .set_meta(
+            llm::META_PROVIDER,
+            &llm::ProviderConfig {
+                kind: llm::ProviderKind::OpenAi,
+                base_url: "https://api.openai.com/v1".into(),
+                model: String::new(),
+            }
+            .to_json(),
+        )
+        .unwrap();
+    assert!(prepare_llm_call(&store, None, scan_id, "fp-a").is_err());
+}
+
+#[test]
+fn c7_llm_failure_is_recoverable() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("test.db")).unwrap();
+    let scan_id = store
+        .insert_scan("/tmp/ws", &report(vec![finding("r/a", "a.ts", 1, "fp-a")]), 1, 1)
+        .unwrap();
+    store.set_secret(llm::SECRET_API_KEY, "sk-test").unwrap();
+    store
+        .set_meta(
+            llm::META_PROVIDER,
+            &llm::ProviderConfig {
+                kind: llm::ProviderKind::OpenAi,
+                // 指向必拒绝的本地端口，验证网络错误可恢复且不 panic。
+                base_url: "http://127.0.0.1:9/v1".into(),
+                model: "m".into(),
+            }
+            .to_json(),
+        )
+        .unwrap();
+
+    let (config, key, context) = prepare_llm_call(&store, None, scan_id, "fp-a").unwrap();
+    let (system, user) = llm::triage_prompt(&context);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let result = runtime.block_on(llm::complete(&config, &key, &system, &user));
+    assert!(result.is_err(), "网络失败应返回错误：{result:?}");
+    let err = result.err().unwrap();
+    assert!(!err.contains("sk-test"), "错误不得包含密钥：{err}");
+    // 存储与基线不受影响。
+    assert_eq!(store.list_scans().unwrap().len(), 1);
+    assert!(store.current_baseline().unwrap().is_none());
+}

@@ -1,6 +1,7 @@
 /** 发现页：过滤 + 列表 + 详情（命中文本与捕获）。 */
 import { useMemo } from "react";
 import { filteredFindings, useScanStore } from "../stores/scanStore";
+import { useLlmStore } from "../stores/llmStore";
 import type { Finding } from "../types";
 
 const DIMENSIONS: Array<"all" | Finding["dimension"]> = [
@@ -15,6 +16,8 @@ export function FindingsView() {
   const state = useScanStore();
   const { filter, selected, select, setFilter } = state;
   const shown = useMemo(() => filteredFindings(state), [state]);
+  const { triage, candidates, errors, runTriage, generateRule, saveRule } = useLlmStore();
+  const scanId = state.lastScanId;
 
   return (
     <section className="findings-view" aria-label="发现">
@@ -89,6 +92,80 @@ export function FindingsView() {
                 ))}
               </dl>
             )}
+            <div className="llm-panel">
+              <div className="row">
+                <button
+                  disabled={!scanId || triage[selected.fingerprint] === "loading"}
+                  onClick={() => scanId && void runTriage(scanId, selected.fingerprint)}
+                >
+                  LLM 分诊
+                </button>
+                <button
+                  disabled={!scanId || candidates[selected.fingerprint] === "loading"}
+                  onClick={() => scanId && void generateRule(scanId, selected.fingerprint)}
+                >
+                  生成候选规则
+                </button>
+              </div>
+              <p className="muted llm-discipline">
+                非确定性参考 · 不参与门禁与基线；仅保存为确定性规则后才影响后续扫描
+              </p>
+              {errors[selected.fingerprint] && (
+                <p role="alert">{errors[selected.fingerprint]}</p>
+              )}
+              {triage[selected.fingerprint] === "loading" && <p className="muted">分诊中…</p>}
+              {triage[selected.fingerprint] &&
+                triage[selected.fingerprint] !== "loading" && (
+                  <div data-testid="triage-result">
+                    <h4>分诊建议（参考）</h4>
+                    <p>
+                      {(() => {
+                        const t = triage[selected.fingerprint];
+                        return t && t !== "loading" ? t.assessment : "";
+                      })()}
+                    </p>
+                    <p className="muted">
+                      {(() => {
+                        const t = triage[selected.fingerprint];
+                        return t && t !== "loading" ? t.rationale : "";
+                      })()}
+                    </p>
+                  </div>
+                )}
+              {candidates[selected.fingerprint] === "loading" && (
+                <p className="muted">生成候选规则中…</p>
+              )}
+              {candidates[selected.fingerprint] &&
+                candidates[selected.fingerprint] !== "loading" && (
+                  <div data-testid="candidate-rule">
+                    {(() => {
+                      const c = candidates[selected.fingerprint];
+                      if (!c || c === "loading") return null;
+                      return (
+                        <>
+                          <h4>候选规则（{c.valid ? "校验通过" : "校验未通过"}）</h4>
+                          {!c.valid && (
+                            <ul className="errors">
+                              {c.errors.map((e) => (
+                                <li key={e}>{e}</li>
+                              ))}
+                            </ul>
+                          )}
+                          <pre className="rule-yaml">
+                            <code>{c.yaml}</code>
+                          </pre>
+                          <button
+                            disabled={!c.valid}
+                            onClick={() => void saveRule(selected.fingerprint, c.yaml)}
+                          >
+                            保存为自定义规则
+                          </button>
+                        </>
+                      );
+                    })()}
+                  </div>
+                )}
+            </div>
             {selected.flows.length > 0 && (
               <div data-testid="taint-flows">
                 <h4>污点来源（过程内近似）</h4>
