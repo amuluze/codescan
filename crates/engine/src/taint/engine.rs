@@ -28,6 +28,8 @@ struct Project<'a> {
     rule: &'a TaintRule,
     files: &'a [FileFacts],
     globals: Vec<GlobalFn>,
+    /// (module, name) → 全局函数 id（含 Java class_id 键）。
+    module_index: HashMap<(String, String), Vec<usize>>,
     /// 每文件：本地名 → 全局函数 id（本地 + 显式导入 + Go 同包）。
     resolution: Vec<HashMap<String, Vec<usize>>>,
     summaries: Vec<Summary>,
@@ -44,6 +46,33 @@ impl<'a> Project<'a> {
             .get(name)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// 调用解析：限定者优先（Java `Class.method` / Rust 模块路径），否则裸名。
+    fn resolve_call(&self, file_idx: usize, call: &CallFact) -> Vec<usize> {
+        if let Some(qualifier) = &call.qualifier {
+            let key = format!("{qualifier}.{}", call.name);
+            if let Some(gids) = self.resolution[file_idx].get(&key) {
+                return gids.clone();
+            }
+            let file = &self.files[file_idx];
+            if file.lang == crate::language::Language::Rust {
+                let mut out = Vec::new();
+                for module in super::facts::rust_qualifier_candidates(&file.path, qualifier) {
+                    if let Some(gids) =
+                        self.module_index.get(&(module, call.name.clone()))
+                    {
+                        out.extend(gids.iter().copied());
+                    }
+                }
+                if !out.is_empty() {
+                    out.sort_unstable();
+                    out.dedup();
+                    return out;
+                }
+            }
+        }
+        self.resolve(file_idx, &call.name)
     }
 
     fn analyze(&mut self) -> Vec<Finding> {
@@ -196,7 +225,7 @@ impl<'a> Project<'a> {
             if call.sanitized {
                 continue;
             }
-            let targets = self.resolve(file_idx, &call.name);
+            let targets = self.resolve_call(file_idx, &call);
             if targets.is_empty() {
                 continue;
             }
@@ -581,6 +610,12 @@ pub fn analyze_project(rule: &TaintRule, files: &[FileFacts]) -> Vec<Finding> {
                     .entry((file.module_id.clone(), name.clone()))
                     .or_default()
                     .push(gid);
+                if let Some(class_id) = &file.class_id {
+                    module_index
+                        .entry((class_id.clone(), name.clone()))
+                        .or_default()
+                        .push(gid);
+                }
             }
         }
     }
@@ -607,9 +642,26 @@ pub fn analyze_project(rule: &TaintRule, files: &[FileFacts]) -> Vec<Finding> {
         }
         // 显式导入。
         for import in &file.imports {
+            let mut plain_added = false;
             for module in &import.modules {
                 if let Some(gids) = module_index.get(&(module.clone(), import.exported.clone())) {
                     map.entry(import.local.clone()).or_default().extend(gids);
+                    plain_added = true;
+                }
+            }
+            // Java 类导入：为类内每个方法登记限定键 "Class.method"。
+            if file.lang == crate::language::Language::Java && !plain_added {
+                for module in &import.modules {
+                    let methods: Vec<(String, Vec<usize>)> = module_index
+                        .iter()
+                        .filter(|((m, _), _)| m == module)
+                        .map(|((_, name), gids)| (name.clone(), gids.clone()))
+                        .collect();
+                    for (name, gids) in methods {
+                        map.entry(format!("{}.{}", import.local, name))
+                            .or_default()
+                            .extend(gids);
+                    }
                 }
             }
         }
@@ -624,6 +676,7 @@ pub fn analyze_project(rule: &TaintRule, files: &[FileFacts]) -> Vec<Finding> {
         rule,
         files,
         globals,
+        module_index,
         resolution,
         summaries: Vec::new(),
     };

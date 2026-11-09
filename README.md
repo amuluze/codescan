@@ -9,7 +9,7 @@
 - v1 规格与验收：[.specs/tasks/codescan-desktop-v1.md](.specs/tasks/codescan-desktop-v1.md)
 - 实施路径：[.plans/codescan-desktop-v1.md](.plans/codescan-desktop-v1.md)
 
-关键取舍（已确认）：复刻 axiom 技术栈（Tauri 2 + React 19 + Rust/SQLite）；引擎自研而非编排外部工具；确定性规则 + 质量度量为基线，污点分析支持显式导入的跨文件（TS/JS/Python/Go 同包）与字段/对象组近似（v5，Java/Rust 跨文件与全量 points-to 明确排除），LLM 仅作分诊/候选规则辅助且永不进门禁。
+关键取舍（已确认）：复刻 axiom 技术栈（Tauri 2 + React 19 + Rust/SQLite）；引擎自研而非编排外部工具；确定性规则 + 质量度量为基线，污点分析支持显式导入的跨文件（TS/JS、Python、Go 同包、Java 类/静态导入、Rust use 路径）与字段/对象组近似（v5.2，Java 实例方法、Rust 外部 crate 与全量 points-to 明确排除），LLM 仅作分诊/候选规则辅助且永不进门禁。
 
 ## 结构
 

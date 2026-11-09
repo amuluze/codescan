@@ -171,6 +171,16 @@ mod tests {
         build_rule(&yaml)
     }
 
+    fn java_rule() -> TaintRule {
+        let yaml = "rules:\n  - id: probe/java\n    language: java\n    dimension: security\n    severity: error\n    message: m\n    taint:\n      sources:\n        - |\n          (method_declaration\n            parameters: (formal_parameters\n              (formal_parameter name: (identifier) @match))) @match\n      sinks:\n        - |\n          (method_invocation\n            name: (identifier) @fn (#eq? @fn \"eval\")) @match\n";
+        build_rule(yaml)
+    }
+
+    fn rust_rule() -> TaintRule {
+        let yaml = "rules:\n  - id: probe/rust\n    language: rust\n    dimension: security\n    severity: error\n    message: m\n    taint:\n      sources:\n        - |\n          (function_item\n            parameters: (parameters\n              (parameter pattern: (identifier) @match))) @match\n      sinks:\n        - |\n          (call_expression\n            function: (identifier) @fn (#eq? @fn \"eval\")) @match\n";
+        build_rule(yaml)
+    }
+
     fn go_rule() -> TaintRule {
         let yaml = "rules:\n  - id: probe/go\n    language: go\n    dimension: security\n    severity: error\n    message: m\n    taint:\n      sources:\n        - |\n          (function_declaration\n            parameters: (parameter_list\n              (parameter_declaration name: (identifier) @match))) @match\n      sinks:\n        - |\n          (call_expression\n            function: (identifier) @fn (#eq? @fn \"sink\")) @match\n";
         build_rule(yaml)
@@ -346,6 +356,92 @@ mod tests {
         );
     }
 
+    // ---- v5.2：Java / Rust 跨文件 ----
+
+    #[test]
+    fn h1_java_class_import_qualified_call() {
+        let rule = java_rule();
+        let utils = "package a;\n\nclass Utils {\n  static void run(String code) {\n    eval(code);\n  }\n}\n";
+        let entry = "package b;\n\nimport a.Utils;\n\nclass Entry {\n  static void entry(String userInput) {\n    Utils.run(userInput);\n  }\n}\n";
+        let findings = analyze(
+            &rule,
+            &[("a/Utils.java", Language::Java, utils), ("b/Entry.java", Language::Java, entry)],
+        );
+        let sink = findings
+            .iter()
+            .find(|f| f.path == "a/Utils.java" && f.span.start.line == 5)
+            .expect("Java 类导入跨文件命中");
+        assert!(sink.flows.iter().any(|p| p.line == 6), "{:?}", sink.flows);
+    }
+
+    #[test]
+    fn h2_java_static_import_bare_call() {
+        let rule = java_rule();
+        let utils = "package a;\n\nclass Utils {\n  static void run(String code) {\n    eval(code);\n  }\n}\n";
+        let entry = "package b;\n\nimport static a.Utils.run;\n\nclass Entry {\n  static void entry(String userInput) {\n    run(userInput);\n  }\n}\n";
+        let findings = analyze(
+            &rule,
+            &[("a/Utils.java", Language::Java, utils), ("b/Entry.java", Language::Java, entry)],
+        );
+        let sink = findings
+            .iter()
+            .find(|f| f.path == "a/Utils.java" && f.span.start.line == 5)
+            .expect("静态导入跨文件命中");
+        assert!(sink.flows.iter().any(|p| p.line == 6), "{:?}", sink.flows);
+    }
+
+    #[test]
+    fn h1_negative_java_without_import() {
+        let rule = java_rule();
+        let utils = "package a;\n\nclass Utils {\n  static void run(String code) {\n    eval(code);\n  }\n}\n";
+        let entry = "package b;\n\nclass Entry {\n\n  // 无 import\n\n  static void entry(String userInput) {\n    Utils.run(userInput);\n  }\n}\n";
+        let findings = analyze(
+            &rule,
+            &[("a/Utils.java", Language::Java, utils), ("b/Entry.java", Language::Java, entry)],
+        );
+        let sink = findings
+            .iter()
+            .find(|f| f.path == "a/Utils.java" && f.span.start.line == 5)
+            .expect("Utils 自身参数命中");
+        assert!(
+            !sink.flows.iter().any(|p| p.line == 7),
+            "无 import 不应引入 Entry 流：{:?}",
+            sink.flows
+        );
+    }
+
+    #[test]
+    fn h3_rust_use_import_and_alias() {
+        let rule = rust_rule();
+        let util = "pub fn run(code: &str) {\n    eval(code);\n}\n";
+        let lib = "use crate::util::run as r;\n\npub fn entry(v: &str) {\n    r(v);\n}\n";
+        let findings = analyze(
+            &rule,
+            &[("src/lib.rs", Language::Rust, lib), ("src/util.rs", Language::Rust, util)],
+        );
+        let sink = findings
+            .iter()
+            .find(|f| f.path == "src/util.rs" && f.span.start.line == 2)
+            .expect("Rust use 别名跨文件命中");
+        assert!(sink.flows.iter().any(|p| p.line == 3), "{:?}", sink.flows);
+    }
+
+    #[test]
+    fn h4_rust_qualified_call() {
+        let rule = rust_rule();
+        let util = "pub fn run(code: &str) {\n    eval(code);\n}\n";
+        let lib = "pub fn entry(v: &str) {\n    crate::util::run(v);\n}\n";
+        let findings = analyze(
+            &rule,
+            &[("src/lib.rs", Language::Rust, lib), ("src/util.rs", Language::Rust, util)],
+        );
+        let sink = findings
+            .iter()
+            .find(|f| f.path == "src/util.rs" && f.span.start.line == 2)
+            .expect("Rust 限定调用命中");
+        assert!(sink.flows.iter().any(|p| p.line == 1), "{:?}", sink.flows);
+    }
+
     // ---- v5：字段敏感与堆别名 ----
 
     const TS_READ_SOURCE: &str = "(call_expression\n            function: (identifier) @fn (#eq? @fn \"read\")) @match";
@@ -395,3 +491,4 @@ mod tests {
         assert!(!lines.contains(&4), "int() 清洗后 eval(w) 不应命中");
     }
 }
+

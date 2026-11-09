@@ -57,6 +57,8 @@ pub struct ExprFact {
 #[derive(Debug, Clone, Default)]
 pub struct CallFact {
     pub name: String,
+    /// 限定者：Java 类名 / Rust `crate::…` 路径 / 成员调用的裸标识符接收者。
+    pub qualifier: Option<String>,
     pub args: Vec<ExprFact>,
     pub sanitized: bool,
 }
@@ -105,6 +107,8 @@ pub struct FileFacts {
     pub path: String,
     pub lang: Language,
     pub module_id: String,
+    /// Java：`package` 声明 + 文件名（`a/b/C`），用于类导入解析。
+    pub class_id: Option<String>,
     pub imports: Vec<ImportFact>,
     pub functions: Vec<FnFact>,
     pub degraded: bool,
@@ -121,14 +125,17 @@ pub fn module_id(lang: Language, path: &str) -> String {
         | Language::Tsx
         | Language::JavaScript
         | Language::Jsx
-        | Language::Python => strip_extension(&normalized),
-        _ => normalized,
+        | Language::Python
+        | Language::Java
+        | Language::Rust => strip_extension(&normalized),
     }
 }
 
 fn strip_extension(path: &str) -> String {
     match path.rsplit_once('.') {
-        Some((stem, "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "py")) => stem.to_string(),
+        Some((stem, "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "py" | "java" | "rs")) => {
+            stem.to_string()
+        }
         _ => path.to_string(),
     }
 }
@@ -176,6 +183,7 @@ pub fn extract_file(
         path: path.to_string(),
         lang,
         module_id: module_id(lang, path),
+        class_id: java_class_id(lang, root, source, path),
         imports: extract_imports(lang, root, source, path),
         functions,
         degraded,
@@ -359,11 +367,27 @@ fn call_fact(node: Node<'_>, ctx: &ExtractCtx<'_>) -> Option<CallFact> {
             node.child_by_field_name("arguments")?,
         ),
     };
-    // 无法解析被调名时仍保留调用事实（实参求值/流经调用点）。
-    let name = callee_name(callee_node, ctx.source).unwrap_or_default();
+    // Java：method_invocation 的接收者（类名/实例名）作为限定者。
+    let (name, qualifier) = if ctx.lang == Language::Java {
+        let qualifier = node
+            .child_by_field_name("object")
+            .filter(|o| o.kind().contains("identifier"))
+            .and_then(|o| ctx.source.get(o.start_byte()..o.end_byte()))
+            .map(|s| s.to_string());
+        (
+            ctx.source
+                .get(callee_node.start_byte()..callee_node.end_byte())
+                .unwrap_or("")
+                .to_string(),
+            qualifier,
+        )
+    } else {
+        callee_parts(callee_node, ctx.source)
+    };
     if ctx.in_sanitizer(node.start_byte(), node.end_byte()) {
         return Some(CallFact {
             name,
+            qualifier,
             args: Vec::new(),
             sanitized: true,
         });
@@ -375,37 +399,71 @@ fn call_fact(node: Node<'_>, ctx: &ExtractCtx<'_>) -> Option<CallFact> {
         .collect();
     Some(CallFact {
         name,
+        qualifier,
         args,
         sanitized: false,
     })
 }
 
-fn callee_name(node: Node<'_>, source: &str) -> Option<String> {
+fn callee_parts(node: Node<'_>, source: &str) -> (String, Option<String>) {
+    let text = |n: Node<'_>| source.get(n.start_byte()..n.end_byte()).map(|s| s.to_string());
     match node.kind() {
         k if k.contains("identifier") || k == "field_identifier" => {
-            source.get(node.start_byte()..node.end_byte()).map(|s| s.to_string())
+            (text(node).unwrap_or_default(), None)
         }
-        "member_expression" => node
-            .child_by_field_name("property")
-            .and_then(|p| source.get(p.start_byte()..p.end_byte()))
-            .map(|s| s.to_string()),
-        "field_expression" => node
-            .child_by_field_name("field")
-            .and_then(|p| source.get(p.start_byte()..p.end_byte()))
-            .map(|s| s.to_string()),
-        "attribute" => node
-            .child_by_field_name("attribute")
-            .and_then(|p| source.get(p.start_byte()..p.end_byte()))
-            .map(|s| s.to_string()),
-        "scoped_identifier" => node
-            .child_by_field_name("name")
-            .and_then(|p| source.get(p.start_byte()..p.end_byte()))
-            .map(|s| s.to_string()),
-        "selector_expression" => node
-            .child_by_field_name("field")
-            .and_then(|p| source.get(p.start_byte()..p.end_byte()))
-            .map(|s| s.to_string()),
-        _ => None,
+        "member_expression" => {
+            let name = node
+                .child_by_field_name("property")
+                .and_then(text)
+                .unwrap_or_default();
+            let qualifier = node
+                .child_by_field_name("object")
+                .filter(|o| o.kind().contains("identifier"))
+                .and_then(text);
+            (name, qualifier)
+        }
+        "field_expression" => {
+            let name = node
+                .child_by_field_name("field")
+                .and_then(text)
+                .unwrap_or_default();
+            let qualifier = node
+                .child_by_field_name("value")
+                .filter(|o| o.kind().contains("identifier"))
+                .and_then(text);
+            (name, qualifier)
+        }
+        "attribute" => {
+            let name = node
+                .child_by_field_name("attribute")
+                .and_then(text)
+                .unwrap_or_default();
+            let qualifier = node
+                .child_by_field_name("object")
+                .filter(|o| o.kind().contains("identifier"))
+                .and_then(text);
+            (name, qualifier)
+        }
+        "scoped_identifier" => {
+            let name = node
+                .child_by_field_name("name")
+                .and_then(text)
+                .unwrap_or_default();
+            let qualifier = node.child_by_field_name("path").and_then(text);
+            (name, qualifier)
+        }
+        "selector_expression" => {
+            let name = node
+                .child_by_field_name("field")
+                .and_then(text)
+                .unwrap_or_default();
+            let qualifier = node
+                .child_by_field_name("operand")
+                .filter(|o| o.kind().contains("identifier"))
+                .and_then(text);
+            (name, qualifier)
+        }
+        _ => (String::new(), None),
     }
 }
 
@@ -858,8 +916,46 @@ fn extract_imports(lang: Language, root: Node<'_>, source: &str, path: &str) -> 
                 }
             });
         }
-        Language::Go => {
-            // Go 同包跨文件由项目分析按目录处理，无需导入表。
+        Language::Java => {
+            metrics::walk_all_pub(root, &mut |node| {
+                if node.kind() != "import_declaration" {
+                    return;
+                }
+                let full = source
+                    .get(node.start_byte()..node.end_byte())
+                    .unwrap_or("")
+                    .trim()
+                    .trim_end_matches(';')
+                    .to_string();
+                let body = full.trim_start_matches("import").trim();
+                if let Some(rest) = body.strip_prefix("static ") {
+                    if let Some((class_part, method)) = rest.trim().rsplit_once('.') {
+                        imports.push(ImportFact {
+                            local: method.to_string(),
+                            modules: vec![class_part.replace('.', "/")],
+                            exported: method.to_string(),
+                        });
+                    }
+                } else if !body.is_empty() {
+                    let class_id = body.replace('.', "/");
+                    let local = body.rsplit('.').next().unwrap_or(body).to_string();
+                    imports.push(ImportFact {
+                        local: local.clone(),
+                        modules: vec![class_id],
+                        exported: local,
+                    });
+                }
+            });
+        }
+        Language::Rust => {
+            metrics::walk_all_pub(root, &mut |node| {
+                if node.kind() != "use_declaration" {
+                    return;
+                }
+                if let Some(arg) = named_children(node).last() {
+                    extract_rust_use(*arg, source, &mut imports, path);
+                }
+            });
         }
         _ => {}
     }
@@ -941,5 +1037,204 @@ fn resolve_py_module(
             Some(candidates)
         }
         _ => None,
+    }
+}
+
+// ---------- Java / Rust 跨文件辅助 ----------
+
+fn java_class_id(
+    lang: Language,
+    root: Node<'_>,
+    source: &str,
+    path: &str,
+) -> Option<String> {
+    if lang != Language::Java {
+        return None;
+    }
+    let file_name = path.rsplit('/').next()?;
+    let stem = file_name.strip_suffix(".java")?;
+    let mut package = String::new();
+    metrics::walk_all_pub(root, &mut |n| {
+        if n.kind() == "package_declaration" && package.is_empty() {
+            for child in named_children(n) {
+                if matches!(child.kind(), "scoped_identifier" | "identifier") {
+                    package = source
+                        .get(child.start_byte()..child.end_byte())
+                        .unwrap_or("")
+                        .replace('.', "/");
+                }
+            }
+        }
+    });
+    if package.is_empty() {
+        Some(stem.to_string())
+    } else {
+        Some(format!("{package}/{stem}"))
+    }
+}
+
+/// Rust：文件路径 → (crate `src` 根前缀, 相对 src 的模块路径段)。
+pub(crate) fn rust_src_parts(path: &str) -> Option<(String, Vec<String>)> {
+    let components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+    let src_idx = components.iter().rposition(|c| *c == "src")?;
+    let src_root = components[..=src_idx].join("/");
+    let rel = components[src_idx + 1..].join("/");
+    if rel.is_empty() {
+        return Some((src_root, Vec::new()));
+    }
+    let rel = strip_extension(&rel);
+    let mut segments: Vec<String> = rel.split('/').map(|s| s.to_string()).collect();
+    if segments.last().map(|s| s == "mod").unwrap_or(false) {
+        segments.pop();
+    }
+    if segments.len() == 1 && (segments[0] == "lib" || segments[0] == "main") {
+        segments.clear();
+    }
+    Some((src_root, segments))
+}
+
+fn rust_resolve_module(segments: &[String], current: &[String]) -> Vec<String> {
+    let mut base: Option<Vec<String>> = None;
+    let mut idx = 0usize;
+    while idx < segments.len() {
+        match segments[idx].as_str() {
+            "crate" => {
+                base = Some(Vec::new());
+                idx += 1;
+            }
+            "super" => {
+                let mut b = base.clone().unwrap_or_else(|| current.to_vec());
+                b.pop();
+                base = Some(b);
+                idx += 1;
+            }
+            "self" => {
+                base = Some(base.clone().unwrap_or_else(|| current.to_vec()));
+                idx += 1;
+            }
+            _ => break,
+        }
+    }
+    let mut resolved = base.unwrap_or_default();
+    resolved.extend(segments[idx..].iter().cloned());
+    resolved
+}
+
+fn rust_module_candidates(src_root: &str, module_segments: &[String]) -> Vec<String> {
+    if module_segments.is_empty() {
+        return vec![format!("{src_root}/lib"), format!("{src_root}/main")];
+    }
+    let base = format!("{src_root}/{}", module_segments.join("/"));
+    vec![base.clone(), format!("{base}/mod")]
+}
+
+/// Rust 限定调用 `crate::util::run` 的限定者（模块路径）→ 模块 id 候选。
+pub(crate) fn rust_qualifier_candidates(
+    file_path: &str,
+    qualifier: &str,
+) -> Vec<String> {
+    let Some((src_root, current)) = rust_src_parts(file_path) else {
+        return Vec::new();
+    };
+    let segments: Vec<String> = qualifier.split("::").map(|s| s.to_string()).collect();
+    let module = rust_resolve_module(&segments, &current);
+    rust_module_candidates(&src_root, &module)
+}
+
+fn extract_rust_use(arg: Node<'_>, source: &str, imports: &mut Vec<ImportFact>, path: &str) {
+    let Some((src_root, current)) = rust_src_parts(path) else {
+        return;
+    };
+    let mut leaves: Vec<(Vec<String>, String)> = Vec::new();
+    collect_rust_use_leaves(arg, source, &mut leaves);
+    for (segments, local) in leaves {
+        if segments.is_empty() {
+            continue;
+        }
+        let name = segments.last().cloned().unwrap_or_default();
+        let module_segments = rust_resolve_module(&segments[..segments.len() - 1], &current);
+        let modules = rust_module_candidates(&src_root, &module_segments);
+        imports.push(ImportFact {
+            local,
+            modules,
+            exported: name,
+        });
+    }
+}
+
+/// 递归收集 use 叶子：返回（完整路径段, 本地名）。
+fn collect_rust_use_leaves(
+    node: Node<'_>,
+    source: &str,
+    out: &mut Vec<(Vec<String>, String)>,
+) {
+    match node.kind() {
+        "use_as_clause" => {
+            let Some(path_node) = node.child_by_field_name("path") else {
+                return;
+            };
+            let alias = node
+                .child_by_field_name("alias")
+                .and_then(|a| source.get(a.start_byte()..a.end_byte()))
+                .map(|s| s.to_string());
+            let mut leaves = Vec::new();
+            collect_rust_use_leaves(path_node, source, &mut leaves);
+            for (segments, local) in leaves {
+                let local = alias.clone().unwrap_or(local);
+                out.push((segments, local));
+            }
+        }
+        "use_list" => {
+            for child in named_children(node) {
+                collect_rust_use_leaves(child, source, out);
+            }
+        }
+        "scoped_use_list" => {
+            let children = named_children(node);
+            let Some(prefix_node) = children.first() else {
+                return;
+            };
+            let prefix_text = source
+                .get(prefix_node.start_byte()..prefix_node.end_byte())
+                .unwrap_or("")
+                .to_string();
+            let mut prefix: Vec<String> = prefix_text
+                .split("::")
+                .map(|s| s.to_string())
+                .collect();
+            let Some(list_node) = children.get(1) else {
+                return;
+            };
+            let mut inner = Vec::new();
+            collect_rust_use_leaves(*list_node, source, &mut inner);
+            for (mut segments, local) in inner {
+                let mut full = prefix.clone();
+                full.append(&mut segments);
+                prefix.clear();
+                out.push((full, local));
+            }
+        }
+        "use_wildcard" | "self" => {}
+        "scoped_identifier" => {
+            let text = source
+                .get(node.start_byte()..node.end_byte())
+                .unwrap_or("")
+                .to_string();
+            let segments: Vec<String> = text.split("::").map(|s| s.to_string()).collect();
+            let local = segments.last().cloned().unwrap_or_default();
+            if !local.is_empty() && local != "self" {
+                out.push((segments, local));
+            }
+        }
+        k if k.contains("identifier") => {
+            let text = source
+                .get(node.start_byte()..node.end_byte())
+                .unwrap_or("")
+                .to_string();
+            if !text.is_empty() {
+                out.push((vec![text.clone()], text));
+            }
+        }
+        _ => {}
     }
 }
