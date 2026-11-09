@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/engine", "apps/desktop/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Codescan contributors"]
+
+[profile.release]
+lto = true

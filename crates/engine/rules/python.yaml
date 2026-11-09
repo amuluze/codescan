@@ -1,0 +1,111 @@
+# Python AST 规则。fixture 位于 rules/tests/<rule-id>/。
+# 格式见 docs/rules.md：@match 捕获决定 span；#eq?/#match? 为 tree-sitter 原生谓词。
+rules:
+  # ---------- security ----------
+  - id: py/no-eval-exec
+    language: python
+    dimension: security
+    severity: error
+    message: 调用 eval()/exec() 动态执行代码
+    pattern: |
+      (call
+        function: (identifier) @match (#match? @match "^(eval|exec)$"))
+
+  - id: py/pickle-loads
+    language: python
+    dimension: security
+    severity: error
+    message: 调用 pickle.load/loads 反序列化对象
+    pattern: |
+      (call
+        function: (attribute
+          object: (identifier) @mod (#match? @mod "^(pickle|cPickle|_pickle|dill)$")
+          attribute: (identifier) @match (#match? @match "^(load|loads)$")))
+
+  - id: py/yaml-load-without-loader
+    language: python
+    dimension: security
+    severity: error
+    message: yaml.load 未通过 Loader= 指定安全加载器
+    pattern: |
+      (call
+        function: (attribute
+          object: (identifier) @mod (#eq? @mod "yaml")
+          attribute: (identifier) @fn (#eq? @fn "load")) @match)
+    filters:
+      - not:
+          pattern: |
+            (call
+              function: (attribute
+                object: (identifier) @nmod (#eq? @nmod "yaml")
+                attribute: (identifier) @nfn (#eq? @nfn "load"))
+              arguments: (argument_list
+                (keyword_argument
+                  name: (identifier) @loader (#eq? @loader "Loader")))) @match
+
+  - id: py/subprocess-shell-true
+    language: python
+    dimension: security
+    severity: error
+    message: subprocess 调用使用 shell=True（命令经由 shell 解释）
+    pattern: |
+      (call
+        function: (attribute
+          object: (identifier) @mod (#eq? @mod "subprocess")
+          attribute: (identifier) @fn (#match? @fn "^(run|call|Popen|check_output|check_call)$"))
+        arguments: (argument_list
+          (keyword_argument
+            name: (identifier) @kw (#eq? @kw "shell")
+            value: (true)) @match))
+
+  - id: py/os-system
+    language: python
+    dimension: security
+    severity: error
+    message: 调用 os.system/os.popen 执行 shell 命令
+    pattern: |
+      (call
+        function: (attribute
+          object: (identifier) @mod (#eq? @mod "os")
+          attribute: (identifier) @match (#match? @match "^(system|popen)$")))
+
+  - id: py/weak-hash
+    language: python
+    dimension: security
+    severity: warning
+    message: 使用弱哈希算法 md5/sha1
+    pattern: |
+      (call
+        function: (attribute
+          object: (identifier) @mod (#eq? @mod "hashlib")
+          attribute: (identifier) @match (#match? @match "^(md5|sha1)$")))
+
+  # assert 用于鉴权/加密类逻辑：生产环境可被 -O 移除，绕过校验。
+  # 引擎 v1 无数据流，按语句文本中的敏感关键词启发式判定。
+  - id: py/assert-in-auth
+    language: python
+    dimension: security
+    severity: warning
+    message: assert 语句涉及鉴权/密钥类校验（生产环境 -O 下会被移除）
+    pattern: |
+      (assert_statement) @match
+    metavariables:
+      - capture: match
+        regex: '(?is).*(password|passwd|token|secret|permission|role|admin|auth|api[_-]?key|signature).*'
+
+  # ---------- business-logic（示例骨架） ----------
+  # 示例骨架：Django 视图函数（首参 request）以 delete/destroy/remove/admin_
+  # 开头命名却未加任何装饰器（权限校验通常以 @permission_required 等装饰器挂载）。
+  - id: py/example-django-view-unprotected
+    language: python
+    dimension: business-logic
+    severity: warning
+    message: 示例骨架：疑似未挂权限校验装饰器的 Django 管理类视图函数
+    pattern: |
+      (function_definition
+        name: (identifier) @match (#match? @match "^(delete|destroy|remove|admin)_")
+        parameters: (parameters (identifier) @req (#eq? @req "request")))
+    filters:
+      - not:
+          pattern: |
+            (decorated_definition) @match

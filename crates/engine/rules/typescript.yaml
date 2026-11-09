@@ -1,0 +1,232 @@
+# TypeScript / TSX / JavaScript / JSX AST 规则。
+# fixture 位于 rules/tests/<rule-id 中 / 换为 ->；匹配语义见 docs/rules.md。
+# 名称精确约束统一走 metavariables（与 #eq?/#match? 谓词等价，集中可读）。
+rules:
+  # ---------- TypeScript（typescript，.ts） ----------
+  - id: ts/no-eval
+    language: typescript
+    dimension: security
+    severity: error
+    message: 调用 eval() 动态执行代码
+    pattern: |
+      (call_expression
+        function: (identifier) @fn) @match
+    metavariables:
+      - capture: fn
+        regex: "^eval$"
+
+  - id: ts/no-new-function
+    language: typescript
+    dimension: security
+    severity: error
+    message: 使用 new Function() 动态构造函数体
+    pattern: |
+      (new_expression
+        constructor: (identifier) @ctor) @match
+    metavariables:
+      - capture: ctor
+        regex: "^Function$"
+
+  - id: ts/no-timer-string
+    language: typescript
+    dimension: security
+    severity: error
+    message: setTimeout/setInterval 以字符串参数调度代码执行
+    pattern: |
+      (call_expression
+        function: (identifier) @fn
+        arguments: (arguments . (string))) @match
+
+      (call_expression
+        function: (identifier) @fn
+        arguments: (arguments . (template_string))) @match
+    metavariables:
+      - capture: fn
+        regex: "^(setTimeout|setInterval)$"
+
+  - id: ts/no-inner-html
+    language: typescript
+    dimension: security
+    severity: warning
+    message: 为 innerHTML/outerHTML 赋值（未净化内容属常见注入入口，需人工确认）
+    pattern: |
+      (assignment_expression
+        left: (member_expression
+          property: (property_identifier) @prop) @match)
+
+      (augmented_assignment_expression
+        left: (member_expression
+          property: (property_identifier) @prop) @match)
+    metavariables:
+      - capture: prop
+        regex: "^(innerHTML|outerHTML)$"
+
+  - id: ts/no-postmessage-wildcard
+    language: typescript
+    dimension: security
+    severity: warning
+    message: postMessage 目标 origin 使用通配符 *
+    pattern: |
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @prop)
+        arguments: (arguments (string (string_fragment) @origin))) @match
+    metavariables:
+      - capture: prop
+        regex: "^postMessage$"
+      - capture: origin
+        regex: "^\\*$"
+
+  - id: ts/no-document-write
+    language: typescript
+    dimension: security
+    severity: warning
+    message: 调用 document.write/writeln 写入文档流
+    pattern: |
+      (call_expression
+        function: (member_expression
+          object: (identifier) @obj
+          property: (property_identifier) @prop) @match)
+    metavariables:
+      - capture: obj
+        regex: "^document$"
+      - capture: prop
+        regex: "^(write|writeln)$"
+
+  - id: ts/no-document-domain-assign
+    language: typescript
+    dimension: security
+    severity: error
+    message: 对 document.domain 赋值（放宽同源策略的构造）
+    pattern: |
+      (assignment_expression
+        left: (member_expression
+          object: (identifier) @obj
+          property: (property_identifier) @prop) @match)
+    metavariables:
+      - capture: obj
+        regex: "^document$"
+      - capture: prop
+        regex: "^domain$"
+
+  # 业务逻辑示例骨架：演示 business-logic 维度规则的形态（写操作路由注册未显式挂鉴权中间件）。
+  - id: ts/example-unauthed-write-route
+    language: typescript
+    dimension: business-logic
+    severity: warning
+    message: 【示例骨架】写操作路由（POST/PUT/PATCH/DELETE）直接挂接处理器、未显式注册鉴权中间件，请人工确认
+    pattern: |
+      (call_expression
+        function: (member_expression
+          object: (identifier) @obj
+          property: (property_identifier) @prop)
+        arguments: (arguments
+          . (string (string_fragment) @route)
+          . (identifier) @handler .)) @match
+    metavariables:
+      - capture: obj
+        regex: "^(app|router)$"
+      - capture: prop
+        regex: "^(post|put|patch|delete)$"
+      - capture: route
+        regex: "^/"
+
+  # ---------- TSX（tsx，.tsx） ----------
+  - id: tsx/no-dangerous-inner-html
+    language: tsx
+    dimension: security
+    severity: error
+    message: JSX 使用 dangerouslySetInnerHTML 属性渲染 HTML
+    pattern: |
+      (jsx_attribute
+        (property_identifier) @prop) @match
+    metavariables:
+      - capture: prop
+        regex: "^dangerouslySetInnerHTML$"
+
+  # ---------- JavaScript（javascript，.js） ----------
+  - id: js/no-eval
+    language: javascript
+    dimension: security
+    severity: error
+    message: 调用 eval() 动态执行代码
+    pattern: |
+      (call_expression
+        function: (identifier) @fn) @match
+    metavariables:
+      - capture: fn
+        regex: "^eval$"
+
+  - id: js/no-new-function
+    language: javascript
+    dimension: security
+    severity: error
+    message: 使用 new Function() 动态构造函数体
+    pattern: |
+      (new_expression
+        constructor: (identifier) @ctor) @match
+    metavariables:
+      - capture: ctor
+        regex: "^Function$"
+
+  - id: js/no-inner-html
+    language: javascript
+    dimension: security
+    severity: warning
+    message: 为 innerHTML/outerHTML 赋值（未净化内容属常见注入入口，需人工确认）
+    pattern: |
+      (assignment_expression
+        left: (member_expression
+          property: (property_identifier) @prop) @match)
+
+      (augmented_assignment_expression
+        left: (member_expression
+          property: (property_identifier) @prop) @match)
+    metavariables:
+      - capture: prop
+        regex: "^(innerHTML|outerHTML)$"
+
+  - id: js/no-document-write
+    language: javascript
+    dimension: security
+    severity: warning
+    message: 调用 document.write/writeln 写入文档流
+    pattern: |
+      (call_expression
+        function: (member_expression
+          object: (identifier) @obj
+          property: (property_identifier) @prop) @match)
+    metavariables:
+      - capture: obj
+        regex: "^document$"
+      - capture: prop
+        regex: "^(write|writeln)$"
+
+  - id: js/no-postmessage-wildcard
+    language: javascript
+    dimension: security
+    severity: warning
+    message: postMessage 目标 origin 使用通配符 *
+    pattern: |
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @prop)
+        arguments: (arguments (string (string_fragment) @origin))) @match
+    metavariables:
+      - capture: prop
+        regex: "^postMessage$"
+      - capture: origin
+        regex: "^\\*$"
+
+  # ---------- JSX（jsx，.jsx） ----------
+  - id: jsx/no-dangerous-inner-html
+    language: jsx
+    dimension: security
+    severity: error
+    message: JSX 使用 dangerouslySetInnerHTML 属性渲染 HTML
+    pattern: |
+      (jsx_attribute
+        (property_identifier) @prop) @match
+    metavariables:
+      - capture: prop
+        regex: "^dangerouslySetInnerHTML$"

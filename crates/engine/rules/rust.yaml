@@ -1,0 +1,154 @@
+# Rust AST 规则。fixture 位于 rules/tests/<rule-id>/。
+# 节点名依据 tree-sitter-rust 0.23.3 node-types.json；#eq?/#match? 为
+# tree-sitter 原生文本谓词（引擎经 QueryCursor 自动执行）。
+rules:
+  # 启动外部进程：仅匹配可确认为 std::process::Command 的路径写法，
+  # 排除裸 Command::new（无法与 clap::Command 等区分，避免误报）。
+  - id: rust/process-command-new
+    language: rust
+    dimension: security
+    severity: warning
+    message: 通过 std::process::Command::new 启动外部进程
+    pattern: |
+      (call_expression
+        function: (scoped_identifier
+          path: (_) @path
+          name: (identifier) @name
+          (#eq? @name "new")
+          (#match? @path "^(std::)?process::Command$"))) @match
+
+  # 公共函数内直接解包：unwrap/expect 在带 pub 可见性的函数体内即命中
+  #（返回路径需数据流，v1 以「pub fn 体内」为保守近似）。
+  - id: rust/unwrap-in-pub-fn
+    language: rust
+    dimension: quality
+    severity: warning
+    message: pub fn 内调用 unwrap()/expect() 直接解包（公共接口可能 panic）
+    pattern: |
+      (call_expression
+        function: (field_expression
+          field: (field_identifier) @name
+          (#match? @name "^(unwrap|expect)$"))) @match
+    filters:
+      - inside:
+          pattern: |
+            (function_item
+              (visibility_modifier)) @match
+
+  # 未限大小整读文件：read_to_string/read 将整个文件载入内存，
+  # v1 无数据流，无法证明大小受限，直接报告调用点。
+  - id: rust/fs-read-unbounded
+    language: rust
+    dimension: security
+    severity: warning
+    message: std::fs::read/read_to_string 整读文件且未限制大小
+    pattern: |
+      (call_expression
+        function: (scoped_identifier
+          path: (_) @path
+          name: (identifier) @name
+          (#match? @name "^(read|read_to_string)$")
+          (#match? @path "^(std::)?fs$"))) @match
+
+  # transmute：含 turbofish（generic_function 包装）与普通两种调用形态。
+  - id: rust/mem-transmute
+    language: rust
+    dimension: security
+    severity: warning
+    message: 调用 std::mem::transmute 重新解释内存
+    pattern: |
+      (call_expression
+        function: [
+          (scoped_identifier
+            path: (_) @path
+            name: (identifier) @name
+            (#eq? @name "transmute"))
+          (generic_function
+            function: (scoped_identifier
+              path: (_) @path
+              name: (identifier) @name
+              (#eq? @name "transmute")))
+        ]
+        (#match? @path "^(std::)?mem$")) @match
+
+  - id: rust/mem-forget
+    language: rust
+    dimension: quality
+    severity: warning
+    message: 调用 std::mem::forget 跳过 Drop 主动泄漏资源
+    pattern: |
+      (call_expression
+        function: (scoped_identifier
+          path: (_) @path
+          name: (identifier) @name
+          (#eq? @name "forget")
+          (#match? @path "^(std::)?mem$"))) @match
+
+  # 库代码中终止性宏：main 入口内视为可接受的失败退出，用 not 过滤。
+  - id: rust/panic-in-library
+    language: rust
+    dimension: quality
+    severity: warning
+    message: 库代码中使用 panic!/unreachable!/todo!/unimplemented!（建议返回 Result）
+    pattern: |
+      (macro_invocation
+        macro: (identifier) @name
+        (#match? @name "^(panic|unreachable|todo|unimplemented)$")) @match
+    filters:
+      - not:
+          pattern: |
+            (function_item
+              name: (identifier) @name
+              (#eq? @name "main")) @match
+
+  # SQL 拼接：字符串字面量（含 .to_string() 等转换后）作左操作数与 + 拼接，
+  # 或 format! 以 SQL 语句为模板并带插值参数。
+  # 注意：tree-sitter query 的子节点按树序匹配——裸子节点写在 operator: "+"
+  # 之后只能匹配右操作数，故左操作数必须写在 operator 之前；binary_expression
+  # 的 left:/right: 字段约束会被本语法的静态分析判为 Impossible pattern，不可用。
+  # @sql 的关键字约束走引擎级 metavariables：query 字符串字面量会剥掉 \b 等
+  # 转义，导致 in-query #match? 正则失真。
+  - id: rust/sql-string-concat
+    language: rust
+    dimension: security
+    severity: warning
+    message: 通过字符串拼接构造 SQL 语句
+    pattern: |
+      (binary_expression
+        (string_literal) @sql
+        operator: "+") @match
+
+      (binary_expression
+        (call_expression
+          function: (field_expression
+            value: (string_literal) @sql))
+        operator: "+") @match
+
+      (macro_invocation
+        macro: (identifier) @name
+        (#eq? @name "format")
+        (token_tree
+          (string_literal) @sql
+          ","
+          (_))) @match
+    metavariables:
+      - capture: sql
+        regex: '(?i)\b(select|insert|update|delete)\b'
+
+  # let _ = 丢弃调用结果：调用表达式或结果宏（write!/writeln! 等返回
+  # io::Result 的宏）被整体丢弃。`_` 为匿名节点，需按字面量匹配。
+  - id: rust/let-underscore-ignore
+    language: rust
+    dimension: quality
+    severity: info
+    message: let _ = 丢弃调用的返回值（可能是未检查的 Result）
+    pattern: |
+      (let_declaration
+        pattern: "_"
+        value: (call_expression)) @match
+
+      (let_declaration
+        pattern: "_"
+        value: (macro_invocation
+          macro: (identifier) @name
+          (#match? @name "^(write|writeln)$"))) @match

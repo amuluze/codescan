@@ -1,9 +1,48 @@
 # codescan
 
-代码审计与静态扫描方向的选型调研、方案设计与落地记录。
+本地优先的代码扫描桌面工具。自研 AST 规则引擎（tree-sitter），三维覆盖安全漏洞、业务逻辑、代码质量；零外部引擎依赖、单机可运行、扫描只读。
 
-## 报告
+## 背景与决策
 
-| 日期 | 主题 | 文件 |
-|---|---|---|
-| 2026-11-06 | 同时覆盖安全漏洞、业务逻辑、代码质量三维度的开源审计工具调研 | [reports/2026-11-06-open-source-code-audit-tools.md](reports/2026-11-06-open-source-code-audit-tools.md) |
+- 选型调研：[reports/2026-11-06-open-source-code-audit-tools.md](reports/2026-11-06-open-source-code-audit-tools.md)
+- 领域不变量（最高约束）：[.specs/domain/scan-engine.md](.specs/domain/scan-engine.md)
+- v1 规格与验收：[.specs/tasks/codescan-desktop-v1.md](.specs/tasks/codescan-desktop-v1.md)
+- 实施路径：[.plans/codescan-desktop-v1.md](.plans/codescan-desktop-v1.md)
+
+关键取舍（已确认）：复刻 axiom 技术栈（Tauri 2 + React 19 + Rust/SQLite）；引擎自研而非编排外部工具；v1 为结构模式规则 + 质量度量（污点/数据流属 v2）；LLM 辅助层二期，v1 纯确定性输出可直接作门禁。
+
+## 结构
+
+```text
+codescan/
+├── crates/engine/        # codescan-engine：规则编译、匹配、度量、指纹、SARIF、基线（无头可测）
+│   ├── rules/            # 内置规则（按语言分文件）+ fixture（ruleid: 标注）
+│   └── tests/            # 集成测试（确定性/fail-closed/SARIF/语言矩阵/性能）
+├── apps/desktop/         # Tauri 2 + React 19 桌面应用
+│   ├── src/              # 四视图：扫描 / 发现 / 规则 / 历史
+│   └── src-tauri/        # 命令层 + SQLite（~/.codescan/codescan.db）
+└── docs/rules.md         # 规则编写指南（模式语言、fixture 格式）
+```
+
+## 开发
+
+环境要求：Node ≥ 22、pnpm ≥ 10（包管理器）、Rust 1.96（rust-toolchain.toml 锁定）。
+
+```bash
+pnpm install
+npm run tauri dev        # 桌面应用（开发模式）
+```
+
+| 命令 | 作用 |
+|---|---|
+| `npm run test` | 前端 vitest |
+| `npm run typecheck` | TS 类型检查 |
+| `npm run build` | 前端生产构建 |
+| `npm run test:rust` | Rust 全量测试（引擎 + 命令层无头） |
+| `npm run check:rust` | clippy -D warnings |
+
+规则编写与 fixture 规范见 [docs/rules.md](docs/rules.md)。
+
+## 门禁语义
+
+任意历史扫描可设为基线；门禁差异 = 新扫描发现 \ 基线（仅指纹相等性）。指纹对行号漂移稳定，实体代码变更即视为新发现。SARIF 2.1.0 导出与内部发现一一对应。详见 Domain Spec。

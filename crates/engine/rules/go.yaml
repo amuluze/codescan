@@ -1,0 +1,98 @@
+# Go AST 规则。fixture 位于 rules/tests/<rule-id>/。
+rules:
+  - id: go/exec-shell-command
+    language: go
+    dimension: security
+    severity: error
+    message: 通过 exec.Command 以 sh -c 拼接执行 shell 命令
+    pattern: |
+      (call_expression
+        function: (selector_expression
+          operand: (identifier) @pkg
+          field: (field_identifier) @fn)
+        arguments: (argument_list
+          . (interpreted_string_literal) @shell
+          . (interpreted_string_literal) @flag)) @match
+    metavariables:
+      - capture: pkg
+        regex: '^exec$'
+      - capture: fn
+        regex: '^Command(Context)?$'
+      - capture: shell
+        regex: '^"(ba|z|da)?sh"$'
+      - capture: flag
+        regex: '^"-c"$'
+
+  - id: go/plaintext-http
+    language: go
+    dimension: security
+    severity: warning
+    message: 调用 net/http 明文请求函数（http.Get/Head/Post/PostForm）
+    pattern: |
+      (call_expression
+        function: (selector_expression
+          operand: (identifier) @pkg (#eq? @pkg "http")
+          field: (field_identifier) @fn (#match? @fn "^(Get|Head|Post|PostForm)$"))) @match
+
+  - id: go/weak-hash
+    language: go
+    dimension: security
+    severity: error
+    message: 使用弱哈希算法 md5/sha1（Sum/New）
+    pattern: |
+      (call_expression
+        function: (selector_expression
+          operand: (identifier) @pkg (#match? @pkg "^(md5|sha1)$")
+          field: (field_identifier) @fn (#match? @fn "^(Sum|New)$"))) @match
+
+  - id: go/insecure-random
+    language: go
+    dimension: security
+    severity: warning
+    message: 使用 rand 非加密随机数（令牌/验证码场景应使用 crypto/rand）
+    pattern: |
+      (call_expression
+        function: (selector_expression
+          operand: (identifier) @pkg (#eq? @pkg "rand")
+          field: (field_identifier) @fn (#match? @fn "^(Int|Intn|Int31|Int31n|Int63|Int63n|IntN|Int32|Int32N|Int64|Int64N|Uint|UintN|Uint32|Uint64|Float32|Float64|NormFloat64|Perm|Shuffle)$"))) @match
+
+  - id: go/ignored-error
+    language: go
+    dimension: quality
+    severity: warning
+    message: 用空白标识符 _ 丢弃 error 返回值
+    pattern: |
+      [
+        (short_var_declaration
+          left: (expression_list
+            (identifier) @blank (#eq? @blank "_")))
+        (assignment_statement
+          left: (expression_list
+            (identifier) @blank (#eq? @blank "_")))
+      ] @match
+
+  - id: go/unsafe-template
+    language: go
+    dimension: security
+    severity: warning
+    message: 调用 template.New/Parse*（HTML 输出应使用自动转义的 html/template）
+    pattern: |
+      (call_expression
+        function: (selector_expression
+          operand: (identifier) @pkg (#eq? @pkg "template")
+          field: (field_identifier) @fn (#match? @fn "^(New|ParseFiles|ParseGlob|Must|HTML|JS|JSStr|URL)$"))) @match
+
+  - id: go/tls-insecure-skip-verify
+    language: go
+    dimension: security
+    severity: error
+    message: tls.Config 设置 InsecureSkipVerify=true 跳过证书校验
+    pattern: |
+      (keyed_element
+        key: (literal_element) @key
+        value: (literal_element) @value) @match
+    metavariables:
+      - capture: key
+        regex: '^InsecureSkipVerify$'
+      - capture: value
+        regex: '^true$'

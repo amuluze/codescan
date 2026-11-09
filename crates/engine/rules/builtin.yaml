@@ -1,0 +1,86 @@
+# Codescan 内置规则集（随引擎版本化，Domain §4.4）。
+# 规则语言说明见 docs/rules.md：
+#   pattern = tree-sitter query（必须含至少一个捕获；名为 `match` 的捕获决定 span）
+#   filters.not / filters.inside = 同语言 query 的排除/包含过滤
+#   metavariables = 对捕获文本的正则约束
+#   text = 全语言正则（language 必须为 "*"）
+#   metric = 引擎内置度量（阈值在 options 声明）
+rules:
+  # ---------- 度量（quality） ----------
+  - id: metric/cyclomatic-complexity
+    language: "*"
+    dimension: quality
+    severity: warning
+    message: 函数圈复杂度过高（启发式：决策点计数）
+    metric: cyclomatic-complexity
+    options:
+      threshold: 15
+  - id: metric/function-length
+    language: "*"
+    dimension: quality
+    severity: info
+    message: 函数过长（启发式：行数）
+    metric: function-length
+    options:
+      threshold: 80
+  - id: metric/nesting-depth
+    language: "*"
+    dimension: quality
+    severity: warning
+    message: 嵌套过深（启发式：块深度）
+    metric: nesting-depth
+    options:
+      threshold: 5
+  - id: metric/duplicate-block
+    language: "*"
+    dimension: quality
+    severity: warning
+    message: 重复代码块（启发式：规范化行窗口）
+    metric: duplicate-block
+    options:
+      window: 10
+      min_occurrences: 2
+  - id: metric/unreachable-code
+    language: "*"
+    dimension: quality
+    severity: warning
+    message: 终止语句后存在不可达代码
+    metric: unreachable-code
+
+  # ---------- 通用文本规则（security / quality） ----------
+  - id: text/aws-access-key
+    language: "*"
+    dimension: security
+    severity: error
+    message: 疑似 AWS Access Key ID 硬编码
+    text: '\bAKIA[0-9A-Z]{16}\b'
+  - id: text/github-pat
+    language: "*"
+    dimension: security
+    severity: error
+    message: 疑似 GitHub Personal Access Token 硬编码
+    text: '\bgh[pousr]_[A-Za-z0-9]{36,255}\b'
+  - id: text/private-key-block
+    language: "*"
+    dimension: security
+    severity: error
+    message: 私钥内容硬编码
+    text: '-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'
+  - id: text/jwt-literal
+    language: "*"
+    dimension: security
+    severity: error
+    message: 疑似 JWT 字面量硬编码
+    text: '\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*'
+  - id: text/http-url
+    language: "*"
+    dimension: security
+    severity: info
+    message: 硬编码 http:// 明文地址（请确认非本地/测试用途）
+    text: '\bhttp://[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)*\.[a-zA-Z]{2,}'
+  - id: text/todo-debt
+    language: "*"
+    dimension: quality
+    severity: info
+    message: TODO/FIXME 债务标记
+    text: '\b(TODO|FIXME|HACK|XXX)\b'

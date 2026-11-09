@@ -1,0 +1,103 @@
+# Java AST 规则。fixture 位于 rules/tests/<rule-id>/。
+rules:
+  - id: java/runtime-exec
+    language: java
+    dimension: security
+    severity: error
+    message: 通过 Runtime.getRuntime().exec() 执行外部命令
+    pattern: |
+      (method_invocation
+        object: (method_invocation
+          object: (identifier) @runtime
+          name: (identifier) @getter)
+        name: (identifier) @name) @match
+    metavariables:
+      - capture: runtime
+        regex: '^Runtime$'
+      - capture: getter
+        regex: '^getRuntime$'
+      - capture: name
+        regex: '^exec$'
+
+  - id: java/process-builder
+    language: java
+    dimension: security
+    severity: error
+    message: 使用 ProcessBuilder 构造外部进程
+    pattern: |
+      (object_creation_expression
+        type: [(type_identifier) (scoped_type_identifier)] @type) @match
+    metavariables:
+      - capture: type
+        regex: '(^|\.)ProcessBuilder$'
+
+  - id: java/object-input-stream
+    language: java
+    dimension: security
+    severity: error
+    message: 创建 ObjectInputStream 反序列化输入流
+    pattern: |
+      (object_creation_expression
+        type: [(type_identifier) (scoped_type_identifier)] @type) @match
+    metavariables:
+      - capture: type
+        regex: '(^|\.)ObjectInputStream$'
+
+  - id: java/read-object
+    language: java
+    dimension: security
+    severity: error
+    message: 调用 readObject() 反序列化对象
+    pattern: |
+      (method_invocation
+        name: (identifier) @name (#eq? @name "readObject")) @match
+
+  - id: java/weak-message-digest
+    language: java
+    dimension: security
+    severity: error
+    message: MessageDigest 使用弱哈希算法（MD5/SHA-1）
+    pattern: |
+      (method_invocation
+        object: (identifier) @digest
+        name: (identifier) @name
+        arguments: (argument_list
+          (string_literal) @alg)) @match
+    metavariables:
+      - capture: digest
+        regex: '^MessageDigest$'
+      - capture: name
+        regex: '^getInstance$'
+      - capture: alg
+        regex: '^"(MD5|SHA-?1)"$'
+
+  - id: java/insecure-random
+    language: java
+    dimension: security
+    severity: warning
+    message: 使用 Random 生成随机数（安全场景应使用 SecureRandom）
+    pattern: |
+      (object_creation_expression
+        type: [(type_identifier) (scoped_type_identifier)] @type) @match
+    metavariables:
+      - capture: type
+        regex: '(^|\.)Random$'
+
+  - id: java/trust-all-certs
+    language: java
+    dimension: security
+    severity: error
+    message: 覆写 X509TrustManager 的 checkClientTrusted/checkServerTrusted（信任所有证书模式）
+    pattern: |
+      (method_declaration
+        name: (identifier) @name (#match? @name "^check(Client|Server)Trusted$")) @match
+
+  - id: java/junit-assert
+    language: java
+    dimension: business-logic
+    severity: warning
+    message: 在生产代码中调用 JUnit Assert 断言（鉴权等校验不应依赖测试断言）
+    pattern: |
+      (method_invocation
+        object: (identifier) @assert (#eq? @assert "Assert")
+        name: (identifier) @name (#match? @name "^assert(True|False|Equals|NotEquals|NotNull|Null|ArrayEquals|Throws|That)$")) @match
