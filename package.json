@@ -12,8 +12,12 @@
     "build": "pnpm --filter @codescan/desktop build",
     "typecheck": "pnpm --filter @codescan/desktop typecheck",
     "test": "pnpm --filter @codescan/desktop test",
+    "test:cli": "cargo test -p codescan-cli",
     "test:rust": "cargo test --workspace",
     "check:rust": "cargo clippy --workspace --all-targets -- -D warnings",
+    "check": "pnpm typecheck && pnpm test && pnpm build && pnpm check:rust && pnpm test:rust",
+    "build:app": "pnpm --filter @codescan/desktop tauri build --target aarch64-apple-darwin --bundles app",
+    "build:dmg": "pnpm --filter @codescan/desktop tauri build --target aarch64-apple-darwin",
     "tauri": "pnpm --filter @codescan/desktop tauri"
   }
 }

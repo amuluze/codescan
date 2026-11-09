@@ -1,0 +1,99 @@
+version: '3'
+
+# Codescan 任务入口（taskfile.dev）。
+#
+# 定位：人机友好的编排层——底层命令一律委托 package.json 的 npm scripts，
+# 不复制命令实现。npm scripts 仍是命令的单一权威来源（CI 与文档引用他们）；
+# 改命令只改 package.json 一处，Taskfile 自动跟随。`task --list` 查看全部任务。
+#
+# 平台支持：仅 macOS Apple Silicon（arm64）。Windows / Linux 构建暂不支持。
+
+vars:
+  TARGET: aarch64-apple-darwin
+  SARIF_OUT: artifacts/codescan.sarif
+
+tasks:
+  default:
+    desc: 列出全部任务
+    cmd: task --list
+
+  # ── 开发 ──────────────────────────────────────────────────────────────
+
+  install:
+    desc: 安装依赖（Node 22+ / pnpm 10+ / Rust 1.96）
+    cmd: pnpm install
+
+  dev:
+    desc: 浏览器开发模式（无原生能力）
+    cmd: pnpm run dev
+
+  dev:app:
+    desc: Tauri 桌面开发模式（启用 SQLite / 文件对话框）
+    cmd: pnpm run tauri -- dev
+
+  # ── 编译（仅 macOS Apple Silicon）────────────────────────────────────
+
+  build:
+    desc: 前端生产构建
+    cmd: pnpm run build
+
+  build:app:
+    desc: 本地 release 构建 .app（arm64，不打包 DMG）
+    platforms: [darwin]
+    preconditions:
+      - sh: 'test "$(uname -m)" = arm64'
+        msg: '仅支持 macOS Apple Silicon（arm64）'
+    cmd: pnpm run build:app
+
+  build:dmg:
+    desc: 本地 release 构建 macOS arm64 DMG（.app + .dmg，未签名）
+    platforms: [darwin]
+    preconditions:
+      - sh: 'test "$(uname -m)" = arm64'
+        msg: '仅支持 macOS Apple Silicon（arm64）'
+    cmd: pnpm run build:dmg
+
+  clean:build:
+    desc: 清理构建产物（不做依赖级清理）
+    cmds:
+      - rm -rf apps/desktop/dist
+      - cargo clean
+
+  # ── 检查与测试 ────────────────────────────────────────────────────────
+
+  typecheck:
+    desc: TypeScript 类型检查（strict）
+    cmd: pnpm run typecheck
+
+  test:
+    desc: vitest 单元测试（apps/desktop）
+    cmd: pnpm run test
+
+  test:rust:
+    desc: cargo test 全工作区（引擎 / 规则套件 / 命令层 / CLI）
+    cmd: pnpm run test:rust
+
+  test:cli:
+    desc: CLI 黑盒测试（扫描 / 退出码 / SARIF 上传 dry-run）
+    cmd: pnpm run test:cli
+
+  check:rust:
+    desc: cargo clippy（-D warnings）
+    cmd: pnpm run check:rust
+
+  check:
+    desc: 提交前完整门禁（typecheck + vitest + 构建 + clippy + cargo test）
+    cmd: pnpm run check
+
+  # ── 扫描自身（dogfood）───────────────────────────────────────────────
+
+  scan:
+    desc: 用本地引擎扫描本仓库（text 输出）
+    cmd: cargo run -q -p codescan-cli -- scan .
+
+  scan:sarif:
+    desc: 扫描本仓库并输出 SARIF 到 artifacts/codescan.sarif
+    cmds:
+      - mkdir -p artifacts
+      - cargo run -q -p codescan-cli -- scan . --format sarif --out {{.SARIF_OUT}}
+      - cmd: 'echo "SARIF: {{.SARIF_OUT}}"'

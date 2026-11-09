@@ -2,6 +2,8 @@
 
 本地优先的代码扫描桌面工具。自研 AST 规则引擎（tree-sitter），三维覆盖安全漏洞、业务逻辑、代码质量；零外部引擎依赖、单机可运行、扫描只读。
 
+> **平台支持**：仅 macOS Apple Silicon（arm64）。Windows / Linux 构建暂不支持。
+
 ## 背景与决策
 
 - 选型调研：[reports/2026-11-06-open-source-code-audit-tools.md](reports/2026-11-06-open-source-code-audit-tools.md)
@@ -9,7 +11,7 @@
 - v1 规格与验收：[.specs/tasks/codescan-desktop-v1.md](.specs/tasks/codescan-desktop-v1.md)
 - 实施路径：[.plans/codescan-desktop-v1.md](.plans/codescan-desktop-v1.md)
 
-关键取舍（已确认）：复刻 axiom 技术栈（Tauri 2 + React 19 + Rust/SQLite）；引擎自研而非编排外部工具；确定性规则 + 质量度量为基线，污点分析支持显式导入的跨文件（TS/JS、Python、Go 同包、Java 类/静态导入、Rust use 路径）与字段/对象组近似（v5.2，Java 实例方法、Rust 外部 crate 与全量 points-to 明确排除），LLM 仅作分诊/候选规则辅助且永不进门禁。
+关键取舍（已确认）：复刻 axiom 技术栈（Tauri 2 + React 19 + Rust/SQLite）；引擎自研而非编排外部工具；确定性规则 + 质量度量为基线，污点分析支持显式导入的跨文件（TS/JS、Python、Go 同包、Java 类/静态导入、Rust use 路径）与 points-to 对象集合/形状敏感（v6）；LLM 仅作分诊/候选规则辅助且永不进门禁。
 
 ## 结构
 
@@ -18,9 +20,11 @@ codescan/
 ├── crates/engine/        # codescan-engine：规则编译、匹配、度量、指纹、SARIF、基线（无头可测）
 │   ├── rules/            # 内置规则（按语言分文件）+ fixture（ruleid: 标注）
 │   └── tests/            # 集成测试（确定性/fail-closed/SARIF/语言矩阵/性能）
+├── crates/cli/           # codescan CLI：扫描 / SARIF 输出 / GitHub Code Scanning 上传
 ├── apps/desktop/         # Tauri 2 + React 19 桌面应用
-│   ├── src/              # 四视图：扫描 / 发现 / 规则 / 历史
+│   ├── src/              # 五视图：扫描 / 发现 / 规则 / 历史 / 设置
 │   └── src-tauri/        # 命令层 + SQLite（~/.codescan/codescan.db）
+├── Taskfile.yml          # task 任务入口（编排层，命令落在 package.json scripts）
 └── docs/rules.md         # 规则编写指南（模式语言、fixture 格式）
 ```
 
@@ -29,19 +33,22 @@ codescan/
 环境要求：Node ≥ 22、pnpm ≥ 10（包管理器）、Rust 1.96（rust-toolchain.toml 锁定）。
 
 ```bash
-pnpm install
-npm run tauri dev        # 桌面应用（开发模式）
+task install             # = pnpm install
+task dev:app             # Tauri 桌面开发模式
 ```
+
+任务入口为 [Taskfile.yml](Taskfile.yml)（`task --list`）：Taskfile 只是编排层，命令实现在
+`package.json` scripts 中，二者不会漂移。
 
 | 命令 | 作用 |
 |---|---|
-| `npm run test` | 前端 vitest |
-| `npm run typecheck` | TS 类型检查 |
-| `npm run build` | 前端生产构建 |
-| `npm run test:rust` | Rust 全量测试（引擎 + 命令层无头） |
-| `npm run check:rust` | clippy -D warnings |
-| `cargo test -p codescan-cli` | CLI 黑盒测试 |
-| `pnpm tauri build` | 本地产出桌面安装包（未签名） |
+| `task check` | 提交前完整门禁（typecheck + vitest + 构建 + clippy + cargo test） |
+| `task test` | 前端 vitest |
+| `task test:rust` | Rust 全量测试（引擎 / 规则套件 / 命令层 / CLI） |
+| `task test:cli` | CLI 黑盒测试（扫描 / 退出码 / SARIF 上传 dry-run） |
+| `task typecheck` / `task check:rust` | TS 类型检查 / clippy `-D warnings` |
+| `task build:dmg` | macOS arm64 `.app` + `.dmg`（未签名；Windows/Linux 不支持） |
+| `task scan` / `task scan:sarif` | 用本地引擎扫描本仓库（text / SARIF 到 artifacts/） |
 
 规则编写与 fixture 规范见 [docs/rules.md](docs/rules.md)。
 
@@ -80,4 +87,4 @@ codescan github-upload --sarif codescan.sarif --repo owner/name \
 
 ## 发布
 
-打 tag（`v*`）触发 `.github/workflows/release.yml`：macOS arm64 / Linux x64 / Windows x64 未签名构建，产出 draft release。签名与公证需在仓库 Secrets 注入证书后在 workflow 中启用（当前未配置，macOS 首次打开需右键 → 打开）。
+打 tag（`v*`）触发 `.github/workflows/release.yml`：仅 macOS Apple Silicon（aarch64）未签名构建，产出 draft release。Windows / Linux 构建暂不支持。签名与公证需在仓库 Secrets 注入证书后在 workflow 中启用（当前未配置，macOS 首次打开需右键 → 打开）。

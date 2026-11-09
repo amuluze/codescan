@@ -1,5 +1,8 @@
 name: Release
 
+# 平台支持：仅 macOS Apple Silicon (arm64)。
+# Windows / Linux 构建暂不支持（发布矩阵刻意保持单目标）。
+
 on:
   push:
     tags: ["v*"]
@@ -13,26 +16,10 @@ concurrency:
 
 jobs:
   build:
-    name: build ${{ matrix.target }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-14
-            target: aarch64-apple-darwin
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-    runs-on: ${{ matrix.os }}
+    name: build aarch64-apple-darwin
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Linux system dependencies
-        if: matrix.os == 'ubuntu-22.04'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - uses: pnpm/action-setup@v4
         with:
@@ -49,7 +36,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: aarch64-apple-darwin
 
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
@@ -62,9 +49,9 @@ jobs:
         with:
           projectPath: apps/desktop
           tauriScript: pnpm tauri
-          args: --target ${{ matrix.target }}
+          args: --target aarch64-apple-darwin
           tagName: ${{ github.ref_name }}
           releaseName: "Codescan ${{ github.ref_name }}"
-          releaseBody: "本地代码扫描桌面工具（未签名构建，macOS 首次打开需右键 → 打开）。"
+          releaseBody: "本地代码扫描桌面工具（macOS Apple Silicon，未签名构建，首次打开需右键 → 打开）。Windows / Linux 暂不支持。"
           releaseDraft: true
           prerelease: false
