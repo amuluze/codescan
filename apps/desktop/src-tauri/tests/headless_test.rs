@@ -152,7 +152,7 @@ fn successful_scan_persists() {
 
 // ---------- v3：LLM 辅助层（Domain §3a） ----------
 
-use codescan_lib::commands::{prepare_batch_llm_call, prepare_llm_call};
+use codescan_lib::commands::{prepare_batch_llm_call, prepare_llm_call, prepare_provider_probe};
 use codescan_lib::llm;
 
 #[test]
@@ -540,4 +540,52 @@ fn list_directory_lists_only_visible_subdirectories() {
         root.join("missing").to_string_lossy().into_owned()
     ))
     .is_err());
+}
+
+/// 符号链接目录（如 macOS /tmp → private/tmp）必须可选。
+#[cfg(unix)]
+#[test]
+fn list_directory_follows_directory_symlinks() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("real")).unwrap();
+    std::os::unix::fs::symlink(root.join("real"), root.join("linked")).unwrap();
+    std::fs::write(root.join("plain.txt"), "x").unwrap();
+
+    let listing = codescan_lib::commands::list_directory(Some(
+        root.to_string_lossy().into_owned(),
+    ))
+    .unwrap();
+    let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, vec!["linked", "real"]);
+}
+
+/// 测试连接的前置校验：配置不完整或缺少 Key 时不发起网络请求。
+#[test]
+fn provider_probe_preflight_rejects_incomplete_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("test.db")).unwrap();
+
+    // 默认配置 model 为空。
+    let err = prepare_provider_probe(&store).unwrap_err();
+    assert!(err.contains("model"), "应提示 model 缺失：{err}");
+
+    store
+        .set_meta(
+            llm::META_PROVIDER,
+            &llm::ProviderConfig {
+                kind: llm::ProviderKind::OpenAi,
+                base_url: "https://api.openai.com/v1".into(),
+                model: "gpt-test".into(),
+            }
+            .to_json(),
+        )
+        .unwrap();
+    let err = prepare_provider_probe(&store).unwrap_err();
+    assert!(err.contains("API Key"), "应提示未配置 Key：{err}");
+
+    store.set_secret(llm::SECRET_API_KEY, "sk-probe").unwrap();
+    let (config, key) = prepare_provider_probe(&store).unwrap();
+    assert_eq!(config.model, "gpt-test");
+    assert_eq!(key, "sk-probe");
 }

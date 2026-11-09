@@ -134,8 +134,8 @@ export function HistoryView() {
                   className={selectedFingerprint === f.fingerprint ? "selected" : ""}
                   onClick={() => setSelectedFingerprint(f.fingerprint)}
                 >
-                  <span className={`sev sev-${f.severity}`}>{f.severity}</span>
-                  <span className="dim">{f.dimension}</span>
+                  <span className={`sev-chip sev-${f.severity}`}>{f.severity}</span>
+                  <span className="dim-badge">{f.dimension}</span>
                   <span className="path">
                     {f.path}:{f.span.start.line}
                   </span>
@@ -145,7 +145,13 @@ export function HistoryView() {
                   </span>
                 </li>
               ))}
-              {openFindings.length === 0 && <li className="muted">无发现</li>}
+              {openFindings.length === 0 && (
+                <li className="empty-row">
+                  <div className="empty-state">
+                    <strong>无发现</strong>
+                  </div>
+                </li>
+              )}
             </ul>
             {(() => {
               const selected = openFindings.find(
@@ -160,7 +166,7 @@ export function HistoryView() {
                     {selected.span.end.line}
                   </p>
                   <p>{selected.message}</p>
-                  <pre>
+                  <pre className="code-block">
                     <code>{selected.match_text}</code>
                   </pre>
                   {selected.flows.length > 0 && (

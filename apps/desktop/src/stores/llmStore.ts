@@ -7,11 +7,15 @@ import {
   type CandidateRegression,
   type CandidateRule,
   type ProviderInfo,
+  type ProviderTestResult,
   type TriageResult,
 } from "../platform";
 
 type LlmState = {
   provider: ProviderInfo | null;
+  testing: boolean;
+  testResult: ProviderTestResult | null;
+  testError: string | null;
   triage: Record<string, TriageResult | "loading" | null>;
   /** 流式分诊已接收的增量文本（按 fingerprint）。 */
   triageStreams: Record<string, string>;
@@ -26,6 +30,7 @@ type LlmState = {
   saveProvider: (kind: string, baseUrl: string, model: string) => Promise<void>;
   saveApiKey: (key: string) => Promise<void>;
   clearApiKey: () => Promise<void>;
+  testConnection: () => Promise<void>;
   runTriage: (scanId: number, fingerprint: string) => Promise<void>;
   runTriageStream: (scanId: number, fingerprint: string) => Promise<void>;
   runBatchTriage: (scanId: number, fingerprints: string[]) => Promise<void>;
@@ -41,6 +46,9 @@ type LlmState = {
 
 export const useLlmStore = create<LlmState>((set, get) => ({
   provider: null,
+  testing: false,
+  testResult: null,
+  testError: null,
   triage: {},
   triageStreams: {},
   streamPending: {},
@@ -58,16 +66,31 @@ export const useLlmStore = create<LlmState>((set, get) => ({
   async saveProvider(kind, baseUrl, model) {
     await api.setProviderConfig(kind, baseUrl, model);
     await get().loadProvider();
+    set({ testResult: null, testError: null });
   },
 
   async saveApiKey(key) {
     await api.setApiKey(key);
     await get().loadProvider();
+    set({ testResult: null, testError: null });
   },
 
   async clearApiKey() {
     await api.clearApiKey();
     await get().loadProvider();
+    set({ testResult: null, testError: null });
+  },
+
+  async testConnection() {
+    set({ testing: true, testResult: null, testError: null });
+    try {
+      const result = await api.testProviderConnection();
+      set({ testResult: result });
+    } catch (e) {
+      set({ testError: String(e) });
+    } finally {
+      set({ testing: false });
+    }
   },
 
   async runTriage(scanId, fingerprint) {

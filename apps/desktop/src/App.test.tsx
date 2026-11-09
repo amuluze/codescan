@@ -40,6 +40,7 @@ vi.mock("./platform", () => {
       platform.invoke("set_provider_config", { kind, baseUrl, model }),
     setApiKey: (key: string) => platform.invoke("set_api_key", { key }),
     clearApiKey: () => platform.invoke("clear_api_key"),
+    testProviderConnection: () => platform.invoke("test_provider_connection"),
     llmTriage: (scanId: number, fingerprint: string) =>
       platform.invoke("llm_triage", { scanId, fingerprint }),
     llmTriageStream: (scanId: number, fingerprint: string, requestId: string) =>
@@ -96,6 +97,9 @@ beforeEach(() => {
   invokeMock.mockReset();
   useLlmStore.setState({
     provider: null,
+    testing: false,
+    testResult: null,
+    testError: null,
     triage: {},
     triageStreams: {},
     streamPending: {},
@@ -159,6 +163,8 @@ beforeEach(() => {
           model: "test-model",
           has_key: true,
         };
+      case "test_provider_connection":
+        return { kind: "openai", model: "test-model", latency_ms: 87 };
       case "llm_triage":
         return {
           assessment: "likely-false-positive",
@@ -453,5 +459,27 @@ describe("App 主链路", () => {
     // B6：污点链渲染（source 位置列表）。
     const flows = screen.getByTestId("taint-flows");
     expect(flows.textContent).toContain("第 2 行");
+  });
+
+  it("设置页测试连接成功时展示模型与延迟", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    await user.click(await screen.findByRole("button", { name: "测试连接" }));
+    const ok = await screen.findByTestId("provider-test-ok");
+    expect(ok).toHaveTextContent("连接成功");
+    expect(ok).toHaveTextContent("test-model");
+    expect(ok).toHaveTextContent("87 ms");
+  });
+
+  it("设置页测试连接失败时展示可读错误", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    await screen.findByTestId("key-status");
+    invokeMock.mockRejectedValueOnce(new Error("Provider 返回 401：Unauthorized"));
+    await user.click(screen.getByRole("button", { name: "测试连接" }));
+    const err = await screen.findByTestId("provider-test-error");
+    expect(err).toHaveTextContent("401");
   });
 });

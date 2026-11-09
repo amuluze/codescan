@@ -50,6 +50,12 @@ export type ProviderInfo = {
   has_key: boolean;
 };
 
+export type ProviderTestResult = {
+  kind: "openai" | "anthropic";
+  model: string;
+  latency_ms: number;
+};
+
 export type TriageResult = {
   assessment: "true-positive" | "likely-false-positive" | "uncertain";
   rationale: string;
@@ -120,6 +126,8 @@ export const api = {
     platform.invoke<void>("set_provider_config", { kind, baseUrl, model }),
   setApiKey: (key: string) => platform.invoke<void>("set_api_key", { key }),
   clearApiKey: () => platform.invoke<void>("clear_api_key"),
+  testProviderConnection: () =>
+    platform.invoke<ProviderTestResult>("test_provider_connection"),
   llmTriage: (scanId: number, fingerprint: string) =>
     platform.invoke<TriageResult>("llm_triage", { scanId, fingerprint }),
   llmTriageStream: (scanId: number, fingerprint: string, requestId: string) =>

@@ -184,7 +184,7 @@ export function FindingsView() {
                   {SEVERITY_LABEL[f.severity]}
                 </span>
                 <span className="dim-badge">{DIMENSION_LABEL[f.dimension]}</span>
-                <span className="path">
+                <span className="path" title={`${f.path}:${f.span.start.line}`}>
                   {f.path}:{f.span.start.line}
                 </span>
                 <span className="rule">

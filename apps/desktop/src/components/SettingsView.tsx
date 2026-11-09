@@ -3,7 +3,17 @@ import { useEffect, useState } from "react";
 import { useLlmStore } from "../stores/llmStore";
 
 export function SettingsView() {
-  const { provider, loadProvider, saveProvider, saveApiKey, clearApiKey } = useLlmStore();
+  const {
+    provider,
+    loadProvider,
+    saveProvider,
+    saveApiKey,
+    clearApiKey,
+    testing,
+    testResult,
+    testError,
+    testConnection,
+  } = useLlmStore();
   const [kind, setKind] = useState<string>("openai");
   const [baseUrl, setBaseUrl] = useState("");
   const [model, setModel] = useState("");
@@ -56,6 +66,12 @@ export function SettingsView() {
         </div>
       </header>
 
+      {message && (
+        <p role="status" className="notice">
+          {message}
+        </p>
+      )}
+
       <div className="settings-stack">
         <section className="card">
           <header className="card-head">
@@ -91,43 +107,53 @@ export function SettingsView() {
               />
             </label>
           </div>
+          <div className="key-block">
+            <div className="key-head">
+              <span className="field-label">API Key</span>
+              <span
+                className={`status-chip ${provider?.has_key ? "ok" : "muted-chip"}`}
+                data-testid="key-status"
+              >
+                {provider?.has_key ? "已配置" : "未配置"}
+              </span>
+            </div>
+            <div className="key-row">
+              <input
+                aria-label="API Key"
+                type="password"
+                className="key-input"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder="sk-…"
+                autoComplete="off"
+              />
+              <button className="primary" onClick={() => void saveKey()} disabled={!apiKey.trim()}>
+                保存 Key
+              </button>
+              <button className="ghost" onClick={() => void clearApiKey()} disabled={!provider?.has_key}>
+                清除 Key
+              </button>
+            </div>
+            <p className="key-note">仅写入 Rust 独占的 SQLite secrets 表；命令面不提供明文回读。</p>
+          </div>
           <footer className="card-actions">
             <button className="primary" onClick={() => void save()}>
               保存 Provider 配置
             </button>
+            <button className="ghost" onClick={() => void testConnection()} disabled={testing}>
+              {testing ? "测试中…" : "测试连接"}
+            </button>
           </footer>
-        </section>
-
-        <section className="card">
-          <header className="card-head">
-            <div>
-              <h3>API Key</h3>
-              <p className="card-sub">仅写入 Rust 独占的 SQLite secrets 表；命令面不提供明文回读。</p>
-            </div>
-            <span
-              className={`status-chip ${provider?.has_key ? "ok" : "muted-chip"}`}
-              data-testid="key-status"
-            >
-              {provider?.has_key ? "已配置" : "未配置"}
-            </span>
-          </header>
-          <div className="key-row">
-            <input
-              aria-label="API Key"
-              type="password"
-              className="key-input"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              placeholder="sk-…"
-              autoComplete="off"
-            />
-            <button className="primary" onClick={() => void saveKey()} disabled={!apiKey.trim()}>
-              保存 Key
-            </button>
-            <button className="ghost" onClick={() => void clearApiKey()} disabled={!provider?.has_key}>
-              清除 Key
-            </button>
-          </div>
+          {testResult && (
+            <p role="status" className="notice success" data-testid="provider-test-ok">
+              连接成功 · {testResult.kind} · {testResult.model} · {testResult.latency_ms} ms
+            </p>
+          )}
+          {testError && (
+            <p role="alert" className="notice failure" data-testid="provider-test-error">
+              {testError}
+            </p>
+          )}
         </section>
 
         <section className="card card-note">
@@ -138,12 +164,6 @@ export function SettingsView() {
             <li>扫描本身只读工作区；历史、基线与规则写入 <code>~/.codescan/</code>。</li>
           </ul>
         </section>
-
-        {message && (
-          <p role="status" className="notice">
-            {message}
-          </p>
-        )}
       </div>
     </section>
   );

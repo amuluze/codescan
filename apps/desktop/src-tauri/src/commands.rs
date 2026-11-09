@@ -87,10 +87,8 @@ pub fn list_directory(path: Option<String>) -> Result<DirListing, String> {
         if name.starts_with('.') {
             continue; // 隐藏目录不列出；可手动输入路径访问
         }
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-        if !file_type.is_dir() {
+        // path().is_dir() 跟随符号链接：macOS 的 /tmp、/var 等是链接，不能漏列。
+        if !entry.path().is_dir() {
             continue;
         }
         entries.push(DirEntry {
@@ -366,6 +364,48 @@ pub fn clear_api_key(state: State<'_, AppState>) -> Result<(), String> {
         .unwrap()
         .delete_secret(llm::SECRET_API_KEY)
         .map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProviderTestResult {
+    pub kind: String,
+    pub model: String,
+    pub latency_ms: u64,
+}
+
+/// 读懂当前已保存的 Provider 配置与 Key（无头测试覆盖错误路径）。
+pub fn prepare_provider_probe(
+    store: &Store,
+) -> Result<(llm::ProviderConfig, String), String> {
+    let config = read_provider_config(store);
+    config.validate()?;
+    let key = store
+        .get_secret(llm::SECRET_API_KEY)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "未配置 API Key".to_string())?;
+    Ok((config, key))
+}
+
+/// 用最小请求验证 Base URL、模型名与 API Key 是否可用；不写入任何状态。
+#[tauri::command]
+pub async fn test_provider_connection(
+    state: State<'_, AppState>,
+) -> Result<ProviderTestResult, String> {
+    let (config, key) = {
+        // 不跨 await 持有数据库锁。
+        let store = state.store.lock().unwrap();
+        prepare_provider_probe(&store)?
+    };
+    let started = std::time::Instant::now();
+    llm::probe(&config, &key).await?;
+    Ok(ProviderTestResult {
+        kind: match config.kind {
+            llm::ProviderKind::OpenAi => "openai".into(),
+            llm::ProviderKind::Anthropic => "anthropic".into(),
+        },
+        model: config.model,
+        latency_ms: started.elapsed().as_millis() as u64,
+    })
 }
 
 /// 读取一次 LLM 调用所需的全部上下文；Key 只在 Rust 内存中短暂存在。

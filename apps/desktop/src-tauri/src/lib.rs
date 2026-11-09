@@ -44,6 +44,7 @@ pub fn run() {
             commands::get_provider_config,
             commands::set_api_key,
             commands::clear_api_key,
+            commands::test_provider_connection,
             commands::llm_triage,
             commands::llm_triage_stream,
             commands::llm_batch_triage,

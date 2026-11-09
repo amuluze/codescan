@@ -162,15 +162,25 @@ pub fn parse_openai_response(body: &str) -> Result<String, String> {
 pub fn parse_anthropic_response(body: &str) -> Result<String, String> {
     let value: serde_json::Value =
         serde_json::from_str(body).map_err(|e| format!("响应不是 JSON：{e}"))?;
-    value["content"][0]["text"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| {
-            format!(
-                "响应缺少 content[0].text：{}",
-                truncate(body, 300)
-            )
-        })
+    // content 是块数组：thinking 块只有 `thinking`，文本块才有 `text`。
+    // 跳过非文本块并拼接全部文本块，避免扩展思考导致 content[0] 不是 text。
+    let mut text = String::new();
+    if let Some(blocks) = value["content"].as_array() {
+        for block in blocks {
+            if let Some(part) = block["text"].as_str() {
+                text.push_str(part);
+            }
+        }
+    }
+    if text.is_empty() {
+        let reason = if value["content"].is_array() {
+            "响应没有 text 内容块"
+        } else {
+            "响应缺少 content 数组"
+        };
+        return Err(format!("{reason}：{}", truncate(body, 300)));
+    }
+    Ok(text)
 }
 
 // ---------- 流式（SSE）解析：纯函数，单测覆盖 ----------
@@ -667,6 +677,58 @@ pub async fn complete(
     }
 }
 
+/// 连通性检测：最小请求、短超时；只要 2xx 且返回 JSON 即视为可用。
+/// 错误信息不得包含 API Key。
+pub async fn probe(config: &ProviderConfig, api_key: &str) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("HTTP 客户端创建失败：{e}"))?;
+    let url = endpoint(config);
+    let (body, request) = match config.kind {
+        ProviderKind::OpenAi => (
+            serde_json::json!({
+                "model": config.model,
+                "messages": [{ "role": "user", "content": "ping" }],
+                "max_tokens": 8,
+                "temperature": 0,
+            }),
+            client.post(&url).bearer_auth(api_key),
+        ),
+        ProviderKind::Anthropic => (
+            serde_json::json!({
+                "model": config.model,
+                "max_tokens": 8,
+                "messages": [{ "role": "user", "content": "ping" }],
+                "temperature": 0,
+            }),
+            client
+                .post(&url)
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01"),
+        ),
+    };
+    let response = request
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败：{e}"))?;
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|e| format!("读取响应失败：{e}"))?;
+    if !status.is_success() {
+        return Err(format!("Provider 返回 {status}：{}", truncate(&text, 500)));
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("响应不是 JSON：{e}"))?;
+    if !value.is_object() {
+        return Err("Provider 响应不是 JSON 对象".into());
+    }
+    Ok(())
+}
+
 /// 流式调用 Provider，每片增量经 `on_delta` 回调，返回完整文本。
 /// 错误信息不得包含 API Key。
 pub async fn complete_stream<F>(
@@ -738,6 +800,26 @@ mod tests {
         let anthropic_reply = r#"{"content":[{"type":"text","text":"world"}]}"#;
         assert_eq!(parse_anthropic_response(anthropic_reply).unwrap(), "world");
         assert!(parse_anthropic_response(r#"{"error":{"message":"bad"}}"#).is_err());
+    }
+
+    /// 扩展思考：thinking 块在前，文本块在后；必须取文本块而不是 content[0]。
+    #[test]
+    fn anthropic_parser_skips_thinking_blocks() {
+        let reply = r#"{"content":[
+            {"type":"thinking","thinking":"先分析证据，再给出判断"},
+            {"type":"text","text":"{\"assessment\":\"likely-false-positive\","},
+            {"type":"text","text":"\"rationale\":\"测试文件中的 TLS 校验\"}"}
+        ]}"#;
+        let text = parse_anthropic_response(reply).unwrap();
+        assert_eq!(
+            text,
+            r#"{"assessment":"likely-false-positive","rationale":"测试文件中的 TLS 校验"}"#
+        );
+
+        // 只有 thinking、没有文本块 → 可读错误，而不是空字符串。
+        let only_thinking = r#"{"content":[{"type":"thinking","thinking":"..."}]}"#;
+        let err = parse_anthropic_response(only_thinking).unwrap_err();
+        assert!(err.contains("没有 text 内容块"), "{err}");
     }
 
     #[test]
@@ -814,6 +896,10 @@ mod tests {
         );
         assert!(parser
             .push("data: {\"type\":\"message_start\",\"message\":{}}\n")
+            .is_empty());
+        // thinking_delta 只有 thinking 字段：不得作为正文增量输出。
+        assert!(parser
+            .push("data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"推理\"}}\n")
             .is_empty());
         // 无换行结尾的残留行在 finish 时输出。
         assert!(parser.push("data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"尾\"}}").is_empty());
