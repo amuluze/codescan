@@ -99,3 +99,14 @@ doSomethingSafe();
 4. `@match` 多捕获时取**跨度最小**者作为端点（同 patterns 内谓词可用 `@fn`/`@prop` 等别名）；sink 判定同时要求节点种类与字节范围相等，避免 block/expression_statement/call 共享范围导致重复报告。
 5. 发现证据：`flows` = sink 对应的 source 位置列表，UI 与 SARIF `properties.flows` 展示。
 6. 消息口径：只能表述「不可信数据可能到达」的过程内近似，不得声称跨过程或堆敏感证明。
+
+## 忽略规则（扫描范围）
+
+扫描范围由四层忽略源共同决定（Domain §3.1）：
+
+1. 工作区 `.gitignore`（无需 `.git` 存在也生效）；
+2. 工作区根 `.codescanignore`（gitignore 语法）；
+3. 应用级全局忽略文件 `~/.codescan/ignore`（gitignore 语法，作用于任何工作区）；
+4. 内置默认排除目录：`node_modules`、`target`、`dist`、`build`、`.venv`、`__pycache__`、`.next`、`coverage`。
+
+被忽略文件不逐条出事件，统一计入 `IgnoredSummary` 数量。

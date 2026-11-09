@@ -40,8 +40,28 @@ npm run tauri dev        # 桌面应用（开发模式）
 | `npm run build` | 前端生产构建 |
 | `npm run test:rust` | Rust 全量测试（引擎 + 命令层无头） |
 | `npm run check:rust` | clippy -D warnings |
+| `cargo test -p codescan-cli` | CLI 黑盒测试 |
+| `pnpm tauri build` | 本地产出桌面安装包（未签名） |
 
 规则编写与 fixture 规范见 [docs/rules.md](docs/rules.md)。
+
+## 命令行与 CI 门禁
+
+```bash
+# 生成基线（存量问题入库）
+cargo run -p codescan-cli -- scan <repo> --save-baseline codescan-baseline.json
+
+# 门禁：仅新增发现阻断（配合 --format sarif 上传/归档）
+cargo run -p codescan-cli -- scan <repo> \
+  --baseline codescan-baseline.json --fail-on new \
+  --format sarif --out codescan.sarif
+```
+
+退出码：0 通过 / 1 门禁命中 / 2 用法或运行时错误。完整用法见 [docs/cli.md](docs/cli.md)。
+
+## 忽略规则
+
+扫描范围 = 工作区 `.gitignore` + `.codescanignore` + 全局 `~/.codescan/ignore`（均为 gitignore 语法）+ 内置默认目录（`node_modules`、`target`、`dist`、`build`、`.venv`、`__pycache__`、`.next`、`coverage`）。被忽略文件计入扫描事件的汇总计数。
 
 ## LLM 辅助层（v3）
 
@@ -50,3 +70,7 @@ npm run tauri dev        # 桌面应用（开发模式）
 ## 门禁语义
 
 任意历史扫描可设为基线；门禁差异 = 新扫描发现 \ 基线（仅指纹相等性）。指纹对行号漂移稳定，实体代码变更即视为新发现。SARIF 2.1.0 导出与内部发现一一对应。详见 Domain Spec。
+
+## 发布
+
+打 tag（`v*`）触发 `.github/workflows/release.yml`：macOS arm64 / Linux x64 / Windows x64 未签名构建，产出 draft release。签名与公证需在仓库 Secrets 注入证书后在 workflow 中启用（当前未配置，macOS 首次打开需右键 → 打开）。

@@ -47,6 +47,7 @@ impl From<StoreError> for ManagerError {
 pub struct ScanManager {
     store: Arc<Mutex<Store>>,
     active: Arc<Mutex<Option<ActiveScan>>>,
+    global_ignore_file: Option<std::path::PathBuf>,
 }
 
 struct ActiveScan {
@@ -58,7 +59,17 @@ impl ScanManager {
         ScanManager {
             store,
             active: Arc::new(Mutex::new(None)),
+            global_ignore_file: None,
         }
+    }
+
+    /// 配置应用级全局忽略文件（~/.codescan/ignore，gitignore 语法）。
+    pub fn with_global_ignore(
+        mut self,
+        path: Option<std::path::PathBuf>,
+    ) -> ScanManager {
+        self.global_ignore_file = path;
+        self
     }
 
     pub fn cancel_active(&self) {
@@ -141,7 +152,10 @@ impl ScanManager {
         })?;
 
         let started = SystemTime::now();
-        let report = engine.scan(root, cancel, progress)?;
+        let options = codescan_engine::scan::ScanOptions {
+            global_ignore_file: self.global_ignore_file.clone(),
+        };
+        let report = engine.scan_with_options(root, &options, cancel, progress)?;
         let duration_ms = started
             .elapsed()
             .map(|d| d.as_millis() as i64)

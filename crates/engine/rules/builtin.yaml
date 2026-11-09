@@ -13,16 +13,20 @@ rules:
     severity: warning
     message: 函数圈复杂度过高（启发式：决策点计数）
     metric: cyclomatic-complexity
+    # 依据真实仓库分布（axiom：违规集 p50=23/p90=57）：默认取 25，
+    # 只标记明确偏高的函数；复杂仓库可在自定义规则中覆盖。
     options:
-      threshold: 15
+      threshold: 25
   - id: metric/function-length
     language: "*"
     dimension: quality
     severity: info
     message: 函数过长（启发式：行数）
     metric: function-length
+    # 行级口径（含注释与嵌套函数体；span 语义）。axiom 违规集 p50=124，
+    # 默认 200 只标记明显过长函数。
     options:
-      threshold: 80
+      threshold: 200
   - id: metric/nesting-depth
     language: "*"
     dimension: quality
@@ -37,8 +41,9 @@ rules:
     severity: warning
     message: 重复代码块（启发式：规范化行窗口）
     metric: duplicate-block
+    # 窗口 12 行（axiom 命中块 p50=12 行），降低小片段噪声。
     options:
-      window: 10
+      window: 12
       min_occurrences: 2
   - id: metric/unreachable-code
     language: "*"

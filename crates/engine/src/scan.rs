@@ -17,6 +17,25 @@ use std::path::{Path, PathBuf};
 /// 单文件大小上限（Task Spec 冻结的引擎常量）。
 pub const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
+/// 内置默认排除目录（与语言无关的产物/依赖目录；`.codescanignore` 无法反选）。
+pub const DEFAULT_IGNORED_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".venv",
+    "__pycache__",
+    ".next",
+    "coverage",
+];
+
+/// 扫描选项（Domain §3.1：忽略源 = .gitignore + .codescanignore + 全局忽略文件 + 内置默认）。
+#[derive(Debug, Clone, Default)]
+pub struct ScanOptions {
+    /// 额外全局忽略文件（gitignore 语法，应用于工作区内任意路径）。
+    pub global_ignore_file: Option<std::path::PathBuf>,
+}
+
 pub struct Engine {
     ast_rules: Vec<AstRule>,
     text_rules: Vec<TextRule>,
@@ -179,11 +198,21 @@ impl Engine {
         cancel: &CancelToken,
         progress: &(dyn Fn(Progress) + Sync),
     ) -> Result<ScanReport, ScanError> {
+        self.scan_with_options(root, &ScanOptions::default(), cancel, progress)
+    }
+
+    pub fn scan_with_options(
+        &self,
+        root: &Path,
+        options: &ScanOptions,
+        cancel: &CancelToken,
+        progress: &(dyn Fn(Progress) + Sync),
+    ) -> Result<ScanReport, ScanError> {
         progress(Progress::Walking);
 
         // 1. 收集文件（排序保证确定性处理顺序）。
         let mut files: Vec<(PathBuf, String)> = Vec::new();
-        for entry in walk_workspace(root) {
+        for entry in walk_workspace(root, options) {
             let (abs, rel) = entry;
             files.push((abs, rel));
         }
@@ -627,16 +656,32 @@ fn run_text_rule(rule: &TextRule, source: &str, path: &str, degraded: bool) -> V
     findings
 }
 
-/// `ignore` 遍历：尊重 .gitignore（无需 .git 存在）、跳过隐藏文件、不跟随符号链接。
-fn walk_workspace(root: &Path) -> Vec<(PathBuf, String)> {
+/// `ignore` 遍历：尊重 .gitignore（无需 .git 存在）、`.codescanignore`、
+/// 全局忽略文件与内置默认排除目录；跳过隐藏文件、不跟随符号链接。
+fn walk_workspace(root: &Path, options: &ScanOptions) -> Vec<(PathBuf, String)> {
     let mut out = Vec::new();
-    let walker = ignore::WalkBuilder::new(root)
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder
         .hidden(true)
         .git_ignore(true)
         .git_exclude(true)
         .require_git(false)
         .follow_links(false)
-        .build();
+        .add_custom_ignore_filename(".codescanignore");
+    if let Some(global) = &options.global_ignore_file {
+        if global.is_file() {
+            builder.add_ignore(global);
+        }
+    }
+    // 内置默认排除目录（best-effort：非法模式忽略）。
+    let mut overrides = ignore::overrides::OverrideBuilder::new(root);
+    for dir in DEFAULT_IGNORED_DIRS {
+        let _ = overrides.add(&format!("!{dir}/"));
+    }
+    if let Ok(overrides) = overrides.build() {
+        builder.overrides(overrides);
+    }
+    let walker = builder.build();
     for entry in walker.flatten() {
         if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
             let abs = entry.path().to_path_buf();

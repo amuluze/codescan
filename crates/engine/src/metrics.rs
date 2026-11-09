@@ -331,7 +331,7 @@ pub fn file_metrics(
             }
             if has_cyclomatic {
                 let mut decisions = 0usize;
-                walk_all(func, &mut |node| {
+                walk_own_subtree(func, prof.functions, &mut |node| {
                     if prof.decisions.contains(&node.kind())
                         || is_logic_operator_node(node, source, lang)
                     {
@@ -353,7 +353,7 @@ pub fn file_metrics(
                 }
             }
             if has_nesting {
-                let depth = max_block_depth(func, prof.blocks) - 1; // 函数体自身为 0 层
+                let depth = max_block_depth(func, prof.blocks, prof.functions) - 1; // 函数体自身为 0 层
                 if depth as f64 > nesting_threshold {
                     findings.push(finding(
                         "metric/nesting-depth",
@@ -375,8 +375,31 @@ pub fn file_metrics(
     findings
 }
 
-fn max_block_depth(func: Node<'_>, blocks: &[&str]) -> usize {
-    fn rec(node: Node<'_>, blocks: &[&str], depth: usize, max: &mut usize) {
+/// 只遍历函数自身子树：不进入嵌套函数体（其度量归属嵌套函数自身）。
+fn walk_own_subtree<'tree, F: FnMut(Node<'tree>)>(
+    func: Node<'tree>,
+    functions: &[&str],
+    f: &mut F,
+) {
+    fn rec<'tree>(node: Node<'tree>, functions: &[&str], f: &mut impl FnMut(Node<'tree>)) {
+        f(node);
+        for child in named_children(node) {
+            if functions.contains(&child.kind()) {
+                continue;
+            }
+            rec(child, functions, f);
+        }
+    }
+    for child in named_children(func) {
+        if functions.contains(&child.kind()) {
+            continue;
+        }
+        rec(child, functions, f);
+    }
+}
+
+fn max_block_depth(func: Node<'_>, blocks: &[&str], functions: &[&str]) -> usize {
+    fn rec(node: Node<'_>, blocks: &[&str], functions: &[&str], depth: usize, max: &mut usize) {
         let next = if blocks.contains(&node.kind()) {
             depth + 1
         } else {
@@ -386,12 +409,18 @@ fn max_block_depth(func: Node<'_>, blocks: &[&str]) -> usize {
             *max = next;
         }
         for child in named_children(node) {
-            rec(child, blocks, next, max);
+            if functions.contains(&child.kind()) {
+                continue;
+            }
+            rec(child, blocks, functions, next, max);
         }
     }
     let mut max = 0usize;
     for child in named_children(func) {
-        rec(child, blocks, 0, &mut max);
+        if functions.contains(&child.kind()) {
+            continue;
+        }
+        rec(child, blocks, functions, 0, &mut max);
     }
     max.max(1) // 函数体块至少算 1（供外部 -1）
 }
@@ -669,6 +698,15 @@ mod tests {
             "未找到包含 {needle:?} 的度量发现：{:?}",
             findings.iter().map(|f| &f.message).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn nested_function_decisions_not_counted_in_outer() {
+        let src = "function outer(v: number): number {\n  if (v > 0) { v += 1; }\n  const inner = () => {\n    if (v > 1) { v += 2; }\n    if (v > 2) { v += 3; }\n    if (v > 3) { v += 4; }\n    return v;\n  };\n  return inner();\n}\n";
+        let findings = run(Language::TypeScript, src, MetricKind::CyclomaticComplexity, &[("threshold", 1.0)]);
+        assert_contains(&findings, "函数 outer 圈复杂度 2");
+        assert_contains(&findings, "函数 (匿名) 圈复杂度 4");
+        assert_eq!(findings.len(), 2, "{findings:?}");
     }
 
     // ---- Python ----

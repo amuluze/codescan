@@ -28,4 +28,7 @@ SDD（Spec-Driven Development），约定与 axiom 仓库一致（参照 `axiom/
 ## 验证习惯
 
 - 提交前：`npm run check:rust` + `npm run test:rust` + `npm run typecheck` + `npm run test` + `npm run build`。
+- CLI 改动：`cargo test -p codescan-cli`（黑盒退出码/格式/基线语义）。
+- 扫描范围/忽略改动：`cargo test -p codescan-engine --test integration ignore_sources_and_defaults`，并保持 Domain §3.1 的忽略源枚举同步。
+- 打包：`pnpm --filter @codescan/desktop tauri build`（本地验证 .app/.dmg；CI 用 release workflow，需 tag）。
 - 行为变更以最小测试证明，不为走查而重跑全套。

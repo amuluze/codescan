@@ -294,3 +294,58 @@ fn b4_sarif_flows() {
     assert_eq!(flows.len(), 1);
     assert_eq!(flows[0]["startLine"].as_u64().unwrap(), 1);
 }
+
+/// 任务 6：忽略源 = 内置默认目录 + `.codescanignore` + 全局忽略文件，且全部计入汇总事件。
+#[test]
+fn ignore_sources_and_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let write = |rel: &str, content: &str| {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    };
+    // 会被内置默认目录排除。
+    write("node_modules/dep/index.ts", "// TODO: vendor noise\n");
+    // 会被 .codescanignore 排除。
+    write(".codescanignore", "generated/\n");
+    write("generated/out.ts", "// TODO: generated\n");
+    // 会被全局忽略文件排除。
+    let global_ignore = dir.path().join("global-ignore");
+    std::fs::write(&global_ignore, "local-only/\n").unwrap();
+    write("local-only/scratch.ts", "// TODO: local scratch\n");
+    // 正常扫描。
+    write("src/app.ts", "// TODO: real debt\n");
+
+    let engine = Engine::with_builtin(&HashSet::new()).unwrap();
+    let options = codescan_engine::scan::ScanOptions {
+        global_ignore_file: Some(global_ignore.clone()),
+    };
+    let report = engine
+        .scan_with_options(root, &options, &CancelToken::new(), &|_| {})
+        .expect("扫描失败");
+
+    let todo: Vec<&str> = report
+        .findings
+        .iter()
+        .filter(|f| f.rule_id == "text/todo-debt")
+        .map(|f| f.path.as_str())
+        .collect();
+    assert_eq!(todo, vec!["src/app.ts"], "仅真实源码应被扫描：{todo:?}");
+    assert!(
+        report
+            .events
+            .iter()
+            .any(|e| matches!(e, ScanEvent::IgnoredSummary { count } if *count >= 3)),
+        "被忽略文件应计入汇总事件：{:?}",
+        report.events
+    );
+    // 无全局忽略文件时 local-only 会被扫描（证明选项生效）。
+    let report_plain = engine
+        .scan(root, &CancelToken::new(), &|_| {})
+        .expect("扫描失败");
+    assert!(report_plain
+        .findings
+        .iter()
+        .any(|f| f.path == "local-only/scratch.ts"));
+}

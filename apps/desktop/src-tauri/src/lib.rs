@@ -47,7 +47,8 @@ pub fn run() {
             commands::save_custom_rule,
         ])
         .manage(AppState {
-            manager: manager::ScanManager::new(store.clone()),
+            manager: manager::ScanManager::new(store.clone())
+                .with_global_ignore(Some(data_root.join("ignore"))),
             store,
         })
         .run(tauri::generate_context!())

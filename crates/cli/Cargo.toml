@@ -1,0 +1,19 @@
+[package]
+name = "codescan-cli"
+description = "Headless CLI for the Codescan deterministic scan engine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "MIT"
+
+[[bin]]
+name = "codescan"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+codescan-engine = { path = "../engine" }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

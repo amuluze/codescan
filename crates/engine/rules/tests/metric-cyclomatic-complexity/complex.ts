@@ -16,5 +16,16 @@ function complex(v: number): number {
   if (v > 13) { r += 13; }
   if (v > 14) { r += 14; }
   if (v > 15) { r += 15; }
+  if (v > 16) { r += 16; }
+  if (v > 17) { r += 17; }
+  if (v > 18) { r += 18; }
+  if (v > 19) { r += 19; }
+  if (v > 20) { r += 20; }
+  if (v > 21) { r += 21; }
+  if (v > 22) { r += 22; }
+  if (v > 23) { r += 23; }
+  if (v > 24) { r += 24; }
+  if (v > 25) { r += 25; }
+  if (v > 26) { r += 26; }
   return r;
 }
