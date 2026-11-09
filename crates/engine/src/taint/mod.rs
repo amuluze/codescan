@@ -442,6 +442,71 @@ mod tests {
         assert!(sink.flows.iter().any(|p| p.line == 1), "{:?}", sink.flows);
     }
 
+    // ---- v6：points-to 集合 + 形状敏感 ----
+
+    #[test]
+    fn p1_nested_shape_reads() {
+        let rule = ts_rule(TS_READ_SOURCE);
+        let source = "function f(): void {\n  const box = { a: { b: read() } };\n  eval(box.a.b);\n  eval(box.a.c);\n  eval(box.b);\n}\n";
+        let findings = analyze(&rule, &[("s.ts", Language::TypeScript, source)]);
+        let lines: Vec<usize> = findings.iter().map(|f| f.span.start.line).collect();
+        assert_eq!(lines, vec![3], "仅 box.a.b 命中：{findings:?}");
+    }
+
+    #[test]
+    fn p2_nested_writes() {
+        let rule = ts_rule(TS_READ_SOURCE);
+        let source = "function f(obj: any): void {\n  obj.a.b = read();\n  eval(obj.a.b);\n  eval(obj.a.c);\n}\n";
+        let findings = analyze(&rule, &[("s.ts", Language::TypeScript, source)]);
+        let lines: Vec<usize> = findings.iter().map(|f| f.span.start.line).collect();
+        assert_eq!(lines, vec![3], "仅 obj.a.b 命中：{findings:?}");
+    }
+
+    #[test]
+    fn p3_field_pointer_alias() {
+        let rule = ts_rule(TS_READ_SOURCE);
+        let source = "function f(): void {\n  const base: any = {};\n  const box = { x: base };\n  box.x.f = read();\n  eval(base.f);\n  eval(box.y);\n}\n";
+        let findings = analyze(&rule, &[("s.ts", Language::TypeScript, source)]);
+        let lines: Vec<usize> = findings.iter().map(|f| f.span.start.line).collect();
+        assert_eq!(lines, vec![5], "字段指针别名应经 base.f 可见：{findings:?}");
+    }
+
+    #[test]
+    fn p4_set_merge_and_strong_update() {
+        let rule = ts_rule(TS_READ_SOURCE);
+        let merged = "function f(): void {\n  const a: any = {};\n  const b: any = {};\n  let c: any = a;\n  c.f = read();\n  eval(a.f);\n  eval(b.f);\n}\n";
+        let findings = analyze(&rule, &[("s.ts", Language::TypeScript, merged)]);
+        let lines: Vec<usize> = findings.iter().map(|f| f.span.start.line).collect();
+        assert_eq!(lines, vec![6], "别名集合写入仅命中 a.f：{findings:?}");
+
+        let reassigned = "function g(): void {\n  const a: any = {};\n  let c: any = a;\n  c = {};\n  c.f = read();\n  eval(a.f);\n  eval(c.f);\n}\n";
+        let findings = analyze(&rule, &[("t.ts", Language::TypeScript, reassigned)]);
+        let lines: Vec<usize> = findings.iter().map(|f| f.span.start.line).collect();
+        assert_eq!(lines, vec![7], "重赋值后旧对象不命中：{findings:?}");
+    }
+
+    #[test]
+    fn p5_wildcard_index() {
+        let rule = ts_rule(TS_READ_SOURCE);
+        let source = "function f(obj: any, key: string): void {\n  obj[key] = read();\n  eval(obj.any);\n  eval(obj[key]);\n}\n";
+        let findings = analyze(&rule, &[("s.ts", Language::TypeScript, source)]);
+        let lines: Vec<usize> = findings.iter().map(|f| f.span.start.line).collect();
+        assert_eq!(lines, vec![3, 4], "通配写后任意读命中：{findings:?}");
+
+        let known = "function g(obj: any, key: string): void {\n  obj.known = read();\n  eval(obj[key]);\n}\n";
+        let findings = analyze(&rule, &[("t.ts", Language::TypeScript, known)]);
+        assert!(findings.iter().any(|f| f.span.start.line == 3), "{findings:?}");
+    }
+
+    #[test]
+    fn p7_array_elements() {
+        let rule = ts_rule(TS_READ_SOURCE);
+        let source = "function f(): void {\n  const arr = [read()];\n  eval(arr[0]);\n  eval(arr);\n}\n";
+        let findings = analyze(&rule, &[("s.ts", Language::TypeScript, source)]);
+        let lines: Vec<usize> = findings.iter().map(|f| f.span.start.line).collect();
+        assert_eq!(lines, vec![3, 4], "数组元素与整体读取命中：{findings:?}");
+    }
+
     // ---- v5：字段敏感与堆别名 ----
 
     const TS_READ_SOURCE: &str = "(call_expression\n            function: (identifier) @fn (#eq? @fn \"read\")) @match";

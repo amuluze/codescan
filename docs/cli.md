@@ -64,3 +64,34 @@ codescan scan . \
 - 退出码 `1`：出现新发现，流水线失败；`codescan.sarif` 可供代码扫描平台展示。
 
 若要临时收紧为全量门禁，可改用 `--fail-on error` 或 `--fail-on warning`；它们不依赖基线。
+
+## SARIF 上传（GitHub Code Scanning）
+
+```bash
+codescan github-upload --sarif codescan.sarif --repo owner/name \
+  --commit "$GITHUB_SHA" --ref "$GITHUB_REF"
+```
+
+| 参数 | 说明 |
+| --- | --- |
+| `--sarif <path>` | SARIF 2.1.0 文件（`scan --format sarif --out` 的产物）。 |
+| `--repo <owner/name>` | 仓库；默认 `GITHUB_REPOSITORY`。 |
+| `--commit <sha>` | 40 位完整 commit SHA；默认 `GITHUB_SHA`。 |
+| `--ref <ref>` | Git ref；默认 `GITHUB_REF`，再回退 `refs/heads/main`。 |
+| `--dry-run` | 只输出 endpoint/commit/ref/payload 字节数与 token 状态，不联网。 |
+
+- Token 仅从环境变量 `GITHUB_TOKEN` 读取（需要 `security-events: write` 权限）；命令不接受明文 token 参数。
+- 请求：`POST https://api.github.com/repos/{owner}/{repo}/code-scanning/sarifs`，`sarif` = `base64(gzip(SARIF))`，`tool_name = Codescan`。
+- 退出码：0 上传成功；2 参数/文件/网络/HTTP 错误（stderr 含原因，不回显 token）。
+- GitHub Actions 示例：
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+steps:
+  - run: codescan scan . --format sarif --out codescan.sarif
+  - run: codescan github-upload --sarif codescan.sarif
+```
+
+> GitLab：没有与 GitHub Code Scanning 等价的 SARIF 上传 API（代码质量报告为专用 JSON），本命令仅面向 GitHub。

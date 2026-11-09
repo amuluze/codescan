@@ -59,6 +59,13 @@ cargo run -p codescan-cli -- scan <repo> \
 
 退出码：0 通过 / 1 门禁命中 / 2 用法或运行时错误。完整用法见 [docs/cli.md](docs/cli.md)。
 
+SARIF 上传 GitHub Code Scanning（Token 仅从 `GITHUB_TOKEN` 读取）：
+
+```bash
+codescan github-upload --sarif codescan.sarif --repo owner/name \
+  --commit "$GITHUB_SHA" --ref "$GITHUB_REF"
+```
+
 ## 忽略规则
 
 扫描范围 = 工作区 `.gitignore` + `.codescanignore` + 全局 `~/.codescan/ignore`（均为 gitignore 语法）+ 内置默认目录（`node_modules`、`target`、`dist`、`build`、`.venv`、`__pycache__`、`.next`、`coverage`）。被忽略文件计入扫描事件的汇总计数。

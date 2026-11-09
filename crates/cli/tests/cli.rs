@@ -138,3 +138,98 @@ fn global_ignore_excludes_todo_findings() {
     assert!(!out.contains("text/todo-debt"), "stdout: {out}");
     assert!(!out.contains("generated/"), "stdout: {out}");
 }
+
+// ---------- v6.1：GitHub Code Scanning 上传 ----------
+
+const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+fn write_sarif(dir: &Path, name: &str, content: &str) -> String {
+    write_file(dir, name, content);
+    dir.join(name).to_str().unwrap().to_string()
+}
+
+#[test]
+fn upload_dry_run_reports_metadata_without_network() {
+    let dir = tempfile::tempdir().unwrap();
+    let sarif = write_sarif(dir.path(), "out.sarif", "{\"version\":\"2.1.0\",\"runs\":[]}");
+    let output = run(&[
+        "github-upload",
+        "--sarif",
+        &sarif,
+        "--repo",
+        "owner/repo",
+        "--commit",
+        SHA,
+        "--dry-run",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains("endpoint=https://api.github.com/repos/owner/repo/code-scanning/sarifs"), "{out}");
+    assert!(out.contains("payload_bytes="), "{out}");
+    assert!(out.contains("sarif_bytes="), "{out}");
+    assert!(out.contains("token_present=false"), "{out}");
+}
+
+#[test]
+fn upload_uses_ci_env_fallbacks() {
+    let dir = tempfile::tempdir().unwrap();
+    let sarif = write_sarif(dir.path(), "out.sarif", "{\"version\":\"2.1.0\",\"runs\":[]}");
+    let output = codescan()
+        .args(["github-upload", "--sarif", &sarif, "--dry-run"])
+        .env("GITHUB_REPOSITORY", "env/repo")
+        .env("GITHUB_SHA", SHA)
+        .env("GITHUB_REF", "refs/heads/dev")
+        .env_remove("GITHUB_TOKEN")
+        .output()
+        .expect("启动 codescan 失败");
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains("endpoint=https://api.github.com/repos/env/repo/code-scanning/sarifs"), "{out}");
+    assert!(out.contains("ref=refs/heads/dev"), "{out}");
+}
+
+#[test]
+fn upload_rejects_missing_token_repo_commit_and_bad_sarif() {
+    let dir = tempfile::tempdir().unwrap();
+    let sarif = write_sarif(dir.path(), "out.sarif", "{\"version\":\"2.1.0\",\"runs\":[]}");
+
+    // 缺 token（非 dry-run）。
+    let output = codescan()
+        .args([
+            "github-upload", "--sarif", &sarif, "--repo", "owner/repo", "--commit", SHA,
+        ])
+        .env_remove("GITHUB_TOKEN")
+        .output()
+        .expect("启动 codescan 失败");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("GITHUB_TOKEN"), "{}", stderr(&output));
+
+    // 非法 repo。
+    let output = run(&[
+        "github-upload", "--sarif", &sarif, "--repo", "bad", "--commit", SHA, "--dry-run",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("repo"), "{}", stderr(&output));
+
+    // 非法 commit。
+    let output = run(&[
+        "github-upload", "--sarif", &sarif, "--repo", "owner/repo", "--commit", "abc", "--dry-run",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("commit"), "{}", stderr(&output));
+
+    // SARIF 版本错误。
+    let bad = write_sarif(dir.path(), "bad.sarif", "{\"version\":\"1.0\",\"runs\":[]}");
+    let output = run(&[
+        "github-upload", "--sarif", &bad, "--repo", "owner/repo", "--commit", SHA, "--dry-run",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("2.1.0"), "{}", stderr(&output));
+
+    // 缺失文件。
+    let output = run(&[
+        "github-upload", "--sarif", "/nonexistent/x.sarif", "--repo", "owner/repo",
+        "--commit", SHA, "--dry-run",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+}

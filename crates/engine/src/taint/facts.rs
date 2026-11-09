@@ -50,8 +50,10 @@ pub struct ExprFact {
     pub calls: Vec<CallFact>,
     /// 整个表达式被 sanitizer 覆盖。
     pub sanitized: bool,
-    /// 表达式恰为裸标识符时记录其名（用于对象组别名 `a = b`）。
+    /// 表达式恰为裸标识符时记录其名（用于别名 `a = b`）。
     pub alias: Option<String>,
+    /// 对象字面量的字段结构（递归）；数组以 `*` 字段表示元素并集。
+    pub fields: Option<Vec<(String, ExprFact)>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -68,10 +70,6 @@ pub enum StmtFact {
     Assign {
         targets: Vec<AccessPath>,
         rhs: ExprFact,
-    },
-    ObjectInit {
-        target: AccessPath,
-        fields: Vec<(String, ExprFact)>,
     },
     Call(CallFact),
 }
@@ -266,16 +264,10 @@ fn build_fn(ctx: &ExtractCtx<'_>, fn_node: Node<'_>) -> FnFact {
             ) {
                 let targets = access_paths_of(lhs, ctx.lang, ctx.source);
                 if !targets.is_empty() {
-                    if let Some(fields) = object_literal_fields(rhs, ctx) {
-                        for target in targets {
-                            stmts.push(StmtFact::ObjectInit { target, fields: fields.clone() });
-                        }
-                    } else {
-                        stmts.push(StmtFact::Assign {
-                            targets,
-                            rhs: expr_fact(rhs, ctx),
-                        });
-                    }
+                    stmts.push(StmtFact::Assign {
+                        targets,
+                        rhs: expr_fact(rhs, ctx),
+                    });
                 }
                 return;
             }
@@ -486,6 +478,7 @@ fn expr_fact(node: Node<'_>, ctx: &ExtractCtx<'_>) -> ExprFact {
         calls: Vec::new(),
         sanitized,
         alias,
+        fields: None,
     };
     for e in ctx.sources {
         if ns <= e.start && e.end <= ne && !ctx.in_sanitizer(e.start, e.end) {
@@ -497,9 +490,93 @@ fn expr_fact(node: Node<'_>, ctx: &ExtractCtx<'_>) -> ExprFact {
     }
     collect_paths(node, ctx, &mut fact);
     collect_call_facts(node, ctx, &mut fact.calls);
+    fact.fields = literal_fields(node, ctx);
     fact.paths.sort();
     fact.paths.dedup();
     fact
+}
+
+/// 对象/数组字面量结构（递归）；数组元素合并为 `*` 字段。
+fn literal_fields(node: Node<'_>, ctx: &ExtractCtx<'_>) -> Option<Vec<(String, ExprFact)>> {
+    let object_kind = match ctx.lang {
+        Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Jsx => "object",
+        Language::Python => "dictionary",
+        _ => "",
+    };
+    let array_kind = match ctx.lang {
+        Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Jsx => "array",
+        Language::Python => "list",
+        _ => "",
+    };
+    if !object_kind.is_empty() && node.kind() == object_kind {
+        let mut fields = Vec::new();
+        for child in named_children(node) {
+            match child.kind() {
+                "pair" => {
+                    let key = child
+                        .child_by_field_name("key")
+                        .and_then(|k| ctx.source.get(k.start_byte()..k.end_byte()))
+                        .map(|s| s.trim_matches(|c| c == '"' || c == '\'').to_string())
+                        .unwrap_or_else(|| "*".to_string());
+                    if let Some(value) = child.child_by_field_name("value") {
+                        fields.push((key, expr_fact(value, ctx)));
+                    }
+                }
+                "shorthand_property_identifier" => {
+                    let name = ctx
+                        .source
+                        .get(child.start_byte()..child.end_byte())
+                        .unwrap_or("")
+                        .to_string();
+                    fields.push((
+                        name.clone(),
+                        ExprFact {
+                            sources: Vec::new(),
+                            paths: vec![AccessPath::bare(name.clone())],
+                            calls: Vec::new(),
+                            sanitized: false,
+                            alias: Some(name),
+                            fields: None,
+                        },
+                    ));
+                }
+                "spread_element" | "dictionary_splat" => {
+                    let value = named_children(child).first().copied();
+                    if let Some(value) = value {
+                        fields.push(("*".to_string(), expr_fact(value, ctx)));
+                    }
+                }
+                _ => {}
+            }
+        }
+        return Some(fields);
+    }
+    if !array_kind.is_empty() && node.kind() == array_kind {
+        let elements: Vec<ExprFact> = named_children(node)
+            .into_iter()
+            .map(|e| expr_fact(e, ctx))
+            .collect();
+        if elements.is_empty() {
+            return Some(Vec::new());
+        }
+        return Some(vec![("*".to_string(), merge_expr_facts(&elements))]);
+    }
+    None
+}
+
+fn merge_expr_facts(items: &[ExprFact]) -> ExprFact {
+    let mut merged = ExprFact {
+        sanitized: items.iter().all(|e| e.sanitized),
+        ..Default::default()
+    };
+    for item in items {
+        merged.sources.extend(item.sources.iter().copied());
+        merged.paths.extend(item.paths.iter().cloned());
+        merged.calls.extend(item.calls.iter().cloned());
+    }
+    merged.paths.sort();
+    merged.paths.dedup();
+    merged
 }
 
 fn collect_call_facts(node: Node<'_>, ctx: &ExtractCtx<'_>, calls: &mut Vec<CallFact>) {
@@ -614,6 +691,20 @@ fn access_path_of(node: Node<'_>, lang: Language, source: &str) -> Option<Access
             node.child_by_field_name("object")?,
             node.child_by_field_name("field")?,
         ),
+        "subscript_expression" | "index_expression" => {
+            let object = node
+                .child_by_field_name("object")
+                .or_else(|| node.child_by_field_name("value"))?;
+            let mut base = access_path_of(object, lang, source)?;
+            base.fields.push("*".to_string());
+            return Some(base);
+        }
+        "subscript" => {
+            let object = node.child_by_field_name("value")?;
+            let mut base = access_path_of(object, lang, source)?;
+            base.fields.push("*".to_string());
+            return Some(base);
+        }
         k if k.contains("identifier") || k == "attribute" => {
             let _ = lang;
             return Some(AccessPath::bare(
@@ -647,55 +738,6 @@ fn collect_targets(node: Node<'_>, lang: Language, source: &str, out: &mut Vec<A
     for child in named_children(node) {
         collect_targets(child, lang, source, out);
     }
-}
-
-fn object_literal_fields(
-    rhs: Node<'_>,
-    ctx: &ExtractCtx<'_>,
-) -> Option<Vec<(String, ExprFact)>> {
-    let object_kind = match ctx.lang {
-        Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Jsx => "object",
-        Language::Python => "dictionary",
-        _ => return None,
-    };
-    if rhs.kind() != object_kind {
-        return None;
-    }
-    let mut fields = Vec::new();
-    for child in named_children(rhs) {
-        match child.kind() {
-            "pair" => {
-                let key = child
-                    .child_by_field_name("key")
-                    .and_then(|k| ctx.source.get(k.start_byte()..k.end_byte()))
-                    .map(|s| s.trim_matches('"').trim_matches('\'').to_string())?;
-                let value = child.child_by_field_name("value")?;
-                fields.push((key, expr_fact(value, ctx)));
-            }
-            "shorthand_property_identifier" => {
-                let name = ctx
-                    .source
-                    .get(child.start_byte()..child.end_byte())
-                    .unwrap_or("")
-                    .to_string();
-                fields.push((
-                    name.clone(),
-                    ExprFact {
-                        sources: Vec::new(),
-                        paths: vec![AccessPath::bare(name)],
-                        calls: Vec::new(),
-                        sanitized: false,
-                        alias: None,
-                    },
-                ));
-            }
-            "spread_element" | "dictionary_splat" => {
-                fields.push(("*".to_string(), expr_fact(child, ctx)));
-            }
-            _ => {}
-        }
-    }
-    Some(fields)
 }
 
 fn param_names(node: Node<'_>, lang: Language, source: &str) -> Vec<String> {

@@ -79,7 +79,7 @@ impl<'a> Project<'a> {
         self.compute_summaries();
         let mut merged: BTreeMap<(String, usize, usize, usize, usize), Finding> = BTreeMap::new();
         for gid in 0..self.globals.len() {
-            let mut state = TaintState::default();
+            let mut state = PointsToState::default();
             let f = self.fn_fact(gid);
             for (idx, pos) in f.param_sources.iter().enumerate() {
                 if let (Some(pos), Some(name)) = (pos, f.params.get(idx)) {
@@ -109,7 +109,7 @@ impl<'a> Project<'a> {
                 // 返回值内部污点。
                 if next_summary.ret_internal.is_none() {
                     let f = self.fn_fact(gid);
-                    let state = TaintState::default();
+                    let state = PointsToState::default();
                     if let Some(flow) = self.eval_returns(f, &state, &old) {
                         next_summary.ret_internal = Some(flow);
                     }
@@ -128,7 +128,7 @@ impl<'a> Project<'a> {
                     if !needs_sink && !needs_ret {
                         continue;
                     }
-                    let mut state = TaintState::default();
+                    let mut state = PointsToState::default();
                     state.set_whole(&name, Position { line: 1, column: 1 });
                     let f = self.fn_fact(gid);
                     self.apply_stmts(f, &mut state, &old);
@@ -157,7 +157,7 @@ impl<'a> Project<'a> {
         &self,
         gid: usize,
         file_idx: usize,
-        state: &mut TaintState,
+        state: &mut PointsToState,
         depth: usize,
         stack: &mut Vec<(usize, usize)>,
         merged: &mut BTreeMap<(String, usize, usize, usize, usize), Finding>,
@@ -247,7 +247,7 @@ impl<'a> Project<'a> {
                     if name.is_empty() {
                         continue;
                     }
-                    let mut callee_state = TaintState::default();
+                    let mut callee_state = PointsToState::default();
                     callee_state.set_whole(name, flow);
                     stack.push((*callee, arg_idx));
                     let callee_file = self.globals[*callee].file_idx;
@@ -265,76 +265,96 @@ impl<'a> Project<'a> {
         }
     }
 
-    fn apply_stmts(&self, f: &FnFact, state: &mut TaintState, summaries: &[Summary]) {
+    fn apply_stmts(&self, f: &FnFact, state: &mut PointsToState, summaries: &[Summary]) {
         for stmt in &f.stmts {
-            match stmt {
-                StmtFact::Assign { targets, rhs } => {
-                    if rhs.sanitized {
-                        for target in targets {
-                            self.assign_target(target, None, state);
-                        }
-                        continue;
-                    }
-                    if let Some(source_var) = &rhs.alias {
-                        for target in targets {
-                            state.alias_target(target, source_var);
-                        }
-                        continue;
-                    }
-                    let flow = self
-                        .expr_flows_with(rhs, state, summaries)
-                        .first()
-                        .copied();
-                    for target in targets {
-                        self.assign_target(target, flow, state);
-                    }
-                }
-                StmtFact::ObjectInit { target, fields } => {
-                    state.strong_reset(target);
-                    for (field, value) in fields {
-                        if value.sanitized {
-                            continue;
-                        }
-                        if let Some(source_var) = &value.alias {
-                            state.alias_target(&target.field_path(field), source_var);
-                            continue;
-                        }
-                        if let Some(flow) = self
-                            .expr_flows_with(value, state, summaries)
-                            .first()
-                            .copied()
-                        {
-                            state.set_field(target, std::slice::from_ref(field), Some(flow));
-                        }
-                    }
-                }
-                StmtFact::Call(call) => {
-                    // 调用值语义由表达式求值处理；此处的独立调用无需改状态。
-                    let _ = call;
-                }
+            let StmtFact::Assign { targets, rhs } = stmt else {
+                continue;
+            };
+            for target in targets {
+                self.assign(target, rhs, state, summaries);
             }
         }
     }
 
-    fn assign_target(&self, target: &AccessPath, flow: Option<Position>, state: &mut TaintState) {
-        if target.fields.is_empty() {
-            state.strong_reset(target);
-            if let Some(flow) = flow {
-                state.set_whole(&target.base, flow);
+    fn assign(
+        &self,
+        target: &AccessPath,
+        rhs: &ExprFact,
+        state: &mut PointsToState,
+        summaries: &[Summary],
+    ) {
+        if rhs.sanitized {
+            state.strong_write(target, None);
+            return;
+        }
+        if let Some(source_var) = &rhs.alias {
+            state.alias_assign(target, source_var);
+            return;
+        }
+        if let Some(fields) = &rhs.fields {
+            // 形状敏感初始化：目标得到一个新对象，字段递归展开。
+            let obj = state.fresh();
+            if target.fields.is_empty() {
+                state
+                    .var_ptrs
+                    .insert(target.base.clone(), std::collections::BTreeSet::from([obj]));
+            } else {
+                let parents = state.objects_for_write_parent(target);
+                let field = target.fields.last().cloned().unwrap_or_default();
+                for parent in parents {
+                    state.write_field_ptr(parent, &field, &std::collections::BTreeSet::from([obj]));
+                }
             }
-        } else {
-            state.set_field_path(target, flow);
+            self.init_shape(obj, fields, state, summaries);
+            return;
+        }
+        let flow = self
+            .expr_flows_with(rhs, state, summaries)
+            .first()
+            .copied();
+        state.strong_write(target, flow);
+    }
+
+    fn init_shape(
+        &self,
+        obj: usize,
+        fields: &[(String, ExprFact)],
+        state: &mut PointsToState,
+        summaries: &[Summary],
+    ) {
+        for (key, value) in fields {
+            if value.sanitized {
+                continue;
+            }
+            if let Some(nested) = &value.fields {
+                let child = state.fresh();
+                state.write_field_ptr(obj, key, &std::collections::BTreeSet::from([child]));
+                self.init_shape(child, nested, state, summaries);
+                continue;
+            }
+            if let Some(var) = &value.alias {
+                let set = state.objects_for_alias(var);
+                state.write_field_ptr(obj, key, &set);
+                continue;
+            }
+            if let Some(flow) = self
+                .expr_flows_with(value, state, summaries)
+                .first()
+                .copied()
+            {
+                state.write_field_flow(obj, key, Some(flow));
+            }
         }
     }
 
-    fn expr_flows(&self, expr: &ExprFact, state: &TaintState) -> Vec<Position> {
+    fn expr_flows(&self, expr: &ExprFact, state: &PointsToState) -> Vec<Position> {
         self.expr_flows_with(expr, state, &self.summaries)
     }
 
     fn expr_flows_with(
         &self,
         expr: &ExprFact,
-        state: &TaintState,
+        state: &PointsToState,
         summaries: &[Summary],
     ) -> Vec<Position> {
         let mut flows: Vec<Position> = Vec::new();
@@ -365,7 +385,7 @@ impl<'a> Project<'a> {
     fn call_value_flow(
         &self,
         call: &CallFact,
-        state: &TaintState,
+        state: &PointsToState,
         summaries: &[Summary],
     ) -> Option<Position> {
         if call.sanitized {
@@ -399,7 +419,7 @@ impl<'a> Project<'a> {
     fn eval_returns(
         &self,
         f: &FnFact,
-        state: &TaintState,
+        state: &PointsToState,
         summaries: &[Summary],
     ) -> Option<Position> {
         let mut best: Option<Position> = None;
@@ -415,148 +435,225 @@ impl<'a> Project<'a> {
         best
     }
 
-    fn any_sink_flow(&self, f: &FnFact, state: &TaintState, summaries: &[Summary]) -> bool {
+    fn any_sink_flow(&self, f: &FnFact, state: &PointsToState, summaries: &[Summary]) -> bool {
         f.sinks
             .iter()
             .any(|sink| !self.expr_flows_with(&sink.expr, state, summaries).is_empty())
     }
 }
 
-/// 字段敏感 + 对象组别名状态。
+/// Points-to 对象集合 + 形状敏感字段图。
 #[derive(Default)]
-struct TaintState {
-    next_group: usize,
-    var_group: HashMap<String, usize>,
-    /// 组 → 字段路径（点连接）→ 源头位置。
-    group_fields: HashMap<usize, HashMap<String, Position>>,
-    /// 组整体污点（对象级）。
-    group_whole: HashMap<usize, Position>,
+struct PointsToState {
+    next_obj: usize,
+    /// 变量 → 抽象对象集合。
+    var_ptrs: HashMap<String, std::collections::BTreeSet<usize>>,
+    /// 对象 → 字段 → (指向对象集合, 字段污点)。
+    obj_fields: HashMap<usize, HashMap<String, FieldValue>>,
+    /// 对象整体污点（来自标量赋值/参数源）。
+    obj_whole: HashMap<usize, Position>,
 }
 
-impl TaintState {
-    fn new_group(&mut self) -> usize {
-        let g = self.next_group;
-        self.next_group += 1;
-        g
+#[derive(Default, Clone)]
+struct FieldValue {
+    ptrs: std::collections::BTreeSet<usize>,
+    flow: Option<Position>,
+}
+
+impl PointsToState {
+    fn fresh(&mut self) -> usize {
+        let id = self.next_obj;
+        self.next_obj += 1;
+        id
     }
 
-    fn group_of(&mut self, var: &str) -> usize {
-        if let Some(g) = self.var_group.get(var) {
-            return *g;
-        }
-        let g = self.new_group();
-        self.var_group.insert(var.to_string(), g);
-        g
-    }
-
+    /// 形参/新对象种子：新对象并记录整体污点。
     fn set_whole(&mut self, var: &str, flow: Position) {
-        let g = self.group_of(var);
-        self.group_whole.entry(g).or_insert(flow);
+        let obj = self.fresh();
+        self.var_ptrs
+            .insert(var.to_string(), std::collections::BTreeSet::from([obj]));
+        self.obj_whole.insert(obj, flow);
     }
 
-    /// 强更新：目标变量进入新组（旧别名保持原组）。
-    fn strong_reset(&mut self, target: &AccessPath) {
-        if target.fields.is_empty() {
-            let g = self.new_group();
-            self.var_group.insert(target.base.clone(), g);
-        } else {
-            self.remove_field(target, true);
-        }
-    }
-
-    fn alias_target(&mut self, target: &AccessPath, source_var: &str) {
-        let source_group = self.group_of(source_var);
-        if target.fields.is_empty() {
-            self.var_group.insert(target.base.clone(), source_group);
-            return;
-        }
-        // 字段别名：把源组字段复制到目标路径前缀下。
-        let copies: Vec<(String, Position)> = self
-            .group_fields
-            .get(&source_group)
-            .map(|m| m.iter().map(|(k, v)| (k.clone(), *v)).collect())
-            .unwrap_or_default();
-        let whole = self.group_whole.get(&source_group).copied();
-        for (field, flow) in copies {
-            let mut fields = target.fields.clone();
-            fields.extend(field.split('.').map(|s| s.to_string()));
-            self.set_field(target, &fields, Some(flow));
-        }
-        if let Some(flow) = whole {
-            self.set_field(target, &target.fields.clone(), Some(flow));
-        }
-    }
-
-    fn set_field_path(&mut self, target: &AccessPath, flow: Option<Position>) {
-        self.set_field(target, &target.fields.clone(), flow);
-    }
-
-    fn set_field(&mut self, target: &AccessPath, fields: &[String], flow: Option<Position>) {
-        let g = self.group_of(&target.base);
-        let full: Vec<String> = target
-            .fields
-            .iter()
-            .cloned()
-            .chain(fields.iter().cloned())
-            .collect();
-        let key = full.join(".");
-        match flow {
-            Some(flow) => {
-                self.group_fields
-                    .entry(g)
-                    .or_default()
-                    .entry(key)
-                    .or_insert(flow);
+    fn objects_for_alias(&mut self, var: &str) -> std::collections::BTreeSet<usize> {
+        if let Some(set) = self.var_ptrs.get(var) {
+            if !set.is_empty() {
+                return set.clone();
             }
-            None => self.remove_field_key(g, &key),
         }
+        let obj = self.fresh();
+        self.var_ptrs
+            .entry(var.to_string())
+            .or_default()
+            .insert(obj);
+        std::collections::BTreeSet::from([obj])
     }
 
-    fn remove_field(&mut self, target: &AccessPath, strong: bool) {
-        let Some(&g) = self.var_group.get(&target.base) else {
+    /// 强更新：裸目标 → 新对象（可带整体污点）；字段目标 → 字段强更新。
+    fn strong_write(&mut self, target: &AccessPath, flow: Option<Position>) {
+        if target.fields.is_empty() {
+            let obj = self.fresh();
+            self.var_ptrs
+                .insert(target.base.clone(), std::collections::BTreeSet::from([obj]));
+            if let Some(flow) = flow {
+                self.obj_whole.insert(obj, flow);
+            }
             return;
-        };
-        let key = target.fields.join(".");
-        if strong {
-            self.remove_field_key(g, &key);
+        }
+        let parents = self.objects_for_write_parent(target);
+        let field = target.fields.last().cloned().unwrap_or_default();
+        for parent in parents {
+            self.write_field_flow(parent, &field, flow);
         }
     }
 
-    fn remove_field_key(&mut self, group: usize, key: &str) {
-        if let Some(map) = self.group_fields.get_mut(&group) {
-            map.retain(|k, _| {
-                !(k == key || k.starts_with(&format!("{key}.")))
-            });
+    /// 别名赋值：`a = b` 合并对象集合；字段目标共享字段对象。
+    fn alias_assign(&mut self, target: &AccessPath, source_var: &str) {
+        let set = self.objects_for_alias(source_var);
+        if target.fields.is_empty() {
+            self.var_ptrs.insert(target.base.clone(), set);
+            return;
         }
+        let parents = self.objects_for_write_parent(target);
+        let field = target.fields.last().cloned().unwrap_or_default();
+        for parent in parents {
+            self.write_field_ptr(parent, &field, &set);
+        }
+    }
+
+    /// 写目标父路径 → 对象集合（缺失的中间字段创建新对象并挂接）。
+    fn objects_for_write_parent(&mut self, target: &AccessPath) -> std::collections::BTreeSet<usize> {
+        let mut current = self.objects_for_alias(&target.base);
+        for seg in &target.fields[..target.fields.len().saturating_sub(1)] {
+            let mut next = std::collections::BTreeSet::new();
+            for obj in current {
+                let existing: Vec<usize> = self
+                    .obj_fields
+                    .get(&obj)
+                    .and_then(|f| f.get(seg))
+                    .map(|e| e.ptrs.iter().copied().collect())
+                    .unwrap_or_default();
+                if !existing.is_empty() {
+                    next.extend(existing);
+                    continue;
+                }
+                let child = self.fresh();
+                let entry = self
+                    .obj_fields
+                    .entry(obj)
+                    .or_default()
+                    .entry(seg.clone())
+                    .or_default();
+                entry.ptrs.insert(child);
+                next.insert(child);
+            }
+            current = next;
+        }
+        current
+    }
+
+    fn write_field_flow(&mut self, obj: usize, field: &str, flow: Option<Position>) {
+        let fields = self.obj_fields.entry(obj).or_default();
+        // 强更新：移除该字段及其子路径。
+        fields.retain(|k, _| !(k == field || k.starts_with(&format!("{field}."))));
+        if let Some(flow) = flow {
+            fields.insert(
+                field.to_string(),
+                FieldValue {
+                    ptrs: Default::default(),
+                    flow: Some(flow),
+                },
+            );
+        }
+    }
+
+    fn write_field_ptr(
+        &mut self,
+        obj: usize,
+        field: &str,
+        ptrs: &std::collections::BTreeSet<usize>,
+    ) {
+        let fields = self.obj_fields.entry(obj).or_default();
+        let entry = fields.entry(field.to_string()).or_default();
+        entry.ptrs.extend(ptrs.iter().copied());
     }
 
     fn read_flow(&self, path: &AccessPath) -> Option<Position> {
-        let &g = self.var_group.get(&path.base)?;
-        let key = path.fields.join(".");
-        let fields = self.group_fields.get(&g);
+        let set = self.var_ptrs.get(&path.base)?;
         if path.fields.is_empty() {
-            // 读取整对象：整体污点或任一字段污点（含通配）。
-            let mut best = self.group_whole.get(&g).copied();
-            if let Some(map) = fields {
-                for pos in map.values() {
-                    best = pick_min(best, *pos);
-                }
+            let mut best: Option<Position> = None;
+            let mut visited = std::collections::BTreeSet::new();
+            for obj in set {
+                best = pick_min(best, self.object_taint(*obj, &mut visited).unwrap_or(Position { line: usize::MAX, column: usize::MAX }))
+                    .filter(|p| p.line != usize::MAX);
             }
             return best;
         }
+        let mut current: std::collections::BTreeSet<usize> = set.clone();
         let mut best: Option<Position> = None;
-        if let Some(map) = fields {
-            for (k, pos) in map {
-                let matched = k == "*"
-                    || k == &key
-                    || k.starts_with(&format!("{key}."))
-                    || key.starts_with(&format!("{k}."));
-                if matched {
-                    best = pick_min(best, *pos);
+        for (idx, seg) in path.fields.iter().enumerate() {
+            let mut next = std::collections::BTreeSet::new();
+            for obj in &current {
+                if let Some(flow) = self.obj_whole.get(obj) {
+                    best = pick_min(best, *flow);
+                }
+                if let Some(fields) = self.obj_fields.get(obj) {
+                    for (k, value) in fields {
+                        // 通配读（`obj[*]`）匹配任意字段；通配写字段匹配任意读。
+                        let matched = seg == "*"
+                            || k == "*"
+                            || k == seg
+                            || k.starts_with(&format!("{seg}."))
+                            || seg.starts_with(&format!("{k}."));
+                        if !matched {
+                            continue;
+                        }
+                        if let Some(flow) = value.flow {
+                            best = pick_min(best, flow);
+                        }
+                        next.extend(value.ptrs.iter().copied());
+                    }
+                }
+            }
+            current = next;
+            if current.is_empty() {
+                break;
+            }
+            if idx + 1 == path.fields.len() {
+                // 末端字段指向的对象若整体有污点，读取该字段值同样命中。
+                for obj in &current {
+                    if let Some(flow) = self.obj_whole.get(obj) {
+                        best = pick_min(best, *flow);
+                    }
                 }
             }
         }
-        best.or_else(|| self.group_whole.get(&g).copied())
+        best
+    }
+
+    /// 对象可达范围内的任一污点（整体/字段/子对象），用于整对象读取。
+    fn object_taint(
+        &self,
+        obj: usize,
+        visited: &mut std::collections::BTreeSet<usize>,
+    ) -> Option<Position> {
+        if !visited.insert(obj) {
+            return None;
+        }
+        let mut best = self.obj_whole.get(&obj).copied();
+        if let Some(fields) = self.obj_fields.get(&obj) {
+            for value in fields.values() {
+                if let Some(flow) = value.flow {
+                    best = pick_min(best, flow);
+                }
+                for child in &value.ptrs {
+                    if let Some(flow) = self.object_taint(*child, visited) {
+                        best = pick_min(best, flow);
+                    }
+                }
+            }
+        }
+        best
     }
 }
 
@@ -583,11 +680,6 @@ fn gather_expr_calls(expr: &ExprFact, out: &mut Vec<CallFact>) {
 fn gather_stmt_calls(stmt: &StmtFact, out: &mut Vec<CallFact>) {
     match stmt {
         StmtFact::Assign { rhs, .. } => gather_expr_calls(rhs, out),
-        StmtFact::ObjectInit { fields, .. } => {
-            for (_, expr) in fields {
-                gather_expr_calls(expr, out);
-            }
-        }
         StmtFact::Call(call) => {
             out.push(call.clone());
             for arg in &call.args {
