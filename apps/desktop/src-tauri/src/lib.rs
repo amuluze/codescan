@@ -3,6 +3,7 @@
 pub mod commands;
 pub mod llm;
 pub mod manager;
+pub mod regression;
 pub mod store;
 
 use commands::AppState;
@@ -46,6 +47,7 @@ pub fn run() {
             commands::llm_triage_stream,
             commands::llm_batch_triage,
             commands::llm_generate_rule,
+            commands::llm_candidate_regression,
             commands::save_custom_rule,
         ])
         .manage(AppState {

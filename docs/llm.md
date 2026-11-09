@@ -1,4 +1,4 @@
-# LLM 辅助层（v3.2）
+# LLM 辅助层（v3.3）
 
 Provider 形态复刻 axiom：OpenAI-compatible 与 Anthropic-compatible 两类，BYO API Key，无内置遥测。
 
@@ -46,6 +46,20 @@ UI 只接收与当前 `requestId` 匹配的增量并实时渲染，命令结束�
 - `taint`：`sources` / `sinks` / `sanitizers` 三组 tree-sitter query，`language` 必须为具体语言，`sources` 与 `sinks` 至少各一条，每条 query 必须包含 `@match` 捕获。语义为「不可信数据可能到达 sink」的同文件过程内近似，不声称跨文件、堆别名或字段敏感证明（Domain §4a）。
 
 候选校验复用 `llm::validate_candidate`：解析、`custom/` 前缀、taint 端点 `@match`、整体编译均通过才 `valid=true`；否则返回 `valid=false` 与逐条 errors。
+
+### 5. 候选规则隔离回归
+
+候选面板的「运行回归验证」调用 `llm_candidate_regression(scan_id, fingerprint, candidate_yaml, save_fixture)`，在**临时语料**上验证候选是否真的命中种子发现，不调用 LLM、不联网：
+
+1. 先复用 `validate_candidate` 校验候选；非法时直接返回 `valid=false` 与 `errors`，不读取扫描/源文件。
+2. 由扫描记录的 root + 发现路径读取源文件；缺失或非法路径返回可读错误，不 panic。
+3. 把源文件复制到临时目录（保持文件名/扩展名），在发现起始行**上方**按语言插入 `// ruleid: <候选 id>`（TS/TSX/JS/JSX/Java/Go/Rust）或 `# ruleid: <候选 id>`（Python）；多条候选规则垂直堆叠。期望命中行按规则套件语义取标注指向的下一个非空行。
+4. 用 `Engine::with_rules(Some(candidate), disabled=全部内置 id)` 扫描临时目录；实际命中为候选规则的 `(规则 id, 行)` 多重集。两者不一致时输出「漏报 / 过度匹配」说明。
+5. 返回 `{ valid, pass, errors, expected, actual: [{ line, message }], failures, saved_paths }`。
+
+勾选「保存夹具」时，标注后的文件写入 `~/.codescan/rules/tests/<安全化规则 id>/<文件名>`（`/` 等路径分隔符替换为 `_`，避免逃出数据根），并在 `saved_paths` 返回实际路径。
+
+隔离回归**只读**扫描历史与基线：不写 findings、不改基线/门禁；临时目录在调用结束（含失败路径）后删除。`pass` 仅是展示层信号，不改变任何门禁结果。
 
 ## 纪律与边界
 

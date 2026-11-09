@@ -202,6 +202,16 @@ impl Store {
         Ok(out)
     }
 
+    /// 该扫描的工作区根（只读；隔离回归需要按 root + 发现路径读取源文件）。
+    pub fn get_scan_root(&self, scan_id: i64) -> Result<String> {
+        self.conn
+            .query_row("SELECT root FROM scans WHERE id = ?1", [scan_id], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .ok_or(StoreError::NotFound("该扫描记录"))
+    }
+
     pub fn get_findings(&self, scan_id: i64) -> Result<Vec<Finding>> {
         let exists: bool = self
             .conn

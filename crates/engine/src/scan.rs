@@ -253,6 +253,10 @@ impl Engine {
         let mut findings: Vec<Finding> = Vec::new();
         let mut events: Vec<ScanEvent> = Vec::new();
         let mut corpus: Vec<(String, Vec<(String, usize)>)> = Vec::new();
+        let mut taint_facts: std::collections::HashMap<
+            String,
+            Vec<crate::taint::FileFacts>,
+        > = std::collections::HashMap::new();
         let mut scanned = 0u64;
 
         for (outcome, (_, rel)) in results.into_iter().zip(files.iter()) {
@@ -261,6 +265,7 @@ impl Engine {
                     mut file_findings,
                     mut file_events,
                     normalized_lines,
+                    taint_facts: file_taint,
                 } => {
                     scanned += 1;
                     if let Some(lines) = normalized_lines {
@@ -268,6 +273,9 @@ impl Engine {
                     }
                     findings.append(&mut file_findings);
                     events.append(&mut file_events);
+                    for (rule_id, facts) in file_taint {
+                        taint_facts.entry(rule_id).or_default().push(facts);
+                    }
                 }
                 FileOutcome::EventOnly(mut file_events) => {
                     events.append(&mut file_events);
@@ -278,6 +286,13 @@ impl Engine {
 
         // 语料级度量：重复块。
         findings.extend(metrics::duplicate_blocks(&corpus, &self.metric_configs));
+
+        // 污点：项目级分析（显式导入跨文件 + 字段/对象组；文件顺序由 facts 收集顺序保证）。
+        for rule in &self.taint_rules {
+            if let Some(facts) = taint_facts.get(&rule.spec.id) {
+                findings.extend(crate::taint::analyze_project(rule, facts));
+            }
+        }
 
         // 4. 指纹 + 全序 + 事件排序。
         let findings = fingerprint::finalize(findings);
@@ -386,13 +401,15 @@ impl Engine {
         for rule in &self.text_rules {
             findings.extend(run_text_rule(rule, source, rel, degraded));
         }
+        let mut taint_facts: Vec<(String, crate::taint::FileFacts)> = Vec::new();
         for rule in &self.taint_rules {
             if let RuleLanguage::One(l) = rule.spec.language {
                 if l != lang {
                     continue;
                 }
-                findings.extend(crate::taint::taint_findings(
-                    rule, lang, tree, source, rel, degraded,
+                taint_facts.push((
+                    rule.spec.id.clone(),
+                    crate::taint::extract_file(rule, lang, tree, source, rel, degraded),
                 ));
             }
         }
@@ -420,6 +437,7 @@ impl Engine {
             file_findings: findings,
             file_events: events,
             normalized_lines: Some(normalized_lines),
+            taint_facts,
         }
     }
 }
@@ -455,6 +473,7 @@ enum FileOutcome {
         file_findings: Vec<Finding>,
         file_events: Vec<ScanEvent>,
         normalized_lines: Option<Vec<(String, usize)>>,
+        taint_facts: Vec<(String, crate::taint::FileFacts)>,
     },
     EventOnly(Vec<ScanEvent>),
     Cancelled,

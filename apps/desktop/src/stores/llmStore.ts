@@ -4,6 +4,7 @@ import {
   api,
   platform,
   type BatchTriageEntry,
+  type CandidateRegression,
   type CandidateRule,
   type ProviderInfo,
   type TriageResult,
@@ -16,6 +17,8 @@ type LlmState = {
   triageStreams: Record<string, string>;
   streamPending: Record<string, boolean>;
   candidates: Record<string, CandidateRule | "loading" | null>;
+  /** 候选规则隔离回归结果（按 fingerprint）。 */
+  regressions: Record<string, CandidateRegression | "loading" | null>;
   batch: BatchTriageEntry[] | "loading" | null;
   batchError: string | null;
   errors: Record<string, string | null>;
@@ -27,6 +30,12 @@ type LlmState = {
   runTriageStream: (scanId: number, fingerprint: string) => Promise<void>;
   runBatchTriage: (scanId: number, fingerprints: string[]) => Promise<void>;
   generateRule: (scanId: number, fingerprint: string) => Promise<void>;
+  runRegression: (
+    scanId: number,
+    fingerprint: string,
+    candidateYaml: string,
+    saveFixture: boolean,
+  ) => Promise<void>;
   saveRule: (fingerprint: string, yaml: string) => Promise<void>;
 };
 
@@ -36,6 +45,7 @@ export const useLlmStore = create<LlmState>((set, get) => ({
   triageStreams: {},
   streamPending: {},
   candidates: {},
+  regressions: {},
   batch: null,
   batchError: null,
   errors: {},
@@ -138,6 +148,27 @@ export const useLlmStore = create<LlmState>((set, get) => ({
     } catch (e) {
       set({
         candidates: { ...get().candidates, [fingerprint]: null },
+        errors: { ...get().errors, [fingerprint]: String(e) },
+      });
+    }
+  },
+
+  async runRegression(scanId, fingerprint, candidateYaml, saveFixture) {
+    set({
+      regressions: { ...get().regressions, [fingerprint]: "loading" },
+      errors: { ...get().errors, [fingerprint]: null },
+    });
+    try {
+      const result = await api.llmCandidateRegression(
+        scanId,
+        fingerprint,
+        candidateYaml,
+        saveFixture,
+      );
+      set({ regressions: { ...get().regressions, [fingerprint]: result } });
+    } catch (e) {
+      set({
+        regressions: { ...get().regressions, [fingerprint]: null },
         errors: { ...get().errors, [fingerprint]: String(e) },
       });
     }

@@ -338,3 +338,177 @@ fn c8_batch_triage_prepare_and_parse_are_read_only() {
     assert_eq!(store.current_baseline().unwrap(), before_baseline);
     assert_eq!(store.gate_new(scan_id).unwrap(), before_gate);
 }
+
+// ---------- v3.3：候选规则隔离回归（G1–G5） ----------
+
+use codescan_lib::regression::{run_from_store, RegressionActual};
+
+const HIT_RULE: &str = r#"rules:
+  - id: custom/regression-eval
+    language: "*"
+    dimension: security
+    severity: warning
+    message: eval 调用
+    text: 'eval\('
+"#;
+
+const MISS_RULE: &str = r#"rules:
+  - id: custom/regression-eval
+    language: "*"
+    dimension: security
+    severity: warning
+    message: eval 调用
+    text: 'alert\('
+"#;
+
+fn regression_fixture() -> (tempfile::TempDir, Store, i64) {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(ws.join("src")).unwrap();
+    std::fs::write(ws.join("src/a.ts"), "const x = 1;\neval(userInput);\n").unwrap();
+    let store = Store::open(&dir.path().join("test.db")).unwrap();
+    let scan_id = store
+        .insert_scan(
+            ws.to_str().unwrap(),
+            &report(vec![finding("ts/no-eval", "src/a.ts", 2, "fp-eval")]),
+            5,
+            1,
+        )
+        .unwrap();
+    (dir, store, scan_id)
+}
+
+/// G1：命中种子行的候选 → pass=true，actual 含期望行；可保存夹具。
+#[test]
+fn v33_regression_hit_passes_and_saves_fixture() {
+    let (dir, store, scan_id) = regression_fixture();
+    let data_root = dir.path().join(".codescan");
+    let result = run_from_store(&store, &data_root, scan_id, "fp-eval", HIT_RULE, true).unwrap();
+
+    assert!(result.valid);
+    assert!(result.pass, "failures: {:?}", result.failures);
+    assert_eq!(result.expected, vec![3]);
+    assert_eq!(
+        result.actual,
+        vec![RegressionActual {
+            line: 3,
+            message: "eval 调用".into(),
+        }]
+    );
+    assert!(result.failures.is_empty());
+
+    // 夹具写入 `<data_root>/rules/tests/<安全化规则 id>/<文件名>`。
+    assert_eq!(result.saved_paths.len(), 1);
+    let saved_path = &result.saved_paths[0];
+    assert!(
+        saved_path.contains("rules/tests/custom_regression-eval/a.ts"),
+        "{saved_path}"
+    );
+    let saved = std::fs::read_to_string(saved_path).unwrap();
+    assert!(saved.contains("// ruleid: custom/regression-eval"));
+    assert!(saved.contains("eval(userInput);"));
+}
+
+/// G2：不命中的候选 → pass=false，failures 可读。
+#[test]
+fn v33_regression_miss_fails_with_readable_reason() {
+    let (dir, store, scan_id) = regression_fixture();
+    let result = run_from_store(
+        &store,
+        &dir.path().join(".codescan"),
+        scan_id,
+        "fp-eval",
+        MISS_RULE,
+        false,
+    )
+    .unwrap();
+
+    assert!(result.valid);
+    assert!(!result.pass);
+    assert!(result.actual.is_empty());
+    assert_eq!(result.expected, vec![3]);
+    assert!(
+        result
+            .failures
+            .iter()
+            .any(|f| f.contains("漏报") && f.contains("custom/regression-eval")),
+        "{:?}",
+        result.failures
+    );
+    assert!(result.saved_paths.is_empty());
+}
+
+/// G3：非法候选返回 valid=false（先于存储访问）；源文件缺失返回可读错误。
+#[test]
+fn v33_regression_rejects_invalid_candidate_and_missing_source() {
+    let (dir, store, _scan_id) = regression_fixture();
+    let invalid = r#"rules:
+  - id: ts/not-custom
+    language: "*"
+    dimension: security
+    severity: warning
+    message: m
+    text: 'eval\('
+"#;
+    // 候选非法时不读取不存在的扫描记录，也不 panic。
+    let result =
+        run_from_store(&store, &dir.path().join(".codescan"), 999, "nope", invalid, false).unwrap();
+    assert!(!result.valid);
+    assert!(!result.pass);
+    assert!(
+        result.errors.iter().any(|e| e.contains("custom/")),
+        "{:?}",
+        result.errors
+    );
+
+    // 有效候选 + 缺失源文件 → 可读错误。
+    let ws = dir.path().join("ws");
+    let missing_id = store
+        .insert_scan(
+            ws.to_str().unwrap(),
+            &report(vec![finding("ts/x", "src/missing.ts", 1, "fp-missing")]),
+            1,
+            2,
+        )
+        .unwrap();
+    let err = run_from_store(
+        &store,
+        &dir.path().join(".codescan"),
+        missing_id,
+        "fp-missing",
+        HIT_RULE,
+        false,
+    )
+    .unwrap_err();
+    assert!(err.contains("读取源文件失败"), "{err}");
+}
+
+/// G5：调用前后 findings/基线/历史完全不变（只读纪律）。
+#[test]
+fn v33_regression_is_read_only() {
+    let (dir, store, scan_id) = regression_fixture();
+    store.set_baseline(scan_id, 2).unwrap();
+    let before_findings = store.get_findings(scan_id).unwrap();
+    let before_baseline = store.current_baseline().unwrap();
+    let before_scans = store.list_scans().unwrap();
+    let before_gate = store.gate_new(scan_id).unwrap();
+
+    let result = run_from_store(
+        &store,
+        &dir.path().join(".codescan"),
+        scan_id,
+        "fp-eval",
+        HIT_RULE,
+        true,
+    )
+    .unwrap();
+    assert!(result.pass);
+
+    assert_eq!(store.get_findings(scan_id).unwrap(), before_findings);
+    assert_eq!(store.current_baseline().unwrap(), before_baseline);
+    let after_scans = store.list_scans().unwrap();
+    assert_eq!(after_scans.len(), before_scans.len());
+    assert_eq!(after_scans[0].id, before_scans[0].id);
+    assert_eq!(after_scans[0].root, before_scans[0].root);
+    assert_eq!(store.gate_new(scan_id).unwrap(), before_gate);
+}

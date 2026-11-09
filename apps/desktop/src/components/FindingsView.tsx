@@ -1,5 +1,5 @@
 /** 发现页：过滤 + 列表 + 详情（命中文本与捕获）。 */
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { filteredFindings, useScanStore } from "../stores/scanStore";
 import { useLlmStore } from "../stores/llmStore";
 import type { Finding } from "../types";
@@ -21,6 +21,7 @@ export function FindingsView() {
     triageStreams,
     streamPending,
     candidates,
+    regressions,
     batch,
     batchError,
     errors,
@@ -28,9 +29,11 @@ export function FindingsView() {
     runTriageStream,
     runBatchTriage,
     generateRule,
+    runRegression,
     saveRule,
   } = useLlmStore();
   const scanId = state.lastScanId;
+  const [saveFixture, setSaveFixture] = useState(false);
 
   return (
     <section className="findings-view" aria-label="发现">
@@ -220,6 +223,83 @@ export function FindingsView() {
                           <pre className="rule-yaml">
                             <code>{c.yaml}</code>
                           </pre>
+                          <div className="row">
+                            <button
+                              disabled={
+                                !c.valid ||
+                                regressions[selected.fingerprint] === "loading"
+                              }
+                              onClick={() =>
+                                scanId &&
+                                void runRegression(
+                                  scanId,
+                                  selected.fingerprint,
+                                  c.yaml,
+                                  saveFixture,
+                                )
+                              }
+                            >
+                              运行回归验证
+                            </button>
+                            <label className="muted">
+                              <input
+                                type="checkbox"
+                                aria-label="保存回归夹具"
+                                checked={saveFixture}
+                                onChange={(e) => setSaveFixture(e.target.checked)}
+                              />
+                              保存夹具
+                            </label>
+                          </div>
+                          {regressions[selected.fingerprint] === "loading" && (
+                            <p className="muted">隔离回归中…</p>
+                          )}
+                          {(() => {
+                            const r = regressions[selected.fingerprint];
+                            if (!r || r === "loading") return null;
+                            return (
+                              <div data-testid="regression-result">
+                                <h4>隔离回归：{r.pass ? "通过" : "未通过"}</h4>
+                                {!r.valid && r.errors.length > 0 && (
+                                  <ul className="errors">
+                                    {r.errors.map((e) => (
+                                      <li key={e}>{e}</li>
+                                    ))}
+                                  </ul>
+                                )}
+                                {r.valid && (
+                                  <>
+                                    <p>
+                                      期望行：
+                                      {r.expected.length > 0
+                                        ? r.expected.join(", ")
+                                        : "无"}
+                                    </p>
+                                    <p>
+                                      实际行：
+                                      {r.actual.length > 0
+                                        ? r.actual
+                                            .map((a) => `${a.line}（${a.message}）`)
+                                            .join(", ")
+                                        : "无"}
+                                    </p>
+                                    {r.failures.length > 0 && (
+                                      <ul className="errors">
+                                        {r.failures.map((f, idx) => (
+                                          <li key={`${idx}-${f}`}>{f}</li>
+                                        ))}
+                                      </ul>
+                                    )}
+                                    {r.saved_paths.length > 0 && (
+                                      <p className="muted">
+                                        夹具已保存：{r.saved_paths.join(", ")}
+                                      </p>
+                                    )}
+                                  </>
+                                )}
+                              </div>
+                            );
+                          })()}
                           <button
                             disabled={!c.valid}
                             onClick={() => void saveRule(selected.fingerprint, c.yaml)}

@@ -63,6 +63,22 @@ export type CandidateRule = {
   errors: string[];
 };
 
+export type RegressionActual = {
+  line: number;
+  message: string;
+};
+
+/** v3.3 候选规则隔离回归结果：仅展示，不参与门禁/基线。 */
+export type CandidateRegression = {
+  valid: boolean;
+  pass: boolean;
+  errors: string[];
+  expected: number[];
+  actual: RegressionActual[];
+  failures: string[];
+  saved_paths: string[];
+};
+
 export const platform = {
   invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
     return tauriInvoke<T>(cmd, args);
@@ -118,6 +134,18 @@ export const api = {
     platform.invoke<BatchTriageEntry[]>("llm_batch_triage", { scanId, fingerprints }),
   llmGenerateRule: (scanId: number, fingerprint: string) =>
     platform.invoke<CandidateRule>("llm_generate_rule", { scanId, fingerprint }),
+  llmCandidateRegression: (
+    scanId: number,
+    fingerprint: string,
+    candidateYaml: string,
+    saveFixture: boolean,
+  ) =>
+    platform.invoke<CandidateRegression>("llm_candidate_regression", {
+      scanId,
+      fingerprint,
+      candidateYaml,
+      saveFixture,
+    }),
   saveCustomRule: (yaml: string) =>
     platform.invoke<void>("save_custom_rule", { yaml }),
 };

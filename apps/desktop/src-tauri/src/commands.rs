@@ -504,6 +504,27 @@ pub async fn llm_generate_rule(
     }
 }
 
+/// v3.3：候选规则隔离回归。临时语料 + `ruleid` 标注 + 仅候选规则扫描；
+/// 只读扫描历史/基线，不写 findings。
+#[tauri::command]
+pub fn llm_candidate_regression(
+    state: State<'_, AppState>,
+    scan_id: i64,
+    fingerprint: String,
+    candidate_yaml: String,
+    save_fixture: bool,
+) -> Result<crate::regression::CandidateRegressionResult, String> {
+    let store = state.store.lock().unwrap();
+    crate::regression::run_from_store(
+        &store,
+        &data_root(),
+        scan_id,
+        &fingerprint,
+        &candidate_yaml,
+        save_fixture,
+    )
+}
+
 #[tauri::command]
 pub fn save_custom_rule(state: State<'_, AppState>, yaml: String) -> Result<(), String> {
     let _ = &state;

@@ -48,6 +48,18 @@ vi.mock("./platform", () => {
       platform.invoke("llm_batch_triage", { scanId, fingerprints }),
     llmGenerateRule: (scanId: number, fingerprint: string) =>
       platform.invoke("llm_generate_rule", { scanId, fingerprint }),
+    llmCandidateRegression: (
+      scanId: number,
+      fingerprint: string,
+      candidateYaml: string,
+      saveFixture: boolean,
+    ) =>
+      platform.invoke("llm_candidate_regression", {
+        scanId,
+        fingerprint,
+        candidateYaml,
+        saveFixture,
+      }),
     saveCustomRule: (yaml: string) => platform.invoke("save_custom_rule", { yaml }),
   };
   return { platform, api };
@@ -88,6 +100,7 @@ beforeEach(() => {
     triageStreams: {},
     streamPending: {},
     candidates: {},
+    regressions: {},
     batch: null,
     batchError: null,
     errors: {},
@@ -163,6 +176,16 @@ beforeEach(() => {
           yaml: "rules:\n  - id: custom/no-eval-param\n    language: typescript\n    dimension: security\n    severity: warning\n    message: m\n    pattern: |\n      (return_statement) @match\n",
           valid: true,
           errors: [],
+        };
+      case "llm_candidate_regression":
+        return {
+          valid: true,
+          pass: false,
+          errors: [],
+          expected: [4],
+          actual: [{ line: 6, message: "m" }],
+          failures: ["漏报：规则 custom/no-eval-param 未命中期望行 4"],
+          saved_paths: ["/tmp/.codescan/rules/tests/custom_no-eval-param/a.ts"],
         };
       default:
         return null;
@@ -245,6 +268,39 @@ describe("App 主链路", () => {
       expect(invokeMock).toHaveBeenCalledWith("save_custom_rule", {
         yaml: expect.stringContaining("custom/no-eval-param"),
       });
+    });
+  });
+
+  it("候选规则隔离回归展示通过/未通过与期望实际行", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "选择工作区" }));
+    await user.click(screen.getByRole("button", { name: "开始扫描" }));
+    const finished = listeners.get("scan://finished");
+    await act(async () => {
+      finished!({ scan_id: 7, stats: { files_scanned: 1 } });
+    });
+    await user.click(screen.getByRole("button", { name: "发现" }));
+    await user.click(await screen.findByText("src/a.ts:3"));
+
+    await user.click(screen.getByRole("button", { name: "生成候选规则" }));
+    await screen.findByTestId("candidate-rule");
+
+    // 仅勾选夹具时才请求保存；结果展示未通过、期望/实际行与失败原因。
+    await user.click(screen.getByRole("checkbox", { name: "保存回归夹具" }));
+    await user.click(screen.getByRole("button", { name: "运行回归验证" }));
+    const result = await screen.findByTestId("regression-result");
+    expect(result.textContent).toContain("未通过");
+    expect(result.textContent).toContain("期望行：4");
+    expect(result.textContent).toContain("实际行：6");
+    expect(result.textContent).toContain("漏报");
+    expect(result.textContent).toContain("夹具已保存");
+    expect(invokeMock).toHaveBeenCalledWith("llm_candidate_regression", {
+      scanId: 7,
+      fingerprint: "fp-1",
+      candidateYaml: expect.stringContaining("custom/no-eval-param"),
+      saveFixture: true,
     });
   });
 
