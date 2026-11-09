@@ -4,7 +4,6 @@
  */
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
-import { open as tauriOpen } from "@tauri-apps/plugin-dialog";
 import type { Finding } from "./types";
 
 export type ProgressPayload = {
@@ -36,6 +35,13 @@ export type ScanSummary = {
 };
 
 export type BaselineInfo = { engine_version: string; entries: number };
+
+export type DirEntry = { name: string; path: string };
+export type DirListing = {
+  path: string;
+  parent: string | null;
+  entries: DirEntry[];
+};
 
 export type ProviderInfo = {
   kind: "openai" | "anthropic";
@@ -90,20 +96,6 @@ export const platform = {
     return unlisten;
   },
 
-  async pickFolder(): Promise<string | null> {
-    const selected = await tauriOpen({ directory: true, multiple: false });
-    return typeof selected === "string" ? selected : null;
-  },
-
-  async saveFile(defaultName: string): Promise<string | null> {
-    const selected = await tauriOpen({
-      directory: false,
-      multiple: false,
-      title: defaultName,
-    });
-    // v1：保存对话框简化为目录内文件名输入由导出命令处理；此处返回 null 表示取消。
-    return typeof selected === "string" ? selected : null;
-  },
 };
 
 export const api = {
@@ -121,6 +113,8 @@ export const api = {
   baselineInfo: () => platform.invoke<BaselineInfo | null>("baseline_info"),
   exportSarif: (scanId: number, dest: string) =>
     platform.invoke<void>("export_sarif", { scanId, dest }),
+  listDirectory: (path?: string) =>
+    platform.invoke<DirListing>("list_directory", { path: path ?? null }),
   getProviderConfig: () => platform.invoke<ProviderInfo>("get_provider_config"),
   setProviderConfig: (kind: string, baseUrl: string, model: string) =>
     platform.invoke<void>("set_provider_config", { kind, baseUrl, model }),

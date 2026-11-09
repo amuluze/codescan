@@ -1,4 +1,4 @@
-/** 设置页：LLM Provider（复刻 axiom 形态）与 API Key（只写）。 */
+/** 设置页：LLM Provider（兼容 OpenAI / Anthropic）与 API Key（只写）。 */
 import { useEffect, useState } from "react";
 import { useLlmStore } from "../stores/llmStore";
 
@@ -46,63 +46,105 @@ export function SettingsView() {
   };
 
   return (
-    <section className="settings-view" aria-label="设置">
-      <h3>LLM Provider（兼容 OpenAI / Anthropic）</h3>
-      <div className="form-grid">
-        <label>
-          Provider
-          <select aria-label="Provider" value={kind} onChange={(e) => setKind(e.target.value)}>
-            <option value="openai">OpenAI-compatible</option>
-            <option value="anthropic">Anthropic-compatible</option>
-          </select>
-        </label>
-        <label>
-          Base URL
-          <input
-            aria-label="Base URL"
-            value={baseUrl}
-            onChange={(e) => setBaseUrl(e.target.value)}
-            placeholder="https://api.openai.com/v1"
-          />
-        </label>
-        <label>
-          Model
-          <input
-            aria-label="Model"
-            value={model}
-            onChange={(e) => setModel(e.target.value)}
-            placeholder="模型名，必填"
-          />
-        </label>
-      </div>
-      <div className="row">
-        <button onClick={() => void save()}>保存 Provider 配置</button>
-      </div>
+    <section className="page settings-view" aria-label="设置">
+      <header className="page-head">
+        <div>
+          <h2>设置</h2>
+          <p className="page-sub">
+            LLM 辅助层配置。密钥、扫描历史与基线均只保存在本地数据根。
+          </p>
+        </div>
+      </header>
 
-      <h3>API Key</h3>
-      <p className="muted" data-testid="key-status">
-        {provider?.has_key ? "已配置（明文不可读取）" : "未配置"}
-      </p>
-      <div className="row">
-        <input
-          aria-label="API Key"
-          type="password"
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-          placeholder="sk-..."
-        />
-        <button onClick={() => void saveKey()} disabled={!apiKey.trim()}>
-          保存 Key
-        </button>
-        <button onClick={() => void clearApiKey()} disabled={!provider?.has_key}>
-          清除 Key
-        </button>
-      </div>
+      <div className="settings-stack">
+        <section className="card">
+          <header className="card-head">
+            <div>
+              <h3>模型 Provider</h3>
+              <p className="card-sub">兼容 OpenAI 与 Anthropic 协议的本地直连；无内置遥测，请求只发往你填写的 Base URL。</p>
+            </div>
+          </header>
+          <div className="form-grid">
+            <label className="field">
+              <span className="field-label">Provider</span>
+              <select aria-label="Provider" value={kind} onChange={(e) => setKind(e.target.value)}>
+                <option value="openai">OpenAI-compatible</option>
+                <option value="anthropic">Anthropic-compatible</option>
+              </select>
+            </label>
+            <label className="field">
+              <span className="field-label">Base URL</span>
+              <input
+                aria-label="Base URL"
+                value={baseUrl}
+                onChange={(e) => setBaseUrl(e.target.value)}
+                placeholder="https://api.openai.com/v1"
+              />
+            </label>
+            <label className="field field-wide">
+              <span className="field-label">Model</span>
+              <input
+                aria-label="Model"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder="模型名，必填（例如 gpt-4o-mini / claude-sonnet-4-5）"
+              />
+            </label>
+          </div>
+          <footer className="card-actions">
+            <button className="primary" onClick={() => void save()}>
+              保存 Provider 配置
+            </button>
+          </footer>
+        </section>
 
-      {message && <p role="status">{message}</p>}
-      <p className="muted">
-        密钥仅存于 ~/.codescan/codescan.db 的 secrets 表（Rust 独占）；命令面不提供明文回读。
-      </p>
+        <section className="card">
+          <header className="card-head">
+            <div>
+              <h3>API Key</h3>
+              <p className="card-sub">仅写入 Rust 独占的 SQLite secrets 表；命令面不提供明文回读。</p>
+            </div>
+            <span
+              className={`status-chip ${provider?.has_key ? "ok" : "muted-chip"}`}
+              data-testid="key-status"
+            >
+              {provider?.has_key ? "已配置" : "未配置"}
+            </span>
+          </header>
+          <div className="key-row">
+            <input
+              aria-label="API Key"
+              type="password"
+              className="key-input"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="sk-…"
+              autoComplete="off"
+            />
+            <button className="primary" onClick={() => void saveKey()} disabled={!apiKey.trim()}>
+              保存 Key
+            </button>
+            <button className="ghost" onClick={() => void clearApiKey()} disabled={!provider?.has_key}>
+              清除 Key
+            </button>
+          </div>
+        </section>
+
+        <section className="card card-note">
+          <h3>安全边界</h3>
+          <ul className="note-list">
+            <li>LLM 输出仅作展示参考，永不进入门禁与基线；只有经校验并显式保存的规则才影响后续扫描。</li>
+            <li>密钥不出现在日志、错误消息、发现或任何导出物中。</li>
+            <li>扫描本身只读工作区；历史、基线与规则写入 <code>~/.codescan/</code>。</li>
+          </ul>
+        </section>
+
+        {message && (
+          <p role="status" className="notice">
+            {message}
+          </p>
+        )}
+      </div>
     </section>
   );
 }

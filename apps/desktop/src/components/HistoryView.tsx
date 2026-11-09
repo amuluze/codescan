@@ -2,6 +2,7 @@
 import { useEffect, useState } from "react";
 import { useHistoryStore } from "../stores/historyStore";
 import { platform } from "../platform";
+import { DirectoryPicker } from "./DirectoryPicker";
 import type { Finding } from "../types";
 
 export function HistoryView() {
@@ -18,16 +19,21 @@ export function HistoryView() {
   } = useHistoryStore();
   const [error, setError] = useState<string | null>(null);
   const [selectedFingerprint, setSelectedFingerprint] = useState<string | null>(null);
+  const [exportPickerOpen, setExportPickerOpen] = useState(false);
 
   useEffect(() => {
     load().catch((e) => setError(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const exportSarif = async () => {
+  const exportSarif = () => {
     if (!openScanId) return;
-    const dest = await platform.pickFolder();
-    if (!dest) return;
+    setExportPickerOpen(true);
+  };
+
+  const exportTo = async (dest: string) => {
+    setExportPickerOpen(false);
+    if (!openScanId) return;
     try {
       await platform.invoke("export_sarif", {
         scanId: openScanId,
@@ -41,6 +47,14 @@ export function HistoryView() {
   return (
     <section className="history-view" aria-label="历史">
       {error && <p role="alert">{error}</p>}
+      {exportPickerOpen && (
+        <DirectoryPicker
+          title="选择 SARIF 导出目录"
+          confirmLabel="导出到此目录"
+          onSelect={(path) => void exportTo(path)}
+          onClose={() => setExportPickerOpen(false)}
+        />
+      )}
       <p data-testid="baseline-info" className="muted">
         {baseline
           ? `当前基线：${baseline.entries} 条（引擎 ${baseline.engine_version}）`
@@ -125,8 +139,10 @@ export function HistoryView() {
                   <span className="path">
                     {f.path}:{f.span.start.line}
                   </span>
-                  <span className="rule">{f.rule_id}</span>
-                  {f.degraded && <span className="degraded">degraded</span>}
+                  <span className="rule">
+                    {f.rule_id}
+                    {f.degraded && <span className="degraded">degraded</span>}
+                  </span>
                 </li>
               ))}
               {openFindings.length === 0 && <li className="muted">无发现</li>}

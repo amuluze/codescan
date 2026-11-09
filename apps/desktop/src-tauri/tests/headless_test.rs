@@ -512,3 +512,32 @@ fn v33_regression_is_read_only() {
     assert_eq!(after_scans[0].root, before_scans[0].root);
     assert_eq!(store.gate_new(scan_id).unwrap(), before_gate);
 }
+
+/// 目录选择器后端：仅列出直属子目录、跳过隐藏、排序确定、父目录可回退。
+#[test]
+fn list_directory_lists_only_visible_subdirectories() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("alpha")).unwrap();
+    std::fs::create_dir_all(root.join("Beta")).unwrap();
+    std::fs::create_dir_all(root.join(".hidden")).unwrap();
+    std::fs::write(root.join("file.txt"), "x").unwrap();
+
+    let listing = codescan_lib::commands::list_directory(Some(
+        root.to_string_lossy().into_owned(),
+    ))
+    .expect("列目录失败");
+    let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, vec!["alpha", "Beta"], "只列可见目录并按名称排序");
+    assert_eq!(
+        listing.path,
+        root.canonicalize().unwrap().to_string_lossy()
+    );
+    assert!(listing.parent.is_some() || root.parent().is_none());
+
+    // 非法路径可读报错。
+    assert!(codescan_lib::commands::list_directory(Some(
+        root.join("missing").to_string_lossy().into_owned()
+    ))
+    .is_err());
+}

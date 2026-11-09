@@ -28,6 +28,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
+            commands::list_directory,
             commands::list_rules,
             commands::set_rule_enabled,
             commands::custom_rules_status,

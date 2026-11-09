@@ -1,10 +1,12 @@
 /** 扫描页：工作区选择 → 触发/取消 → 进度 → 概览。 */
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useScanStore } from "../stores/scanStore";
+import { DirectoryPicker } from "./DirectoryPicker";
 
 export function ScanView() {
-  const { phase, workspace, progress, error, stats, pickWorkspace, startScan, cancelScan } =
+  const { phase, workspace, progress, error, stats, setWorkspace, startScan, cancelScan } =
     useScanStore();
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   useEffect(() => {
     void useScanStore.getState().initListeners();
@@ -23,7 +25,7 @@ export function ScanView() {
   return (
     <section className="scan-view" aria-label="扫描">
       <div className="row">
-        <button onClick={() => void pickWorkspace()}>选择工作区</button>
+        <button onClick={() => setPickerOpen(true)}>选择工作区</button>
         <span className="workspace-path" data-testid="workspace-path">
           {workspace ?? "未选择"}
         </span>
@@ -42,6 +44,18 @@ export function ScanView() {
       )}
       {phase === "cancelled" && <p role="status">扫描已取消（结果作废）</p>}
       {phase === "error" && <p role="alert">{error}</p>}
+      {pickerOpen && (
+        <DirectoryPicker
+          title="选择工作区"
+          initialPath={workspace}
+          confirmLabel="使用此目录"
+          onSelect={(path) => {
+            setWorkspace(path);
+            setPickerOpen(false);
+          }}
+          onClose={() => setPickerOpen(false)}
+        />
+      )}
 
       {phase === "finished" && stats && (
         <div className="stats-grid" data-testid="stats">

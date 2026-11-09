@@ -49,6 +49,65 @@ fn read_custom_rules() -> Option<String> {
     std::fs::read_to_string(custom_rules_path()).ok()
 }
 
+/// 目录浏览（应用内目录选择器）：返回规范化路径、父目录与直属子目录。
+/// 不依赖原生对话框，行为在所有运行环境一致。
+#[derive(Serialize)]
+pub struct DirEntry {
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Serialize)]
+pub struct DirListing {
+    pub path: String,
+    pub parent: Option<String>,
+    pub entries: Vec<DirEntry>,
+}
+
+#[tauri::command]
+pub fn list_directory(path: Option<String>) -> Result<DirListing, String> {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("/"));
+    let requested = path
+        .filter(|p| !p.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.clone());
+    let canonical = requested
+        .canonicalize()
+        .map_err(|err| format!("无法访问目录 {}：{err}", requested.display()))?;
+    if !canonical.is_dir() {
+        return Err(format!("不是目录：{}", canonical.display()));
+    }
+    let mut entries = Vec::new();
+    let read = std::fs::read_dir(&canonical)
+        .map_err(|err| format!("读取目录失败 {}：{err}", canonical.display()))?;
+    for entry in read.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue; // 隐藏目录不列出；可手动输入路径访问
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        entries.push(DirEntry {
+            name,
+            path: entry.path().to_string_lossy().into_owned(),
+        });
+    }
+    entries.sort_by_key(|a| a.name.to_lowercase());
+    Ok(DirListing {
+        path: canonical.to_string_lossy().into_owned(),
+        parent: canonical
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned()),
+        entries,
+    })
+}
+
 #[tauri::command]
 pub fn list_rules(state: State<'_, AppState>) -> Result<Vec<RuleInfo>, String> {
     let engine = Engine::with_rules(read_custom_rules().as_deref(), &HashSet::new())

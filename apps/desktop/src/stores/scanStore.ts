@@ -44,7 +44,7 @@ type ScanState = {
   filter: FindingFilter;
   selected: Finding | null;
   initListeners: () => Promise<void>;
-  pickWorkspace: () => Promise<void>;
+  setWorkspace: (path: string) => void;
   startScan: () => Promise<void>;
   cancelScan: () => Promise<void>;
   setFilter: (patch: Partial<FindingFilter>) => void;
@@ -79,9 +79,8 @@ export const useScanStore = create<ScanState>((set, get) => ({
     });
   },
 
-  async pickWorkspace() {
-    const folder = await platform.pickFolder();
-    if (folder) set({ workspace: folder });
+  setWorkspace(path) {
+    set({ workspace: path });
   },
 
   async startScan() {

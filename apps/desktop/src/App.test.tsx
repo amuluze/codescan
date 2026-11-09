@@ -18,8 +18,6 @@ vi.mock("./platform", () => {
       listeners.set(event, handler);
       return () => listeners.delete(event);
     }),
-    pickFolder: vi.fn(async () => "/tmp/ws"),
-    saveFile: vi.fn(async () => null),
   };
   const api = {
     listRules: () => platform.invoke("list_rules"),
@@ -35,6 +33,8 @@ vi.mock("./platform", () => {
     baselineInfo: () => platform.invoke("baseline_info"),
     exportSarif: (scanId: number, dest: string) =>
       platform.invoke("export_sarif", { scanId, dest }),
+    listDirectory: (path?: string) =>
+      platform.invoke("list_directory", { path: path ?? null }),
     getProviderConfig: () => platform.invoke("get_provider_config"),
     setProviderConfig: (kind: string, baseUrl: string, model: string) =>
       platform.invoke("set_provider_config", { kind, baseUrl, model }),
@@ -137,6 +137,21 @@ beforeEach(() => {
         return null;
       case "get_scan":
         return findings;
+      case "list_directory": {
+        const path = (args?.path as string | undefined) ?? "/tmp/ws";
+        if (path === "/tmp/other") {
+          return {
+            path: "/tmp/other",
+            parent: "/tmp",
+            entries: [],
+          };
+        }
+        return {
+          path: "/tmp/ws",
+          parent: "/",
+          entries: [{ name: "workspace-sub", path: "/tmp/ws/sub" }],
+        };
+      }
       case "get_provider_config":
         return {
           kind: "openai",
@@ -209,6 +224,36 @@ describe("App 主链路", () => {
         ruleId: "ts/no-eval",
         enabled: false,
       });
+    });
+  });
+
+  it("点击选择工作区必定打开选择器；列表失败时在模态内呈现错误", async () => {
+    const user = userEvent.setup();
+    invokeMock.mockRejectedValueOnce(new Error("目录不可读"));
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "选择工作区" }));
+    const picker = await screen.findByTestId("dir-picker");
+    expect(picker).toBeInTheDocument();
+    const alert = await screen.findByTestId("dir-picker-error");
+    expect(alert.textContent).toContain("目录不可读");
+    expect(screen.getByTestId("dir-picker-confirm")).toBeDisabled();
+    expect(screen.getByTestId("workspace-path")).toHaveTextContent("未选择");
+  });
+
+  it("目录选择器可进入子目录并确认选择", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "选择工作区" }));
+    await screen.findByTestId("dir-picker");
+    await user.click(await screen.findByText("workspace-sub"));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("list_directory", { path: "/tmp/ws/sub" });
+    });
+    await user.click(screen.getByTestId("dir-picker-confirm"));
+    await waitFor(() => {
+      expect(screen.getByTestId("workspace-path")).toHaveTextContent("/tmp/ws");
     });
   });
 
@@ -362,6 +407,12 @@ describe("App 主链路", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "选择工作区" }));
+    const picker = await screen.findByTestId("dir-picker");
+    expect(picker).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId("dir-picker-current")).toHaveTextContent("/tmp/ws");
+    });
+    await user.click(screen.getByTestId("dir-picker-confirm"));
     await waitFor(() => {
       expect(screen.getByTestId("workspace-path")).toHaveTextContent("/tmp/ws");
     });
@@ -385,10 +436,16 @@ describe("App 主链路", () => {
     const list = await screen.findByTestId("finding-list");
     expect(list.textContent).toContain("src/a.ts:3");
     expect(list.textContent).toContain("metric/long");
+    expect(screen.getByTestId("finding-summary").textContent).toContain("共 2");
 
     // 维度过滤：security 只留一条。
     await user.selectOptions(screen.getByLabelText("维度过滤"), "security");
     expect(list.textContent).not.toContain("metric/long");
+
+    // 无结果时给出空状态引导而非空白列表。
+    await user.type(screen.getByLabelText("搜索"), "zzz-no-match");
+    expect(list.textContent).toContain("无匹配发现");
+    await user.click(screen.getByRole("button", { name: "清除过滤" }));
 
     // 详情面板。
     await user.click(screen.getByText("src/a.ts:3"));
