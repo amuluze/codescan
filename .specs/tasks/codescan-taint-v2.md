@@ -55,4 +55,8 @@ v2.1 落地。引擎 `taint.rs`：端点声明式编译、函数体边界、赋�
 
 附带修订：fixture 标注语义升级为「连续标注指向其后第一个非空且非标注行」，支持同一行多规则命中（v1 Task Spec 的 A2 一节已同步）。
 
-遗留：②v2.2 = Java/Go/Rust 污点端点；跨函数/堆别名/字段敏感仍为已知近似（Domain §4a）；③LLM 辅助层待开任务。
+遗留：跨函数/堆别名/字段敏感仍为已知近似（Domain §4a）；LLM 辅助层待开任务。
+
+## 追加（2026-11-09）：v2.2 已实施
+
+Java/Go/Rust 污点端点落地（各 3 条：exec/SQL/文件或进程构造类 sink；sanitizer 覆盖 `Integer.parseInt`/`strconv.Atoi`/`.parse()` 含 turbofish 形态）。污点规则共 17 条。全量规则套件与回归全绿。

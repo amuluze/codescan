@@ -152,3 +152,87 @@ rules:
         value: (macro_invocation
           macro: (identifier) @name
           (#match? @name "^(write|writeln)$"))) @match
+
+  # ---------- 污点（v2.2，过程内近似，Domain §4a） ----------
+  - id: rust/taint-command-param
+    language: rust
+    dimension: security
+    severity: error
+    message: 不可信参数可能流入 Command::new（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (function_item
+            parameters: (parameters
+              (parameter pattern: (identifier) @match))) @match
+      sinks:
+        - |
+          (call_expression
+            function: (scoped_identifier
+              path: (identifier) @path (#eq? @path "Command")
+              name: (identifier) @name (#eq? @name "new"))) @match
+      sanitizers:
+        - |
+          (call_expression
+            function: (field_expression
+              field: (field_identifier) @fn (#eq? @fn "parse"))) @match
+        - |
+          (call_expression
+            function: (generic_function
+              function: (field_expression
+                field: (field_identifier) @fn (#eq? @fn "parse")))) @match
+
+  - id: rust/taint-fs-write-param
+    language: rust
+    dimension: security
+    severity: warning
+    message: 不可信参数可能流入 fs::write（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (function_item
+            parameters: (parameters
+              (parameter pattern: (identifier) @match))) @match
+      sinks:
+        - |
+          (call_expression
+            function: (scoped_identifier
+              path: (identifier) @path (#eq? @path "fs")
+              name: (identifier) @name (#eq? @name "write"))) @match
+      sanitizers:
+        - |
+          (call_expression
+            function: (field_expression
+              field: (field_identifier) @fn (#eq? @fn "parse"))) @match
+        - |
+          (call_expression
+            function: (generic_function
+              function: (field_expression
+                field: (field_identifier) @fn (#eq? @fn "parse")))) @match
+
+  - id: rust/taint-sql-query-param
+    language: rust
+    dimension: security
+    severity: error
+    message: 不可信参数可能流入 SQL 查询（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (function_item
+            parameters: (parameters
+              (parameter pattern: (identifier) @match))) @match
+      sinks:
+        - |
+          (call_expression
+            function: (field_expression
+              field: (field_identifier) @fn (#eq? @fn "query"))) @match
+      sanitizers:
+        - |
+          (call_expression
+            function: (field_expression
+              field: (field_identifier) @fn (#eq? @fn "parse"))) @match
+        - |
+          (call_expression
+            function: (generic_function
+              function: (field_expression
+                field: (field_identifier) @fn (#eq? @fn "parse")))) @match

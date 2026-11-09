@@ -3,6 +3,7 @@ import java.io.IOException;
 public class RuntimeExec {
     public static void run(String cmd) throws IOException {
         // ruleid: java/runtime-exec
+        // ruleid: java/taint-exec-param
         Process p = Runtime.getRuntime().exec(cmd);
         p.waitFor();
     }

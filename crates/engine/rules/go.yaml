@@ -96,3 +96,79 @@ rules:
         regex: '^InsecureSkipVerify$'
       - capture: value
         regex: '^true$'
+
+  # ---------- 污点（v2.2，过程内近似，Domain §4a） ----------
+  - id: go/taint-exec-param
+    language: go
+    dimension: security
+    severity: error
+    message: 不可信参数可能流入 exec.Command（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (function_declaration
+            parameters: (parameter_list
+              (parameter_declaration name: (identifier) @match))) @match
+      sinks:
+        - |
+          (call_expression
+            function: (selector_expression
+              operand: (identifier) @pkg (#eq? @pkg "exec")
+              field: (field_identifier) @fn (#eq? @fn "Command"))) @match
+      sanitizers:
+        - |
+          (call_expression
+            function: (selector_expression
+              operand: (identifier) @pkg (#eq? @pkg "strconv")
+              field: (field_identifier) @fn (#eq? @fn "Atoi"))) @match
+
+  - id: go/taint-sql-param
+    language: go
+    dimension: security
+    severity: error
+    message: 不可信参数可能流入 SQL 查询（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (function_declaration
+            parameters: (parameter_list
+              (parameter_declaration name: (identifier) @match))) @match
+      sinks:
+        - |
+          (call_expression
+            function: (selector_expression
+              field: (field_identifier) @fn (#eq? @fn "Query"))) @match
+        - |
+          (call_expression
+            function: (selector_expression
+              field: (field_identifier) @fn (#eq? @fn "Exec"))) @match
+      sanitizers:
+        - |
+          (call_expression
+            function: (selector_expression
+              operand: (identifier) @pkg (#eq? @pkg "strconv")
+              field: (field_identifier) @fn (#eq? @fn "Atoi"))) @match
+
+  - id: go/taint-open-param
+    language: go
+    dimension: security
+    severity: warning
+    message: 不可信参数可能流入 os.Open（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (function_declaration
+            parameters: (parameter_list
+              (parameter_declaration name: (identifier) @match))) @match
+      sinks:
+        - |
+          (call_expression
+            function: (selector_expression
+              operand: (identifier) @pkg (#eq? @pkg "os")
+              field: (field_identifier) @fn (#eq? @fn "Open"))) @match
+      sanitizers:
+        - |
+          (call_expression
+            function: (selector_expression
+              operand: (identifier) @pkg (#eq? @pkg "filepath")
+              field: (field_identifier) @fn (#eq? @fn "Clean"))) @match

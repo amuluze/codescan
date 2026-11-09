@@ -104,7 +104,7 @@ pub(crate) fn profile(lang: Language) -> Profile {
             logic_ops: &["binary_expression"],
                         statement_wrapper: Some("block_statement"),
             assignments: &[
-                ("assignment_expression", "lhs", "value"),
+                ("assignment_expression", "left", "right"),
                 ("variable_declarator", "name", "value"),
             ],
         },
@@ -146,8 +146,8 @@ pub(crate) fn profile(lang: Language) -> Profile {
             logic_ops: &["binary_expression"],
                         statement_wrapper: None,
             assignments: &[
-                ("let_declaration", "name", "value"),
-                ("assignment_expression", "left", "value"),
+                ("let_declaration", "pattern", "value"),
+                ("assignment_expression", "left", "right"),
             ],
         },
     }

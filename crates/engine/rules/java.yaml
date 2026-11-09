@@ -101,3 +101,70 @@ rules:
       (method_invocation
         object: (identifier) @assert (#eq? @assert "Assert")
         name: (identifier) @name (#match? @name "^assert(True|False|Equals|NotEquals|NotNull|Null|ArrayEquals|Throws|That)$")) @match
+
+  # ---------- 污点（v2.2，过程内近似，Domain §4a） ----------
+  - id: java/taint-exec-param
+    language: java
+    dimension: security
+    severity: error
+    message: 不可信参数可能流入 Runtime.exec（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (method_declaration
+            parameters: (formal_parameters
+              (formal_parameter name: (identifier) @match))) @match
+      sinks:
+        - |
+          (method_invocation
+            name: (identifier) @name (#eq? @name "exec")) @match
+      sanitizers:
+        - |
+          (method_invocation
+            object: (identifier) @obj (#eq? @obj "Integer")
+            name: (identifier) @name (#eq? @name "parseInt")) @match
+
+  - id: java/taint-sql-param
+    language: java
+    dimension: security
+    severity: error
+    message: 不可信参数可能流入 SQL 查询执行（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (method_declaration
+            parameters: (formal_parameters
+              (formal_parameter name: (identifier) @match))) @match
+      sinks:
+        - |
+          (method_invocation
+            name: (identifier) @name (#eq? @name "executeQuery")) @match
+        - |
+          (method_invocation
+            name: (identifier) @name (#eq? @name "executeUpdate")) @match
+      sanitizers:
+        - |
+          (method_invocation
+            object: (identifier) @obj (#eq? @obj "Integer")
+            name: (identifier) @name (#eq? @name "parseInt")) @match
+
+  - id: java/taint-processbuilder-param
+    language: java
+    dimension: security
+    severity: warning
+    message: 不可信参数可能流入 ProcessBuilder（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (method_declaration
+            parameters: (formal_parameters
+              (formal_parameter name: (identifier) @match))) @match
+      sinks:
+        - |
+          (object_creation_expression
+            type: (type_identifier) @type (#eq? @type "ProcessBuilder")) @match
+      sanitizers:
+        - |
+          (method_invocation
+            object: (identifier) @obj (#eq? @obj "Integer")
+            name: (identifier) @name (#eq? @name "parseInt")) @match
