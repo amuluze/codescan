@@ -152,7 +152,7 @@ fn successful_scan_persists() {
 
 // ---------- v3：LLM 辅助层（Domain §3a） ----------
 
-use codescan_lib::commands::prepare_llm_call;
+use codescan_lib::commands::{prepare_batch_llm_call, prepare_llm_call};
 use codescan_lib::llm;
 
 #[test]
@@ -252,7 +252,89 @@ fn c7_llm_failure_is_recoverable() {
     assert!(result.is_err(), "网络失败应返回错误：{result:?}");
     let err = result.err().unwrap();
     assert!(!err.contains("sk-test"), "错误不得包含密钥：{err}");
+
+    // 流式路径同样可恢复且不泄密。
+    let stream_result = runtime.block_on(llm::complete_stream(
+        &config,
+        &key,
+        &system,
+        &user,
+        |_| {},
+    ));
+    assert!(stream_result.is_err(), "流式网络失败应返回错误：{stream_result:?}");
+    let err = stream_result.err().unwrap();
+    assert!(!err.contains("sk-test"), "流式错误不得包含密钥：{err}");
     // 存储与基线不受影响。
     assert_eq!(store.list_scans().unwrap().len(), 1);
     assert!(store.current_baseline().unwrap().is_none());
+}
+
+#[test]
+fn c8_batch_triage_prepare_and_parse_are_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("test.db")).unwrap();
+    let scan_id = store
+        .insert_scan(
+            "/tmp/ws",
+            &report(vec![
+                finding("r/a", "a.ts", 1, "fp-a"),
+                finding("r/b", "b.ts", 3, "fp-b"),
+            ]),
+            2,
+            1,
+        )
+        .unwrap();
+    store.set_baseline(scan_id, 2).unwrap();
+    store.set_secret(llm::SECRET_API_KEY, "sk-test").unwrap();
+    store
+        .set_meta(
+            llm::META_PROVIDER,
+            &llm::ProviderConfig {
+                kind: llm::ProviderKind::OpenAi,
+                base_url: "https://api.openai.com/v1".into(),
+                model: "m".into(),
+            }
+            .to_json(),
+        )
+        .unwrap();
+
+    let before_findings = store.get_findings(scan_id).unwrap();
+    let before_baseline = store.current_baseline().unwrap();
+    let before_gate = store.gate_new(scan_id).unwrap();
+
+    // 传空指纹 → 后端选取全部（当前两条）并构建提示词。
+    let (config, key, selected) =
+        prepare_batch_llm_call(&store, scan_id, &[]).unwrap();
+    assert!(config.validate().is_ok());
+    assert!(!key.is_empty());
+    let expected: Vec<String> = selected.iter().map(|f| f.fingerprint.clone()).collect();
+    assert_eq!(expected, vec!["fp-a", "fp-b"]);
+
+    let (system, user) = llm::batch_triage_prompt(&selected);
+    assert!(system.contains("JSON 数组"));
+    assert!(user.contains("fp-a") && user.contains("fp-b"));
+    let bad = r#"[
+      {"fingerprint":"fp-a","assessment":"false-positive","rationale":"x"},
+      {"fingerprint":"fp-b","assessment":"likely-false-positive","rationale":"y"}
+    ]"#;
+    // 非法 assessment → 可读错误，不产生部分结果。
+    assert!(llm::parse_batch_triage(bad, &expected).is_err());
+
+    let good = r#"[{"fingerprint":"fp-a","assessment":"uncertain","rationale":"x"}]"#;
+    let parsed = llm::parse_batch_triage(good, &expected).unwrap();
+    assert_eq!(parsed[0].fingerprint, "fp-a");
+    assert!(!parsed[0].missing);
+    assert!(parsed[1].missing);
+
+    // 显式超过上限 → 可读错误（无需 Provider 成功）。
+    let too_many: Vec<String> = (0..=llm::BATCH_TRIAGE_LIMIT)
+        .map(|i| format!("fp-{i}"))
+        .collect();
+    let err = prepare_batch_llm_call(&store, scan_id, &too_many).unwrap_err();
+    assert!(err.contains("20"), "{err}");
+
+    // 调用前后 findings / 基线 / 门禁差异完全不变。
+    assert_eq!(store.get_findings(scan_id).unwrap(), before_findings);
+    assert_eq!(store.current_baseline().unwrap(), before_baseline);
+    assert_eq!(store.gate_new(scan_id).unwrap(), before_gate);
 }

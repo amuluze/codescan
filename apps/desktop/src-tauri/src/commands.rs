@@ -382,6 +382,98 @@ pub async fn llm_triage(
     llm::parse_triage(&reply)
 }
 
+/// 流式增量事件载荷（requestId 用于 UI 过滤并发请求）。
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmDeltaPayload {
+    pub request_id: String,
+    pub text: String,
+}
+
+/// 流式分诊：逐片 emit `llm://delta`，最终返回完整文本。
+#[tauri::command]
+pub async fn llm_triage_stream(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    scan_id: i64,
+    fingerprint: String,
+    request_id: String,
+) -> Result<String, String> {
+    let custom = read_custom_rules();
+    let (config, key, context) = {
+        let store = state.store.lock().unwrap();
+        prepare_llm_call(&store, custom.as_deref(), scan_id, &fingerprint)?
+    };
+    let (system, user) = llm::triage_prompt(&context);
+    let reply = llm::complete_stream(&config, &key, &system, &user, move |text| {
+        let _ = app.emit(
+            "llm://delta",
+            LlmDeltaPayload {
+                request_id: request_id.clone(),
+                text: text.to_string(),
+            },
+        );
+    })
+    .await?;
+    Ok(reply)
+}
+
+/// 读取批量分诊所需上下文：显式指纹去重（超过上限拒绝），
+/// 传空则按 severity error>warning>info、路径序取前 20。只读，不写库。
+pub fn prepare_batch_llm_call(
+    store: &Store,
+    scan_id: i64,
+    fingerprints: &[String],
+) -> Result<(llm::ProviderConfig, String, Vec<Finding>), String> {
+    if fingerprints.len() > llm::BATCH_TRIAGE_LIMIT {
+        return Err(format!(
+            "批量分诊最多 {} 条，收到 {} 条",
+            llm::BATCH_TRIAGE_LIMIT,
+            fingerprints.len()
+        ));
+    }
+    let config = read_provider_config(store);
+    config.validate()?;
+    let key = store
+        .get_secret(llm::SECRET_API_KEY)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "未配置 API Key".to_string())?;
+    let findings = store.get_findings(scan_id).map_err(|e| e.to_string())?;
+    let selected_fps = llm::select_batch_fingerprints(
+        &findings,
+        fingerprints,
+        llm::BATCH_TRIAGE_LIMIT,
+    );
+    let mut selected = Vec::with_capacity(selected_fps.len());
+    for fingerprint in selected_fps {
+        let finding = findings
+            .iter()
+            .find(|f| f.fingerprint == fingerprint)
+            .ok_or_else(|| format!("未找到该发现：{fingerprint}"))?;
+        selected.push(finding.clone());
+    }
+    if selected.is_empty() {
+        return Err("该扫描没有可分诊的发现".to_string());
+    }
+    Ok((config, key, selected))
+}
+
+#[tauri::command]
+pub async fn llm_batch_triage(
+    state: State<'_, AppState>,
+    scan_id: i64,
+    fingerprints: Vec<String>,
+) -> Result<Vec<llm::BatchTriageEntry>, String> {
+    let (config, key, findings) = {
+        let store = state.store.lock().unwrap();
+        prepare_batch_llm_call(&store, scan_id, &fingerprints)?
+    };
+    let expected: Vec<String> = findings.iter().map(|f| f.fingerprint.clone()).collect();
+    let (system, user) = llm::batch_triage_prompt(&findings);
+    let reply = llm::complete(&config, &key, &system, &user).await?;
+    llm::parse_batch_triage(&reply, &expected)
+}
+
 #[tauri::command]
 pub async fn llm_generate_rule(
     state: State<'_, AppState>,

@@ -16,7 +16,20 @@ export function FindingsView() {
   const state = useScanStore();
   const { filter, selected, select, setFilter } = state;
   const shown = useMemo(() => filteredFindings(state), [state]);
-  const { triage, candidates, errors, runTriage, generateRule, saveRule } = useLlmStore();
+  const {
+    triage,
+    triageStreams,
+    streamPending,
+    candidates,
+    batch,
+    batchError,
+    errors,
+    runTriage,
+    runTriageStream,
+    runBatchTriage,
+    generateRule,
+    saveRule,
+  } = useLlmStore();
   const scanId = state.lastScanId;
 
   return (
@@ -50,7 +63,46 @@ export function FindingsView() {
           value={filter.query}
           onChange={(e) => setFilter({ query: e.target.value })}
         />
+        <button
+          disabled={!scanId || batch === "loading"}
+          onClick={() =>
+            scanId &&
+            void runBatchTriage(
+              scanId,
+              shown.slice(0, 20).map((f) => f.fingerprint),
+            )
+          }
+        >
+          批量分诊
+        </button>
       </div>
+
+      {batchError && <p role="alert">{batchError}</p>}
+      {batch === "loading" && <p className="muted">批量分诊中…</p>}
+      {batch && batch !== "loading" && (
+        <div className="batch-triage" data-testid="batch-triage">
+          <h4>批量分诊（参考）</h4>
+          <p className="muted llm-discipline">非确定性参考 · 不参与门禁</p>
+          <ul>
+            {batch.map((entry) => {
+              const finding = shown.find((f) => f.fingerprint === entry.fingerprint);
+              return (
+                <li key={entry.fingerprint}>
+                  <span className="path">
+                    {finding
+                      ? `${finding.path}:${finding.span.start.line}`
+                      : entry.fingerprint}
+                  </span>{" "}
+                  <span className="dim">
+                    {entry.missing ? "missing" : entry.assessment}
+                  </span>{" "}
+                  <span className="muted">{entry.rationale}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
 
       <div className="findings-body">
         <ul className="finding-list" data-testid="finding-list">
@@ -101,6 +153,12 @@ export function FindingsView() {
                   LLM 分诊
                 </button>
                 <button
+                  disabled={!scanId || streamPending[selected.fingerprint]}
+                  onClick={() => scanId && void runTriageStream(scanId, selected.fingerprint)}
+                >
+                  流式分诊
+                </button>
+                <button
                   disabled={!scanId || candidates[selected.fingerprint] === "loading"}
                   onClick={() => scanId && void generateRule(scanId, selected.fingerprint)}
                 >
@@ -112,6 +170,14 @@ export function FindingsView() {
               </p>
               {errors[selected.fingerprint] && (
                 <p role="alert">{errors[selected.fingerprint]}</p>
+              )}
+              {streamPending[selected.fingerprint] && (
+                <p className="muted">流式分诊接收中…</p>
+              )}
+              {triageStreams[selected.fingerprint] && (
+                <pre data-testid="triage-stream" className="triage-stream">
+                  <code>{triageStreams[selected.fingerprint]}</code>
+                </pre>
               )}
               {triage[selected.fingerprint] === "loading" && <p className="muted">分诊中…</p>}
               {triage[selected.fingerprint] &&

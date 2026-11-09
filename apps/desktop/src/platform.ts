@@ -49,6 +49,14 @@ export type TriageResult = {
   rationale: string;
 };
 
+export type BatchTriageEntry = {
+  fingerprint: string;
+  assessment: TriageResult["assessment"];
+  rationale: string;
+  /** 模型未返回的请求指纹，或模型返回了未请求的指纹。 */
+  missing: boolean;
+};
+
 export type CandidateRule = {
   yaml: string;
   valid: boolean;
@@ -104,6 +112,10 @@ export const api = {
   clearApiKey: () => platform.invoke<void>("clear_api_key"),
   llmTriage: (scanId: number, fingerprint: string) =>
     platform.invoke<TriageResult>("llm_triage", { scanId, fingerprint }),
+  llmTriageStream: (scanId: number, fingerprint: string, requestId: string) =>
+    platform.invoke<string>("llm_triage_stream", { scanId, fingerprint, requestId }),
+  llmBatchTriage: (scanId: number, fingerprints: string[]) =>
+    platform.invoke<BatchTriageEntry[]>("llm_batch_triage", { scanId, fingerprints }),
   llmGenerateRule: (scanId: number, fingerprint: string) =>
     platform.invoke<CandidateRule>("llm_generate_rule", { scanId, fingerprint }),
   saveCustomRule: (yaml: string) =>

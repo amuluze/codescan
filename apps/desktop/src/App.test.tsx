@@ -3,6 +3,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
+import { useLlmStore } from "./stores/llmStore";
 import type { Finding } from "./types";
 
 type InvokeArgs = Record<string, unknown> | undefined;
@@ -41,6 +42,10 @@ vi.mock("./platform", () => {
     clearApiKey: () => platform.invoke("clear_api_key"),
     llmTriage: (scanId: number, fingerprint: string) =>
       platform.invoke("llm_triage", { scanId, fingerprint }),
+    llmTriageStream: (scanId: number, fingerprint: string, requestId: string) =>
+      platform.invoke("llm_triage_stream", { scanId, fingerprint, requestId }),
+    llmBatchTriage: (scanId: number, fingerprints: string[]) =>
+      platform.invoke("llm_batch_triage", { scanId, fingerprints }),
     llmGenerateRule: (scanId: number, fingerprint: string) =>
       platform.invoke("llm_generate_rule", { scanId, fingerprint }),
     saveCustomRule: (yaml: string) => platform.invoke("save_custom_rule", { yaml }),
@@ -77,7 +82,17 @@ const findings = [
 beforeEach(() => {
   listeners.clear();
   invokeMock.mockReset();
-  invokeMock.mockImplementation(async (cmd: string) => {
+  useLlmStore.setState({
+    provider: null,
+    triage: {},
+    triageStreams: {},
+    streamPending: {},
+    candidates: {},
+    batch: null,
+    batchError: null,
+    errors: {},
+  });
+  invokeMock.mockImplementation(async (cmd: string, args?: InvokeArgs) => {
     switch (cmd) {
       case "list_rules":
         return [
@@ -121,6 +136,28 @@ beforeEach(() => {
           assessment: "likely-false-positive",
           rationale: "静态字符串，未流入危险汇聚点",
         };
+      case "llm_triage_stream": {
+        const { requestId } = (args ?? {}) as { requestId?: string };
+        const delta = listeners.get("llm://delta");
+        delta?.({ requestId, text: '{"assessment":"true-' });
+        delta?.({ requestId, text: 'positive"}' });
+        return '{"assessment":"true-positive"}';
+      }
+      case "llm_batch_triage":
+        return [
+          {
+            fingerprint: "fp-1",
+            assessment: "true-positive",
+            rationale: "命中真实危险构造",
+            missing: false,
+          },
+          {
+            fingerprint: "fp-2",
+            assessment: "uncertain",
+            rationale: "缺少上下文",
+            missing: false,
+          },
+        ];
       case "llm_generate_rule":
         return {
           yaml: "rules:\n  - id: custom/no-eval-param\n    language: typescript\n    dimension: security\n    severity: warning\n    message: m\n    pattern: |\n      (return_statement) @match\n",
@@ -208,6 +245,38 @@ describe("App 主链路", () => {
       expect(invokeMock).toHaveBeenCalledWith("save_custom_rule", {
         yaml: expect.stringContaining("custom/no-eval-param"),
       });
+    });
+  });
+
+  it("流式分诊实时渲染增量，批量分诊列表标注参考纪律", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "选择工作区" }));
+    await user.click(screen.getByRole("button", { name: "开始扫描" }));
+    const finished = listeners.get("scan://finished");
+    await act(async () => {
+      finished!({ scan_id: 7, stats: { files_scanned: 1 } });
+    });
+    await user.click(screen.getByRole("button", { name: "发现" }));
+    await user.click(await screen.findByText("src/a.ts:3"));
+
+    await user.click(screen.getByRole("button", { name: "流式分诊" }));
+    const stream = await screen.findByTestId("triage-stream");
+    await waitFor(() => expect(stream.textContent).toContain("true-positive"));
+    expect(invokeMock).toHaveBeenCalledWith("llm_triage_stream", {
+      scanId: 7,
+      fingerprint: "fp-1",
+      requestId: expect.any(String),
+    });
+
+    await user.click(screen.getByRole("button", { name: "批量分诊" }));
+    const batch = await screen.findByTestId("batch-triage");
+    expect(batch.textContent).toContain("true-positive");
+    expect(batch.textContent).toContain("非确定性参考 · 不参与门禁");
+    expect(invokeMock).toHaveBeenCalledWith("llm_batch_triage", {
+      scanId: 7,
+      fingerprints: ["fp-1", "fp-2"],
     });
   });
 

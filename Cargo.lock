@@ -500,6 +500,7 @@ name = "codescan-desktop"
 version = "0.1.0"
 dependencies = [
  "codescan-engine",
+ "futures-util",
  "reqwest",
  "rusqlite",
  "serde",

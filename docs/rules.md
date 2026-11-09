@@ -91,14 +91,15 @@ doSomethingSafe();
             function: (identifier) @fn (#eq? @fn "parseInt")) @match
 ```
 
-语义与限制（Domain Spec §4a）：
+语义与限制（Domain Spec §4a，v4）：
 
-1. **过程内**：以单函数体为边界；跨函数、堆别名、字段/路径敏感均不追踪。变量名扁平化（`obj.prop` 归约为其中标识符）。
-2. **传播**：赋值/声明（各语言内置表）把 RHS 的污点传给 LHS 标识符；source 直接出现在 sink 范围内也算命中。
-3. **sanitizer**：RHS 与 sanitizer 范围重叠则不传播；sink 内落在 sanitizer 范围内的标识符不算污点。
-4. `@match` 多捕获时取**跨度最小**者作为端点（同 patterns 内谓词可用 `@fn`/`@prop` 等别名）；sink 判定同时要求节点种类与字节范围相等，避免 block/expression_statement/call 共享范围导致重复报告。
-5. 发现证据：`flows` = sink 对应的 source 位置列表，UI 与 SARIF `properties.flows` 展示。
-6. 消息口径：只能表述「不可信数据可能到达」的过程内近似，不得声称跨过程或堆敏感证明。
+1. **同文件过程间**：按调用名索引本文件函数（`f(...)`、`obj.f(...)` 取末段名）；位置参数映射形参；**重名函数取并集**过近似；返回值可携带函数内部 source 的污点。跨文件、堆别名、字段/路径敏感不追踪；变量名扁平化（`obj.prop` 归约为标识符）。
+2. **摘要不动点**：每函数每形参的「可达 sink」布尔摘要做不动点迭代，支持互递归；收敛后才做最终收集（深度上限 6，调用环剪枝）。
+3. **传播**：赋值/声明把 RHS 污点传给 LHS 标识符；source 直接出现在 sink 内也算命中；调用实参污点经形参映射进入被调函数。
+4. **sanitizer**：RHS 与 sanitizer 范围重叠则不传播；sink 内落在 sanitizer 范围内的标识符不算污点。
+5. `@match` 多捕获时取**跨度最小**者作为端点；sink 判定同时要求节点种类与字节范围相等（避免 block/expression_statement/call 共享范围重复报告）。
+6. 发现证据：`flows` = 源头位置列表（跨函数时合并调用链上的多个源头），UI 与 SARIF `properties.flows` 展示；同一 sink 的多条路径合并为一条发现。
+7. 消息口径：只能表述「不可信数据可能到达」的同文件近似，不得声称跨文件或堆敏感证明。
 
 ## 忽略规则（扫描范围）
 

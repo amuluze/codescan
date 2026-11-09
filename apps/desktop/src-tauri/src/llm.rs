@@ -4,12 +4,16 @@
 //! 纪律：本模块产出永不进入发现/基线/门禁；只有经校验并显式保存的
 //! 规则文本才影响后续扫描。请求构造与解析均为纯函数，网络调用单列。
 
+use codescan_engine::model::{Finding, Severity};
 use codescan_engine::Engine;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 pub const SECRET_API_KEY: &str = "llm:api_key";
 pub const META_PROVIDER: &str = "llm:provider";
+/// 批量分诊单次上限（任务 Spec §2）。
+pub const BATCH_TRIAGE_LIMIT: usize = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -61,6 +65,17 @@ pub struct TriageResult {
     /// true-positive | likely-false-positive | uncertain
     pub assessment: String,
     pub rationale: String,
+}
+
+/// 批量分诊单条结果：展示层参考，不参与门禁（Domain §5.3）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatchTriageEntry {
+    pub fingerprint: String,
+    /// 有效枚举，或模型缺失该条时的 `uncertain` 占位。
+    pub assessment: String,
+    pub rationale: String,
+    /// 模型未返回的请求指纹，或模型返回了未请求的指纹。
+    pub missing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -158,6 +173,89 @@ pub fn parse_anthropic_response(body: &str) -> Result<String, String> {
         })
 }
 
+// ---------- 流式（SSE）解析：纯函数，单测覆盖 ----------
+
+/// 流式请求体：在非流式请求体上追加 `stream: true`。
+pub fn stream_body(config: &ProviderConfig, system: &str, user: &str) -> serde_json::Value {
+    let mut body = match config.kind {
+        ProviderKind::OpenAi => openai_body(&config.model, system, user),
+        ProviderKind::Anthropic => anthropic_body(&config.model, system, user),
+    };
+    body["stream"] = serde_json::Value::Bool(true);
+    body
+}
+
+/// 解析一行 SSE：容忍空行、注释、`event:` 行与非 JSON 数据。
+/// OpenAI 取 `choices[0].delta.content`；Anthropic 仅取
+/// `content_block_delta.delta.text`。空增量与 `[DONE]` 返回 `None`。
+pub fn parse_sse_data_line(kind: ProviderKind, line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with(':') || line.starts_with("event:") {
+        return None;
+    }
+    let payload = line.strip_prefix("data:")?.trim();
+    if payload == "[DONE]" {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let text = match kind {
+        ProviderKind::OpenAi => value["choices"][0]["delta"]["content"].as_str()?,
+        ProviderKind::Anthropic => {
+            if value["type"].as_str() != Some("content_block_delta") {
+                return None;
+            }
+            value["delta"]["text"].as_str()?
+        }
+    };
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// 增量 SSE 解析器：跨网络 chunk 缓冲未完整的行，按字节拼接后解码，
+/// 避免多字节 UTF-8 被 chunk 边界切断。
+#[derive(Debug)]
+pub struct SseParser {
+    kind: ProviderKind,
+    pending: Vec<u8>,
+}
+
+impl SseParser {
+    pub fn new(kind: ProviderKind) -> Self {
+        SseParser {
+            kind,
+            pending: Vec::new(),
+        }
+    }
+
+    pub fn push(&mut self, chunk: &str) -> Vec<String> {
+        self.push_bytes(chunk.as_bytes())
+    }
+
+    pub fn push_bytes(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.pending.extend_from_slice(chunk);
+        let mut deltas = Vec::new();
+        while let Some(newline) = self.pending.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = self.pending.drain(..=newline).collect();
+            let text = String::from_utf8_lossy(&line);
+            if let Some(delta) = parse_sse_data_line(self.kind, &text) {
+                deltas.push(delta);
+            }
+        }
+        deltas
+    }
+
+    /// 流结束后处理没有换行结尾的残留行。
+    pub fn finish(&mut self) -> Vec<String> {
+        if self.pending.is_empty() {
+            return Vec::new();
+        }
+        let rest = std::mem::take(&mut self.pending);
+        let text = String::from_utf8_lossy(&rest);
+        parse_sse_data_line(self.kind, &text)
+            .into_iter()
+            .collect()
+    }
+}
+
 // ---------- 提示词与模型输出解析 ----------
 
 fn triage_system_prompt() -> &'static str {
@@ -207,12 +305,162 @@ fn extract_json_object(text: &str) -> Option<String> {
     (end > start).then(|| text[start..=end].to_string())
 }
 
+// ---------- 批量分诊 ----------
+
+fn severity_rank(severity: Severity) -> u8 {
+    match severity {
+        Severity::Error => 0,
+        Severity::Warning => 1,
+        Severity::Info => 2,
+    }
+}
+
+/// 选择批量分诊目标：显式指纹按传入顺序去重截断；空则按
+/// severity error>warning>info、路径、位置、规则 id 确定性排序取前 `limit` 条。
+pub fn select_batch_fingerprints(
+    findings: &[Finding],
+    requested: &[String],
+    limit: usize,
+) -> Vec<String> {
+    if !requested.is_empty() {
+        let mut seen = HashSet::new();
+        return requested
+            .iter()
+            .filter(|fp| seen.insert((*fp).clone()))
+            .take(limit)
+            .cloned()
+            .collect();
+    }
+    let mut ordered: Vec<&Finding> = findings.iter().collect();
+    ordered.sort_by(|a, b| {
+        severity_rank(a.severity)
+            .cmp(&severity_rank(b.severity))
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.span.start.line.cmp(&b.span.start.line))
+            .then_with(|| a.span.start.column.cmp(&b.span.start.column))
+            .then_with(|| a.rule_id.cmp(&b.rule_id))
+            .then_with(|| a.fingerprint.cmp(&b.fingerprint))
+    });
+    ordered
+        .into_iter()
+        .take(limit)
+        .map(|f| f.fingerprint.clone())
+        .collect()
+}
+
+fn batch_triage_system_prompt() -> &'static str {
+    "你是代码扫描结果的批量误报分诊助手。只输出一个 JSON 数组，不要 markdown 代码块，不要在 JSON 外输出任何文字。\
+数组每项结构：{\"fingerprint\":\"输入中的指纹\",\"assessment\":\"true-positive|likely-false-positive|uncertain\",\"rationale\":\"不超过两句中文理由\"}。\
+必须为输入中的每个 fingerprint 返回恰好一项，不得返回输入之外的 fingerprint。\
+你只能基于给出的证据判断，不得声称已验证可利用性。"
+}
+
+pub fn batch_triage_prompt(findings: &[Finding]) -> (String, String) {
+    let mut lines = String::new();
+    for (idx, finding) in findings.iter().enumerate() {
+        lines.push_str(&format!(
+            "{n}. fingerprint: {fp}\n规则: {rule}（{dim}/{sev}）\n位置: {path}:{line}\n命中文本（截断）:\n{match}\n\n",
+            n = idx + 1,
+            fp = finding.fingerprint,
+            rule = finding.rule_id,
+            dim = serde_json::to_string(&finding.dimension).unwrap_or_default().trim_matches('"'),
+            sev = serde_json::to_string(&finding.severity).unwrap_or_default().trim_matches('"'),
+            path = finding.path,
+            line = finding.span.start.line,
+            match = truncate(&finding.match_text, 800),
+        ));
+    }
+    let user = format!(
+        "请逐条判断下列 {count} 条扫描发现更可能是真实问题还是误报，并按系统要求输出 JSON 数组。\n\n{lines}",
+        count = findings.len(),
+    );
+    (batch_triage_system_prompt().to_string(), user)
+}
+
+fn extract_json_array(text: &str) -> Option<String> {
+    let start = text.find('[')?;
+    let end = text.rfind(']')?;
+    (end > start).then(|| text[start..=end].to_string())
+}
+
+/// 解析批量分诊 JSON 数组：校验 assessment 枚举；缺失的请求指纹与模型
+/// 多返回的未知指纹都以 `missing: true` 标注，不丢弃任何一侧。
+pub fn parse_batch_triage(
+    text: &str,
+    expected: &[String],
+) -> Result<Vec<BatchTriageEntry>, String> {
+    let json_text = extract_json_array(text)
+        .ok_or_else(|| format!("模型输出中没有 JSON 数组：{}", truncate(text, 300)))?;
+    let value: serde_json::Value = serde_json::from_str(&json_text)
+        .map_err(|e| format!("批量分诊 JSON 解析失败：{e}"))?;
+    let items = value
+        .as_array()
+        .ok_or_else(|| "批量分诊输出必须是 JSON 数组".to_string())?;
+
+    let mut returned: Vec<BatchTriageEntry> = Vec::new();
+    let mut seen = HashSet::new();
+    for item in items {
+        let fingerprint = item["fingerprint"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if fingerprint.is_empty() {
+            return Err("批量分诊条目缺少 fingerprint".to_string());
+        }
+        let assessment = item["assessment"].as_str().unwrap_or("").to_string();
+        if !matches!(
+            assessment.as_str(),
+            "true-positive" | "likely-false-positive" | "uncertain"
+        ) {
+            return Err(format!(
+                "非法的 assessment：{assessment:?}（fingerprint {fingerprint}）"
+            ));
+        }
+        if !seen.insert(fingerprint.clone()) {
+            continue;
+        }
+        returned.push(BatchTriageEntry {
+            fingerprint,
+            assessment,
+            rationale: item["rationale"].as_str().unwrap_or("").to_string(),
+            missing: false,
+        });
+    }
+
+    let expected_set: HashSet<&str> = expected.iter().map(|s| s.as_str()).collect();
+    let mut result = Vec::new();
+    for fingerprint in expected {
+        match returned.iter().position(|e| &e.fingerprint == fingerprint) {
+            Some(pos) => {
+                let mut entry = returned.remove(pos);
+                entry.missing = false;
+                result.push(entry);
+            }
+            None => result.push(BatchTriageEntry {
+                fingerprint: fingerprint.clone(),
+                assessment: "uncertain".to_string(),
+                rationale: "模型未返回该发现的分诊结果。".to_string(),
+                missing: true,
+            }),
+        }
+    }
+    for mut entry in returned {
+        entry.missing = !expected_set.contains(entry.fingerprint.as_str());
+        result.push(entry);
+    }
+    Ok(result)
+}
+
 fn candidate_system_prompt() -> &'static str {
     "你是 Codescan 静态规则的编写助手。只输出一个 YAML 文档，不要 markdown 代码块，不要注释以外的解释文字。\
 格式必须是：rules: 下恰好一条规则。字段：id（必须以 custom/ 开头，小写字母数字/`-`/`/`）、language（typescript|tsx|javascript|jsx|python|java|go|rust）、\
 dimension（security|business-logic|quality）、severity（error|warning|info）、message（只描述出现了什么构造，不得声称漏洞可利用）、\
-以及以下二者之一：pattern（tree-sitter query，必须包含 @match 捕获）或 text（Rust regex，language 必须为 \"*\"）。\
-pattern 的节点名必须真实存在于目标语言的 tree-sitter 语法；不确定时优先写更窄、更精确的匹配。不要使用 filters 与 taint。"
+以及以下三者之一：pattern（tree-sitter query，必须包含 @match 捕获）、text（Rust regex，language 必须为 \"*\"）或 taint 块。\
+taint 块结构：taint: { sources: [query...], sinks: [query...], sanitizers: [query...] }；language 必须为具体语言（不得为 \"*\"）、\
+sources 与 sinks 至少各一条，每个 query 必须包含 @match 捕获（sink/source 的 @match 应落在标识符、调用或表达式节点上）。\
+taint 表示「不可信数据可能到达 sink」的同文件过程内近似，不得声称跨文件、堆别名或字段敏感证明。\
+pattern 的节点名必须真实存在于目标语言的 tree-sitter 语法；不确定时优先写更窄、更精确的匹配。不要使用 filters。"
 }
 
 pub fn candidate_prompt(finding: &FindingContext) -> (String, String) {
@@ -255,7 +503,26 @@ pub fn extract_rule_yaml(text: &str) -> Result<String, String> {
 
 // ---------- 自定义规则合并与校验 ----------
 
-/// 校验候选规则文本：可解析、可编译、id 全部 `custom/` 前缀。
+/// 判断 query 是否声明了 `@match` 捕获（避免把 `@match_foo` 误判为合法）。
+fn has_match_capture(query: &str) -> bool {
+    let mut rest = query;
+    while let Some(pos) = rest.find("@match") {
+        let after = &rest[pos + "@match".len()..];
+        let boundary = after
+            .chars()
+            .next()
+            .map(|c| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(true);
+        if boundary {
+            return true;
+        }
+        rest = after;
+    }
+    false
+}
+
+/// 校验候选规则文本：可解析、可编译、id 全部 `custom/` 前缀；
+/// taint 端点的每条 query 必须声明 `@match` 捕获。
 pub fn validate_candidate(yaml_text: &str) -> Vec<String> {
     let mut errors = Vec::new();
     let specs = match codescan_engine::rules::parse_rule_set(yaml_text) {
@@ -267,6 +534,25 @@ pub fn validate_candidate(yaml_text: &str) -> Vec<String> {
     for spec in &specs {
         if !spec.id.starts_with("custom/") {
             errors.push(format!("规则 id {} 必须以 custom/ 开头", spec.id));
+        }
+        if let Some(taint) = &spec.taint {
+            let groups = [
+                ("taint.sources", &taint.sources),
+                ("taint.sinks", &taint.sinks),
+                ("taint.sanitizers", &taint.sanitizers),
+            ];
+            for (field, queries) in groups {
+                for (idx, query) in queries.iter().enumerate() {
+                    if !has_match_capture(query) {
+                        errors.push(format!(
+                            "规则 id {} 的 {} 第 {} 条 query 必须包含 @match 捕获",
+                            spec.id,
+                            field,
+                            idx + 1
+                        ));
+                    }
+                }
+            }
         }
     }
     if !errors.is_empty() {
@@ -381,6 +667,59 @@ pub async fn complete(
     }
 }
 
+/// 流式调用 Provider，每片增量经 `on_delta` 回调，返回完整文本。
+/// 错误信息不得包含 API Key。
+pub async fn complete_stream<F>(
+    config: &ProviderConfig,
+    api_key: &str,
+    system: &str,
+    user: &str,
+    mut on_delta: F,
+) -> Result<String, String>
+where
+    F: FnMut(&str),
+{
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("HTTP 客户端创建失败：{e}"))?;
+    let url = endpoint(config);
+    let body = stream_body(config, system, user);
+    let request = match config.kind {
+        ProviderKind::OpenAi => client.post(&url).bearer_auth(api_key).json(&body),
+        ProviderKind::Anthropic => client
+            .post(&url)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&body),
+    };
+    let response = request.send().await.map_err(|e| format!("请求失败：{e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response
+            .text()
+            .await
+            .map_err(|e| format!("读取响应失败：{e}"))?;
+        return Err(format!("Provider 返回 {status}：{}", truncate(&body, 500)));
+    }
+
+    let mut parser = SseParser::new(config.kind);
+    let mut stream = response.bytes_stream();
+    let mut complete = String::new();
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk.map_err(|e| format!("读取流失败：{e}"))?;
+        for delta in parser.push_bytes(&bytes) {
+            complete.push_str(&delta);
+            on_delta(&delta);
+        }
+    }
+    for delta in parser.finish() {
+        complete.push_str(&delta);
+        on_delta(&delta);
+    }
+    Ok(complete)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,5 +787,165 @@ mod tests {
 
         let conflict = "rules:\n  - id: custom/a\n    language: python\n    dimension: quality\n    severity: info\n    message: m\n    pattern: |\n      (return_statement) @match\n";
         assert!(merge_custom_rules(Some(existing), conflict).is_err());
+    }
+
+    #[test]
+    fn sse_parsing_handles_both_providers_and_split_chunks() {
+        // OpenAI：一行一个 JSON；跨 chunk 的行缓冲。
+        let mut parser = SseParser::new(ProviderKind::OpenAi);
+        assert!(parser.push(r#"data: {"choi"#).is_empty());
+        assert_eq!(
+            parser.push("ces\":[{\"delta\":{\"content\":\"He\"}}]}\n"),
+            vec!["He".to_string()]
+        );
+        // 空 delta、[DONE]、非 JSON、注释与 event 行均被跳过。
+        let chunk = "data: {\"choices\":[{\"delta\":{}}]}\n\
+                     data: [DONE]\n\
+                     data: not-json\n\
+                     : comment\n\
+                     event: message\n";
+        assert!(parser.push(chunk).is_empty());
+
+        // Anthropic：只取 content_block_delta.delta.text。
+        let mut parser = SseParser::new(ProviderKind::Anthropic);
+        assert_eq!(
+            parser.push("data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"lo\"}}\n"),
+            vec!["lo".to_string()]
+        );
+        assert!(parser
+            .push("data: {\"type\":\"message_start\",\"message\":{}}\n")
+            .is_empty());
+        // 无换行结尾的残留行在 finish 时输出。
+        assert!(parser.push("data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"尾\"}}").is_empty());
+        assert_eq!(parser.finish(), vec!["尾".to_string()]);
+        assert!(parser.finish().is_empty());
+
+        // 多字节字符被 chunk 边界切断时不损坏。
+        let mut parser = SseParser::new(ProviderKind::OpenAi);
+        let line = "data: {\"choices\":[{\"delta\":{\"content\":\"你\"}}]}\n";
+        let bytes = line.as_bytes();
+        let cut = line.find('你').unwrap() + 1;
+        assert!(parser.push_bytes(&bytes[..cut]).is_empty());
+        assert_eq!(parser.push_bytes(&bytes[cut..]), vec!["你".to_string()]);
+    }
+
+    fn test_finding(fp: &str, severity: Severity, path: &str, line: usize) -> Finding {
+        Finding {
+            rule_id: "r/x".into(),
+            dimension: codescan_engine::model::Dimension::Quality,
+            severity,
+            path: path.into(),
+            span: codescan_engine::model::Span {
+                start: codescan_engine::model::Position { line, column: 1 },
+                end: codescan_engine::model::Position { line, column: 9 },
+            },
+            message: "m".into(),
+            match_text: "x".into(),
+            captures: Vec::new(),
+            degraded: false,
+            flows: Vec::new(),
+            fingerprint: fp.into(),
+        }
+    }
+
+    #[test]
+    fn batch_selection_orders_by_severity_then_path_and_caps() {
+        let findings = vec![
+            test_finding("info", Severity::Info, "a.ts", 1),
+            test_finding("warn-b", Severity::Warning, "b.ts", 1),
+            test_finding("err", Severity::Error, "z.ts", 9),
+            test_finding("warn-a", Severity::Warning, "a.ts", 5),
+        ];
+        assert_eq!(
+            select_batch_fingerprints(&findings, &[], BATCH_TRIAGE_LIMIT),
+            vec!["err", "warn-a", "warn-b", "info"]
+        );
+        assert_eq!(
+            select_batch_fingerprints(&findings, &[], 2),
+            vec!["err", "warn-a"]
+        );
+        assert_eq!(
+            select_batch_fingerprints(
+                &findings,
+                &["warn-b".into(), "warn-b".into(), "info".into()],
+                BATCH_TRIAGE_LIMIT
+            ),
+            vec!["warn-b", "info"]
+        );
+    }
+
+    #[test]
+    fn batch_parse_marks_missing_and_extra_and_rejects_bad_assessment() {
+        let expected = vec!["fp-1".to_string(), "fp-2".to_string()];
+        let text = r#"```json
+[
+  {"fingerprint":"fp-1","assessment":"true-positive","rationale":"r1"},
+  {"fingerprint":"fp-extra","assessment":"uncertain","rationale":"x"}
+]
+```"#;
+        let out = parse_batch_triage(text, &expected).unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].fingerprint, "fp-1");
+        assert!(!out[0].missing);
+        assert_eq!(out[1].fingerprint, "fp-2");
+        assert!(out[1].missing);
+        assert_eq!(out[1].assessment, "uncertain");
+        assert_eq!(out[2].fingerprint, "fp-extra");
+        assert!(out[2].missing);
+
+        // 非法 assessment → 可读错误。
+        let bad = r#"[{"fingerprint":"fp-1","assessment":"bogus","rationale":""}]"#;
+        assert!(parse_batch_triage(bad, &expected).is_err());
+        // 缺 fingerprint → 可读错误。
+        let bad = r#"[{"assessment":"uncertain","rationale":""}]"#;
+        assert!(parse_batch_triage(bad, &expected).is_err());
+        // 无 JSON 数组 → 可读错误。
+        assert!(parse_batch_triage("nope", &expected).is_err());
+    }
+
+    #[test]
+    fn taint_candidate_validation_requires_match_and_compiles() {
+        let valid = r#"
+rules:
+  - id: custom/py-taint
+    language: python
+    dimension: security
+    severity: error
+    message: 不可信数据可能到达 eval
+    taint:
+      sources:
+        - |
+          (call
+            function: (identifier) @fn (#eq? @fn "input")) @match
+      sinks:
+        - |
+          (call
+            function: (identifier) @fn (#eq? @fn "eval")) @match
+      sanitizers:
+        - |
+          (call
+            function: (identifier) @fn (#eq? @fn "int")) @match
+"#;
+        assert!(validate_candidate(valid).is_empty(), "{:?}", validate_candidate(valid));
+        // 合法 taint 候选可经合并保存。
+        let merged = merge_custom_rules(None, valid).unwrap();
+        assert!(merged.contains("custom/py-taint"), "{merged}");
+
+        // 缺 @match：引擎能编译，但候选契约要求拒绝。
+        let missing_match = valid.replace(
+            "(call\n            function: (identifier) @fn (#eq? @fn \"eval\")) @match",
+            "(call\n            function: (identifier) @fn (#eq? @fn \"eval\"))",
+        );
+        let errors = validate_candidate(&missing_match);
+        assert!(!errors.is_empty());
+        assert!(errors.iter().any(|e| e.contains("@match")), "{errors:?}");
+
+        // query 编译失败。
+        let broken = valid.replace(
+            "(call\n            function: (identifier) @fn (#eq? @fn \"eval\")) @match",
+            "(definitely_not_a_node) @match",
+        );
+        let errors = validate_candidate(&broken);
+        assert!(!errors.is_empty(), "{errors:?}");
     }
 }

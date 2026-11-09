@@ -43,6 +43,8 @@ pub fn run() {
             commands::set_api_key,
             commands::clear_api_key,
             commands::llm_triage,
+            commands::llm_triage_stream,
+            commands::llm_batch_triage,
             commands::llm_generate_rule,
             commands::save_custom_rule,
         ])

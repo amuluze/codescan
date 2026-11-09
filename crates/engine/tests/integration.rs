@@ -24,6 +24,12 @@ fn build_corpus(root: &std::path::Path) {
         "src/b.py",
         "def calc(x):\n    if x > 1:\n        return x * 2\n    return x\n",
     );
+    // 污点流（过程内 param → eval + 同文件跨函数调用链）。
+    write_file(
+        root,
+        "src/cross.ts",
+        "function run(code: string): void {\n  eval(code);\n}\n\nfunction entry(userInput: string): void {\n  run(userInput);\n}\n",
+    );
     // 污点流（过程内 param → eval）。
     write_file(
         root,
@@ -348,4 +354,36 @@ fn ignore_sources_and_defaults() {
         .findings
         .iter()
         .any(|f| f.path == "local-only/scratch.ts"));
+}
+
+/// D5：跨文件流不追踪（同文件过程间边界的负例）。
+#[test]
+fn d5_cross_file_flow_not_tracked() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "a.ts",
+        "function entry(): void {\n  const v = readInput();\n  runEval(v);\n}\n",
+    );
+    write_file(
+        dir.path(),
+        "b.ts",
+        "function runEval(code: string): void {\n  eval(code);\n}\n",
+    );
+    let custom = "rules:\n  - id: custom/xfile\n    language: typescript\n    dimension: security\n    severity: error\n    message: m\n    taint:\n      sources:\n        - |\n          (call_expression\n            function: (identifier) @fn (#eq? @fn \"readInput\")) @match\n      sinks:\n        - |\n          (call_expression\n            function: (identifier) @fn (#eq? @fn \"eval\")) @match\n";
+    let builtin_yaml =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/rules/builtin.yaml")).unwrap();
+    let engine = Engine::build(&builtin_yaml, Some(custom), &HashSet::new()).unwrap();
+    let report = engine
+        .scan(dir.path(), &CancelToken::new(), &|_| {})
+        .expect("扫描失败");
+    let cross: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.rule_id == "custom/xfile")
+        .collect();
+    assert!(
+        cross.is_empty(),
+        "跨文件流不应被追踪：{cross:?}"
+    );
 }
