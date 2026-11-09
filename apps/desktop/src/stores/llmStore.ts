@@ -8,14 +8,37 @@ import {
   type CandidateRule,
   type ProviderInfo,
   type ProviderTestResult,
+  type ReviewResult,
   type TriageResult,
 } from "../platform";
+
+/** 源码审查请求序号：切换工作区后使在途请求的结果失效。 */
+let reviewSeq = 0;
+
+/** 跨页合并建议并按 (path,line,title) 去重。 */
+function mergeSuggestions(
+  a: ReviewResult["suggestions"],
+  b: ReviewResult["suggestions"],
+): ReviewResult["suggestions"] {
+  const seen = new Set<string>();
+  return [...a, ...b].filter((s) => {
+    const key = `${s.path}\n${s.line}\n${s.title}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 
 type LlmState = {
   provider: ProviderInfo | null;
   testing: boolean;
   testResult: ProviderTestResult | null;
   testError: string | null;
+  /** LLM 源码审查：仅展示层，不进入发现/基线。 */
+  review: ReviewResult | "loading" | null;
+  reviewError: string | null;
+  /** 分批审查进度（批次维度）。 */
+  reviewProgress: { done: number; total: number } | null;
   triage: Record<string, TriageResult | "loading" | null>;
   /** 流式分诊已接收的增量文本（按 fingerprint）。 */
   triageStreams: Record<string, string>;
@@ -31,6 +54,8 @@ type LlmState = {
   saveApiKey: (key: string) => Promise<void>;
   clearApiKey: () => Promise<void>;
   testConnection: () => Promise<void>;
+  runReview: (root: string, maxFiles?: number, offset?: number) => Promise<void>;
+  resetReview: () => void;
   runTriage: (scanId: number, fingerprint: string) => Promise<void>;
   runTriageStream: (scanId: number, fingerprint: string) => Promise<void>;
   runBatchTriage: (scanId: number, fingerprints: string[]) => Promise<void>;
@@ -49,6 +74,9 @@ export const useLlmStore = create<LlmState>((set, get) => ({
   testing: false,
   testResult: null,
   testError: null,
+  review: null,
+  reviewError: null,
+  reviewProgress: null,
   triage: {},
   triageStreams: {},
   streamPending: {},
@@ -91,6 +119,55 @@ export const useLlmStore = create<LlmState>((set, get) => ({
     } finally {
       set({ testing: false });
     }
+  },
+
+  async runReview(root, maxFiles, offset = 0) {
+    const seq = ++reviewSeq;
+    const current = get().review;
+    const previous = offset > 0 && current && current !== "loading" ? current : null;
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    set({ review: "loading", reviewError: null, reviewProgress: null });
+    let unlisten: (() => void) | null = null;
+    try {
+      unlisten = await platform.listen("llm://review_progress", (payload) => {
+        if (
+          typeof payload !== "object" ||
+          payload === null ||
+          !("requestId" in payload) ||
+          payload.requestId !== requestId ||
+          !("done" in payload) ||
+          !("total" in payload) ||
+          typeof payload.done !== "number" ||
+          typeof payload.total !== "number"
+        ) {
+          return;
+        }
+        if (seq !== reviewSeq) return;
+        set({ reviewProgress: { done: payload.done, total: payload.total } });
+      });
+      const result = await api.llmReviewWorkspace(root, maxFiles, offset, requestId);
+      if (seq !== reviewSeq) return; // 工作区已切换，丢弃过期结果
+      const merged = previous
+        ? {
+            ...result,
+            files_reviewed: previous.files_reviewed + result.files_reviewed,
+            total_bytes: previous.total_bytes + result.total_bytes,
+            dropped: previous.dropped + result.dropped,
+            suggestions: mergeSuggestions(previous.suggestions, result.suggestions),
+          }
+        : result;
+      set({ review: merged, reviewProgress: null });
+    } catch (e) {
+      if (seq !== reviewSeq) return;
+      set({ review: null, reviewError: String(e), reviewProgress: null });
+    } finally {
+      unlisten?.();
+    }
+  },
+
+  resetReview() {
+    reviewSeq += 1;
+    set({ review: null, reviewError: null, reviewProgress: null });
   },
 
   async runTriage(scanId, fingerprint) {

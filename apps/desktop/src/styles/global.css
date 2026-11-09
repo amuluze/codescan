@@ -295,6 +295,90 @@ pre {
   word-break: break-all;
 }
 
+.review-card .card-head {
+  align-items: flex-start;
+}
+
+.review-actions {
+  gap: 12px;
+}
+
+.review-summary {
+  font-size: 12px;
+}
+
+.review-budget {
+  margin: 0;
+  font-size: 12px;
+}
+
+.review-empty {
+  margin: 0;
+  font-size: 12.5px;
+}
+
+.review-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.review-list li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.review-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.review-head .path {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.review-head-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.confidence-chip {
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.review-title {
+  margin: 2px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.review-detail {
+  margin: 0;
+  font-size: 12.5px;
+}
+
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -705,6 +789,31 @@ pre {
   padding-top: 10px;
 }
 
+.detail-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.detail-section-head h4 {
+  margin: 0;
+}
+
+.copy-button {
+  padding: 2px 8px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  flex-shrink: 0;
+}
+
+.output-tools {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 4px;
+}
+
 .detail-section h4 {
   margin: 0 0 6px;
   font-size: 12.5px;
@@ -934,6 +1043,18 @@ pre {
   flex-shrink: 0;
 }
 
+.batch-entry {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.batch-entry > div {
+  min-width: 0;
+  word-break: break-word;
+}
+
 .batch-triage ul {
   margin: 0;
   padding-left: 18px;
@@ -1023,6 +1144,44 @@ pre {
 .rules-table tbody tr:hover,
 .history-table tbody tr:hover {
   background: var(--surface-2);
+}
+
+.history-table td:last-child {
+  white-space: nowrap;
+}
+
+/* ---------- 表格操作列 ---------- */
+
+.table-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+button.btn-sm {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+button.danger {
+  color: var(--error);
+  background: rgba(255, 107, 107, 0.1);
+  border-color: rgba(255, 107, 107, 0.4);
+}
+
+button.danger:hover:not(:disabled) {
+  background: rgba(255, 107, 107, 0.18);
+  border-color: rgba(255, 107, 107, 0.6);
+}
+
+button.danger-text {
+  color: var(--muted);
+}
+
+button.danger-text:hover:not(:disabled) {
+  color: var(--error);
+  border-color: rgba(255, 107, 107, 0.4);
 }
 
 /* ---------- 滚动条 ---------- */

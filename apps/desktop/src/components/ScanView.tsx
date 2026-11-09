@@ -1,7 +1,13 @@
 /** 扫描页：工作区选择 → 触发/取消 → 阶段与进度 → 结果统计。 */
 import { useEffect, useState } from "react";
 import { useScanStore } from "../stores/scanStore";
+import { useLlmStore } from "../stores/llmStore";
+import { CONFIDENCE_LABEL, DIMENSION_LABEL, SEVERITY_LABEL } from "../labels";
+import { CopyButton } from "./CopyButton";
 import { DirectoryPicker } from "./DirectoryPicker";
+
+/** 与后端 llm::REVIEW_MAX_FILES 一致（仅用于文案与选项上限）。 */
+const REVIEW_MAX_FILES = 24;
 
 const PHASE_LABEL: Record<string, string> = {
   idle: "空闲",
@@ -14,6 +20,11 @@ const PHASE_LABEL: Record<string, string> = {
 export function ScanView() {
   const { phase, workspace, progress, error, stats, setWorkspace, startScan, cancelScan } =
     useScanStore();
+  const { review, reviewError, reviewProgress, runReview, resetReview } = useLlmStore();
+  const [reviewLimit, setReviewLimit] = useState(REVIEW_MAX_FILES);
+  const reviewResult = review && review !== "loading" ? review : null;
+  const reviewComplete =
+    reviewResult !== null && reviewResult.next_offset >= reviewResult.candidate_files;
   const [pickerOpen, setPickerOpen] = useState(false);
 
   useEffect(() => {
@@ -139,6 +150,114 @@ export function ScanView() {
         </section>
       )}
 
+      <section className="card review-card">
+        <header className="card-head">
+          <div>
+            <h3>LLM 源码审查（参考）</h3>
+            <p className="card-sub">
+              每次最多 {reviewLimit} 个可审查源码文件（合计 ≤128 KiB）发送到已配置 Provider，
+              覆盖安全、业务逻辑与代码质量三个维度；可分次「继续审查」直至覆盖全部候选。
+              源码被视为不可信数据；结果仅作参考，不写入发现、基线或门禁。
+            </p>
+          </div>
+          <span className="discipline-tag">非确定性参考 · 不参与门禁</span>
+        </header>
+        <div className="row review-actions">
+          <button
+            className="primary"
+            onClick={() =>
+              workspace &&
+              void runReview(workspace, reviewLimit, reviewResult?.next_offset ?? 0)
+            }
+            disabled={!workspace || review === "loading" || reviewComplete}
+          >
+            {review === "loading"
+              ? reviewProgress
+                ? `审查中 ${reviewProgress.done}/${reviewProgress.total} 批…`
+                : "审查中…"
+              : reviewComplete
+                ? "已审查全部候选"
+                : reviewResult
+                  ? "继续审查"
+                  : "开始审查"}
+          </button>
+          {reviewResult && reviewResult.files_reviewed > 0 && (
+            <button className="ghost" onClick={() => resetReview()} disabled={review === "loading"}>
+              重置进度
+            </button>
+          )}
+          <label className="inline-check muted">
+            文件数
+            <select
+              aria-label="审查文件上限"
+              value={reviewLimit}
+              onChange={(e) => setReviewLimit(Number(e.target.value))}
+              disabled={review === "loading"}
+            >
+              <option value={12}>12</option>
+              <option value={24}>24</option>
+            </select>
+          </label>
+          {review && review !== "loading" && (
+            <span className="muted review-summary">
+              已审查 {review.files_reviewed} / {review.candidate_files} 个可审查文件 ·{" "}
+              {review.suggestions.length} 条建议
+              {review.dropped > 0 && ` · 过滤 ${review.dropped} 条无效`}
+            </span>
+          )}
+        </div>
+        {reviewResult && !reviewComplete && (
+          <p className="muted review-budget">
+            还有 {reviewResult.candidate_files - reviewResult.next_offset} 个候选未审查，
+            可点「继续审查」逐页覆盖；也可增大文件数上限减少次数。
+          </p>
+        )}
+        {reviewError && (
+          <p role="alert" className="run-error">
+            {reviewError}
+          </p>
+        )}
+        {review && review !== "loading" &&
+          (review.suggestions.length === 0 ? (
+            <p className="muted review-empty">未发现问题（参考）；这不代表代码安全。</p>
+          ) : (
+            <ul className="review-list" data-testid="review-suggestions">
+              {review.suggestions.map((s, index) => (
+                <li key={`${s.path}:${s.line}:${s.title}`}>
+                  <div className="review-head">
+                    <span className={`sev-chip sev-${s.severity}`}>
+                      {SEVERITY_LABEL[s.severity]}
+                    </span>
+                    <span className="dim-badge">{DIMENSION_LABEL[s.category]}</span>
+                    <span className="path">
+                      {s.path}:{s.line}
+                    </span>
+                    <span className="review-head-actions">
+                      <CopyButton
+                        label={`复制审查结果第 ${index + 1} 条`}
+                        text={[
+                          `${SEVERITY_LABEL[s.severity]}｜${DIMENSION_LABEL[s.category]}｜${s.path}:${s.line}`,
+                          s.title,
+                          s.detail,
+                          `置信度：${CONFIDENCE_LABEL[s.confidence]}`,
+                        ]
+                          .filter((line) => line.trim() !== "")
+                          .join("\n")}
+                      />
+                      <span className="confidence-chip">
+                        置信度 {CONFIDENCE_LABEL[s.confidence]}
+                      </span>
+                    </span>
+                  </div>
+                  <p className="review-title">{s.title}</p>
+                  {s.detail && <p className="muted review-detail">{s.detail}</p>}
+                </li>
+              ))}
+            </ul>
+          ))}
+
+      </section>
+
       {pickerOpen && (
         <DirectoryPicker
           title="选择工作区"
@@ -146,6 +265,7 @@ export function ScanView() {
           confirmLabel="使用此目录"
           onSelect={(path) => {
             setWorkspace(path);
+            resetReview();
             setPickerOpen(false);
           }}
           onClose={() => setPickerOpen(false)}

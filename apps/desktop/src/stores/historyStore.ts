@@ -13,6 +13,7 @@ type HistoryState = {
   loading: boolean;
   load: () => Promise<void>;
   openScan: (scanId: number) => Promise<void>;
+  deleteScan: (scanId: number) => Promise<void>;
   setBaseline: (scanId: number) => Promise<void>;
   refreshGate: (scanId: number) => Promise<void>;
 };
@@ -43,6 +44,21 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
     const findings = await api.getScan(scanId);
     set({ openScanId: scanId, openFindings: findings, gateNew: null });
     await get().refreshGate(scanId);
+  },
+
+  async deleteScan(scanId) {
+    await api.deleteScan(scanId);
+    const [scans, baseline] = await Promise.all([
+      api.listScans(),
+      api.baselineInfo().catch(() => null),
+    ]);
+    set((state) => ({
+      scans,
+      baseline,
+      ...(state.openScanId === scanId
+        ? { openScanId: null, openFindings: [], gateNew: null }
+        : {}),
+    }));
   },
 
   async setBaseline(scanId) {

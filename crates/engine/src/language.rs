@@ -16,6 +16,20 @@ pub enum Language {
 }
 
 impl Language {
+    /// 稳定语言标识：用于展示、规则声明与确定性排序，不依赖 `Debug` 输出。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Language::TypeScript => "typescript",
+            Language::Tsx => "tsx",
+            Language::JavaScript => "javascript",
+            Language::Jsx => "jsx",
+            Language::Python => "python",
+            Language::Java => "java",
+            Language::Go => "go",
+            Language::Rust => "rust",
+        }
+    }
+
     pub fn from_extension(ext: &str) -> Option<Language> {
         match ext {
             "ts" | "mts" | "cts" => Some(Language::TypeScript),

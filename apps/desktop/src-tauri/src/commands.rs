@@ -222,6 +222,16 @@ pub fn get_scan(
 }
 
 #[tauri::command]
+pub fn delete_scan(state: State<'_, AppState>, scan_id: i64) -> Result<(), String> {
+    state
+        .store
+        .lock()
+        .unwrap()
+        .delete_scan(scan_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn set_baseline(state: State<'_, AppState>, scan_id: i64) -> Result<i64, String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -408,7 +418,168 @@ pub async fn test_provider_connection(
     })
 }
 
-/// 读取一次 LLM 调用所需的全部上下文；Key 只在 Rust 内存中短暂存在。
+/// 审查文件选择结果：候选数与游标用于 UI 展示覆盖率与续审。
+pub struct ReviewSelection {
+    pub files: Vec<llm::ReviewFile>,
+    pub total_bytes: usize,
+    /// 通过元数据/语言粗筛的候选文件数（读取后再排除二进制）。
+    pub candidates: usize,
+    /// 下一个未消费的候选序号；等于 candidates 表示已到末尾。
+    pub next_offset: usize,
+}
+
+/// 按语言轮转生成确定性候选顺序（组内保持调用方传入的相对路径顺序）。
+fn review_candidate_order(files: &[(PathBuf, String)]) -> Vec<(PathBuf, String)> {
+    use std::collections::BTreeMap;
+
+    let mut groups: BTreeMap<String, Vec<(PathBuf, String)>> = BTreeMap::new();
+    for (abs, rel) in files {
+        let Ok(metadata) = std::fs::metadata(abs) else {
+            continue;
+        };
+        if metadata.len() > llm::REVIEW_FILE_MAX_BYTES {
+            continue;
+        }
+        let Some(language) =
+            codescan_engine::language::Language::detect(std::path::Path::new(rel))
+        else {
+            continue;
+        };
+        groups
+            .entry(language.as_str().to_string())
+            .or_default()
+            .push((abs.clone(), rel.clone()));
+    }
+
+    let mut cursors: BTreeMap<String, usize> = BTreeMap::new();
+    let mut order = Vec::new();
+    loop {
+        let mut progressed = false;
+        for (key, items) in &groups {
+            let cursor = cursors.entry(key.clone()).or_insert(0);
+            if let Some(candidate) = items.get(*cursor) {
+                order.push(candidate.clone());
+                *cursor += 1;
+                progressed = true;
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+    order
+}
+
+/// 从工作区文件中取一页可审查源码：
+/// - 跳过超限、不可读与二进制文件（不计入页内，但消费游标）；
+/// - 按语言轮转顺序分页，`offset` 为候选序号；
+/// - 遵守文件数与总字节上限；预算不足时保留该候选给下一页。
+pub fn collect_review_files(
+    files: &[(PathBuf, String)],
+    max_files: usize,
+    max_bytes: usize,
+    offset: usize,
+) -> ReviewSelection {
+    let order = review_candidate_order(files);
+    let candidates = order.len();
+    let mut index = offset.min(candidates);
+    let mut files_out = Vec::new();
+    let mut total_bytes = 0usize;
+    while index < candidates && files_out.len() < max_files {
+        let (abs, rel) = &order[index];
+        index += 1;
+
+        let Ok(bytes) = std::fs::read(abs) else {
+            continue;
+        };
+        if bytes[..bytes.len().min(8192)].contains(&0) {
+            continue;
+        }
+        if total_bytes + bytes.len() > max_bytes {
+            // 预算不足：保留该候选，下一页从它开始。
+            index -= 1;
+            break;
+        }
+        let content = String::from_utf8_lossy(&bytes).into_owned();
+        let lines = content.lines().count().max(1);
+        total_bytes += bytes.len();
+        files_out.push(llm::ReviewFile {
+            path: rel.clone(),
+            content,
+            lines,
+        });
+    }
+
+    ReviewSelection {
+        files: files_out,
+        total_bytes,
+        candidates,
+        next_offset: index,
+    }
+}
+
+/// LLM 源码审查：只返回展示层建议，不写入 findings/基线/门禁。
+#[tauri::command]
+pub async fn llm_review_workspace(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    root: String,
+    max_files: Option<usize>,
+    offset: Option<usize>,
+    request_id: Option<String>,
+) -> Result<llm::ReviewResult, String> {
+    let root_path = PathBuf::from(&root);
+    if !root_path.is_dir() {
+        return Err(format!("工作区不是目录：{root}"));
+    }
+    let (config, key) = {
+        let store = state.store.lock().unwrap();
+        prepare_provider_probe(&store)?
+    };
+    let listed = state.manager.list_workspace_files(&root_path);
+    let max_files = max_files
+        .unwrap_or(llm::REVIEW_MAX_FILES)
+        .clamp(1, llm::REVIEW_MAX_FILES);
+    let selection = collect_review_files(
+        &listed,
+        max_files,
+        llm::REVIEW_MAX_BYTES,
+        offset.unwrap_or(0),
+    );
+    if selection.files.is_empty() {
+        return Err("工作区中没有可审查的源码文件".into());
+    }
+    let files_reviewed = selection.files.len();
+    let request_id = request_id.unwrap_or_default();
+    let (suggestions, dropped) = llm::review_batched(
+        &config,
+        &key,
+        &selection.files,
+        |done, total| {
+            let _ = app.emit(
+                "llm://review_progress",
+                serde_json::json!({
+                    "requestId": request_id,
+                    "done": done,
+                    "total": total,
+                    "files": files_reviewed,
+                }),
+            );
+        },
+    )
+    .await?;
+    Ok(llm::ReviewResult {
+        files_reviewed,
+        candidate_files: selection.candidates,
+        next_offset: selection.next_offset,
+        total_bytes: selection.total_bytes,
+        model: config.model,
+        dropped,
+        suggestions,
+    })
+}
+
+/// 读取一次 LLM 调用所需的全部上下文；Key 只在 Rust 内存中短暂存在。/// 读取一次 LLM 调用所需的全部上下文；Key 只在 Rust 内存中短暂存在。
 /// 与 Tauri State 解耦（无头测试覆盖 C2/C7 的错误路径）。
 pub fn prepare_llm_call(
     store: &Store,

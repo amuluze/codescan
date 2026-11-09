@@ -56,6 +56,26 @@ export type ProviderTestResult = {
   latency_ms: number;
 };
 
+export type ReviewSuggestion = {
+  path: string;
+  line: number;
+  severity: "error" | "warning" | "info";
+  category: "security" | "business-logic" | "quality";
+  title: string;
+  detail: string;
+  confidence: "high" | "medium" | "low";
+};
+
+export type ReviewResult = {
+  files_reviewed: number;
+  candidate_files: number;
+  next_offset: number;
+  total_bytes: number;
+  model: string;
+  dropped: number;
+  suggestions: ReviewSuggestion[];
+};
+
 export type TriageResult = {
   assessment: "true-positive" | "likely-false-positive" | "uncertain";
   rationale: string;
@@ -113,6 +133,7 @@ export const api = {
   cancelScan: () => platform.invoke<void>("cancel_scan"),
   listScans: () => platform.invoke<ScanSummary[]>("list_scans"),
   getScan: (scanId: number) => platform.invoke<Finding[]>("get_scan", { scanId }),
+  deleteScan: (scanId: number) => platform.invoke<void>("delete_scan", { scanId }),
   setBaseline: (scanId: number) => platform.invoke<number>("set_baseline", { scanId }),
   gateDiff: (scanId: number) =>
     platform.invoke<Finding[] | null>("gate_diff", { scanId }),
@@ -128,6 +149,18 @@ export const api = {
   clearApiKey: () => platform.invoke<void>("clear_api_key"),
   testProviderConnection: () =>
     platform.invoke<ProviderTestResult>("test_provider_connection"),
+  llmReviewWorkspace: (
+    root: string,
+    maxFiles?: number,
+    offset?: number,
+    requestId?: string,
+  ) =>
+    platform.invoke<ReviewResult>("llm_review_workspace", {
+      root,
+      maxFiles: maxFiles ?? null,
+      offset: offset ?? 0,
+      requestId: requestId ?? null,
+    }),
   llmTriage: (scanId: number, fingerprint: string) =>
     platform.invoke<TriageResult>("llm_triage", { scanId, fingerprint }),
   llmTriageStream: (scanId: number, fingerprint: string, requestId: string) =>

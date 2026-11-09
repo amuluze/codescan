@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { useLlmStore } from "./stores/llmStore";
+import { useScanStore } from "./stores/scanStore";
 import type { Finding } from "./types";
 
 type InvokeArgs = Record<string, unknown> | undefined;
@@ -28,6 +29,7 @@ vi.mock("./platform", () => {
     cancelScan: () => platform.invoke("cancel_scan"),
     listScans: () => platform.invoke("list_scans"),
     getScan: (scanId: number) => platform.invoke("get_scan", { scanId }),
+    deleteScan: (scanId: number) => platform.invoke("delete_scan", { scanId }),
     setBaseline: (scanId: number) => platform.invoke("set_baseline", { scanId }),
     gateDiff: (scanId: number) => platform.invoke("gate_diff", { scanId }),
     baselineInfo: () => platform.invoke("baseline_info"),
@@ -41,6 +43,18 @@ vi.mock("./platform", () => {
     setApiKey: (key: string) => platform.invoke("set_api_key", { key }),
     clearApiKey: () => platform.invoke("clear_api_key"),
     testProviderConnection: () => platform.invoke("test_provider_connection"),
+    llmReviewWorkspace: (
+      root: string,
+      maxFiles?: number,
+      offset?: number,
+      requestId?: string,
+    ) =>
+      platform.invoke("llm_review_workspace", {
+        root,
+        maxFiles: maxFiles ?? null,
+        offset: offset ?? 0,
+        requestId: requestId ?? null,
+      }),
     llmTriage: (scanId: number, fingerprint: string) =>
       platform.invoke("llm_triage", { scanId, fingerprint }),
     llmTriageStream: (scanId: number, fingerprint: string, requestId: string) =>
@@ -95,11 +109,25 @@ const findings = [
 beforeEach(() => {
   listeners.clear();
   invokeMock.mockReset();
+  useScanStore.setState({
+    phase: "idle",
+    workspace: null,
+    progress: null,
+    error: null,
+    lastScanId: null,
+    stats: null,
+    findings: [],
+    filter: { dimension: "all", severity: "all", query: "" },
+    selected: null,
+  });
   useLlmStore.setState({
     provider: null,
     testing: false,
     testResult: null,
     testError: null,
+    review: null,
+    reviewError: null,
+    reviewProgress: null,
     triage: {},
     triageStreams: {},
     streamPending: {},
@@ -141,6 +169,8 @@ beforeEach(() => {
         return null;
       case "get_scan":
         return findings;
+      case "delete_scan":
+        return null;
       case "list_directory": {
         const path = (args?.path as string | undefined) ?? "/tmp/ws";
         if (path === "/tmp/other") {
@@ -165,6 +195,28 @@ beforeEach(() => {
         };
       case "test_provider_connection":
         return { kind: "openai", model: "test-model", latency_ms: 87 };
+      case "llm_review_workspace": {
+        const offset = (args?.offset as number | undefined) ?? 0;
+        return {
+          files_reviewed: offset === 0 ? 2 : 1,
+          candidate_files: 3,
+          next_offset: offset === 0 ? 2 : 3,
+          total_bytes: 2048,
+          model: "test-model",
+          dropped: 1,
+          suggestions: [
+            {
+              path: "src/a.ts",
+              line: 3,
+              severity: "warning",
+              category: "business-logic",
+              title: "缺少订单归属校验",
+              detail: "更新前未校验订单是否属于当前用户。",
+              confidence: "medium",
+            },
+          ],
+        };
+      }
       case "llm_triage":
         return {
           assessment: "likely-false-positive",
@@ -481,5 +533,110 @@ describe("App 主链路", () => {
     await user.click(screen.getByRole("button", { name: "测试连接" }));
     const err = await screen.findByTestId("provider-test-error");
     expect(err).toHaveTextContent("401");
+  });
+
+  it("批量分诊、流式分诊与 LLM 分诊输出支持一键复制", async () => {
+    useScanStore.setState({
+      phase: "finished",
+      lastScanId: 7,
+      findings: [
+        finding({ fingerprint: "fp-1" }),
+        finding({
+          fingerprint: "fp-2",
+          rule_id: "metric/long",
+          dimension: "quality",
+          severity: "info",
+          path: "src/b.py",
+        }),
+      ],
+      selected: null,
+    });
+    const user = userEvent.setup();
+    // 注意：userEvent.setup() 会替换 navigator.clipboard，mock 必须在其后注入。
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "发现" }));
+
+    // 批量分诊：逐条复制。
+    await user.click(screen.getByRole("button", { name: "批量分诊" }));
+    await user.click(await screen.findByRole("button", { name: "复制批量分诊第 1 条" }));
+    expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("true-positive"));
+    expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("src/a.ts:3"));
+
+    // LLM 分诊：复制评估与理由。
+    await user.click(screen.getByRole("button", { name: "LLM 分诊" }));
+    await user.click(await screen.findByRole("button", { name: "复制分诊建议" }));
+    expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("likely-false-positive"));
+    expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("静态字符串"));
+
+    // 流式分诊：复制已接收的完整输出。
+    await user.click(screen.getByRole("button", { name: "流式分诊" }));
+    await user.click(await screen.findByRole("button", { name: "复制流式分诊输出" }));
+    expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("true-positive"));
+  });
+
+  it("历史记录删除需要二次确认", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "历史" }));
+    await screen.findByTestId("history-table");
+    await user.click(screen.getByRole("button", { name: "删除" }));
+    // 第一次点击只进入确认态，不调用后端。
+    expect(screen.queryByRole("button", { name: "删除" })).toBeNull();
+    expect(invokeMock).not.toHaveBeenCalledWith("delete_scan", expect.anything());
+    await user.click(screen.getByRole("button", { name: "确认删除" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("delete_scan", { scanId: 7 }),
+    );
+  });
+
+  it("扫描页可发起 LLM 源码审查并展示建议", async () => {
+    useScanStore.setState({ workspace: "/tmp/ws" });
+    const user = userEvent.setup();
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "开始审查" }));
+    const list = await screen.findByTestId("review-suggestions");
+    expect(list.textContent).toContain("缺少订单归属校验");
+    expect(list.textContent).toContain("src/a.ts:3");
+    expect(screen.getByText(/已审查 2 \/ 3 个可审查文件 · 1 条建议/)).toBeTruthy();
+    expect(screen.getByText(/过滤 1 条无效/)).toBeTruthy();
+    expect(screen.getByText(/还有 1 个候选未审查/)).toBeTruthy();
+
+    // 每条建议可单独复制（含证据与置信度）。
+    await user.click(screen.getByRole("button", { name: "复制审查结果第 1 条" }));
+    expect(writeText).toHaveBeenLastCalledWith(
+      expect.stringContaining("缺少订单归属校验"),
+    );
+    expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("src/a.ts:3"));
+    expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("置信度：中"));
+
+    expect(invokeMock).toHaveBeenCalledWith("llm_review_workspace", {
+      root: "/tmp/ws",
+      maxFiles: 24,
+      offset: 0,
+      requestId: expect.any(String),
+    });
+
+    // 续审：携带游标，完成后按钮变为「已审查全部候选」。
+    await user.click(screen.getByRole("button", { name: "继续审查" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("llm_review_workspace", {
+        root: "/tmp/ws",
+        maxFiles: 24,
+        offset: 2,
+        requestId: expect.any(String),
+      }),
+    );
+    expect(await screen.findByRole("button", { name: "已审查全部候选" })).toBeDisabled();
+    expect(screen.getByText(/已审查 3 \/ 3 个可审查文件/)).toBeTruthy();
   });
 });

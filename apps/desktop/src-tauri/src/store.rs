@@ -212,6 +212,17 @@ impl Store {
             .ok_or(StoreError::NotFound("该扫描记录"))
     }
 
+    /// 删除扫描记录；findings 与由该扫描派生的 baseline 由外键级联清理。
+    pub fn delete_scan(&self, scan_id: i64) -> Result<()> {
+        let affected = self
+            .conn
+            .execute("DELETE FROM scans WHERE id = ?1", [scan_id])?;
+        if affected == 0 {
+            return Err(StoreError::NotFound("该扫描记录"));
+        }
+        Ok(())
+    }
+
     pub fn get_findings(&self, scan_id: i64) -> Result<Vec<Finding>> {
         let exists: bool = self
             .conn

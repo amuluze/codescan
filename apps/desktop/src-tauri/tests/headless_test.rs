@@ -150,9 +150,35 @@ fn successful_scan_persists() {
     assert_eq!(store.lock().unwrap().list_scans().unwrap().len(), 1);
 }
 
+/// 删除历史记录：findings 与由该扫描派生的 baseline 级联清理；重复删除报错。
+#[test]
+fn delete_scan_cascades_findings_and_baseline() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("test.db")).unwrap();
+    let scan_id = store
+        .insert_scan(
+            "/tmp/ws",
+            &report(vec![finding("r/a", "a.ts", 1, "fp-a")]),
+            1,
+            1,
+        )
+        .unwrap();
+    store.set_baseline(scan_id, 2).unwrap();
+    assert!(store.current_baseline().unwrap().is_some());
+    assert_eq!(store.get_findings(scan_id).unwrap().len(), 1);
+
+    store.delete_scan(scan_id).unwrap();
+    assert!(store.list_scans().unwrap().is_empty());
+    assert!(store.current_baseline().unwrap().is_none(), "基线应随来源扫描删除");
+    assert!(store.get_findings(scan_id).is_err());
+    assert!(store.delete_scan(scan_id).is_err(), "重复删除应报错");
+}
+
 // ---------- v3：LLM 辅助层（Domain §3a） ----------
 
-use codescan_lib::commands::{prepare_batch_llm_call, prepare_llm_call, prepare_provider_probe};
+use codescan_lib::commands::{
+    collect_review_files, prepare_batch_llm_call, prepare_llm_call, prepare_provider_probe,
+};
 use codescan_lib::llm;
 
 #[test]
@@ -588,4 +614,105 @@ fn provider_probe_preflight_rejects_incomplete_config() {
     let (config, key) = prepare_provider_probe(&store).unwrap();
     assert_eq!(config.model, "gpt-test");
     assert_eq!(key, "sk-probe");
+}
+
+/// LLM 审查的文件收集：跳过二进制/未知语言/超限文件，遵守文件数与字节上限。
+#[test]
+fn review_file_collection_respects_limits_and_skips_unreviewable() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.py"), "eval(x)\n").unwrap();
+    std::fs::write(root.join("src/b.bin"), [0u8, 1, 2]).unwrap();
+    std::fs::write(root.join("src/c.txt"), "plain\n").unwrap();
+    std::fs::write(root.join("src/d.ts"), "const a = 1;\n").unwrap();
+    std::fs::write(root.join("src/big.py"), "x".repeat(70 * 1024)).unwrap();
+
+    let listed = vec![
+        (root.join("src/a.py"), "src/a.py".to_string()),
+        (root.join("src/b.bin"), "src/b.bin".to_string()),
+        (root.join("src/big.py"), "src/big.py".to_string()),
+        (root.join("src/c.txt"), "src/c.txt".to_string()),
+        (root.join("src/d.ts"), "src/d.ts".to_string()),
+    ];
+    let selection = collect_review_files(&listed, 12, 64 * 1024, 0);
+    let paths: Vec<&str> = selection.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, vec!["src/a.py", "src/d.ts"]);
+    assert_eq!(selection.candidates, 2, "仅语言可识别的非超限文件进入候选");
+    assert_eq!(selection.next_offset, 2);
+    assert_eq!(
+        selection.total_bytes,
+        selection.files.iter().map(|f| f.content.len()).sum::<usize>()
+    );
+
+    // 文件数上限：按语言轮转后截断。
+    let selection = collect_review_files(&listed, 1, 64 * 1024, 0);
+    assert_eq!(selection.files.len(), 1);
+    assert_eq!(selection.files[0].path, "src/a.py");
+    assert_eq!(selection.next_offset, 1);
+
+    // 总字节预算不足：保留候选给下一页。
+    let selection = collect_review_files(&listed, 12, 5, 0);
+    assert!(selection.files.is_empty(), "所有候选超出总预算");
+    assert_eq!(selection.candidates, 2);
+    assert_eq!(selection.next_offset, 0);
+}
+
+/// 多语言轮转：预算内先覆盖不同语言，再取同语言第二文件。
+#[test]
+fn review_selection_round_robins_languages() {
+    use std::path::PathBuf;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    for name in ["a.py", "b.py", "c.ts"] {
+        std::fs::write(root.join("src").join(name), "x = 1\n").unwrap();
+    }
+    let listed: Vec<(PathBuf, String)> = ["src/a.py", "src/b.py", "src/c.ts"]
+        .iter()
+        .map(|rel| (root.join(rel), rel.to_string()))
+        .collect();
+    let selection = collect_review_files(&listed, 2, 64 * 1024, 0);
+    let paths: Vec<&str> = selection.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, vec!["src/a.py", "src/c.ts"], "每种语言先各取一个");
+    assert_eq!(selection.candidates, 3);
+    assert_eq!(selection.next_offset, 2);
+}
+
+/// 分页续审：多页覆盖全部候选、无重复，末页 next_offset = candidates。
+#[test]
+fn review_selection_pages_cover_all_candidates() {
+    use std::path::PathBuf;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let names = ["g1.go", "g2.go", "p1.py", "p2.py", "t1.ts", "t2.ts"];
+    for name in names {
+        std::fs::write(root.join("src").join(name), "x = 1\n").unwrap();
+    }
+    let listed: Vec<(PathBuf, String)> = names
+        .iter()
+        .map(|name| {
+            let rel = format!("src/{name}");
+            (root.join(&rel), rel)
+        })
+        .collect();
+
+    let mut offset = 0usize;
+    let mut seen = Vec::new();
+    loop {
+        let page = collect_review_files(&listed, 2, 64 * 1024, offset);
+        assert_eq!(page.candidates, 6);
+        for file in &page.files {
+            assert!(!seen.contains(&file.path), "分页不得重复：{}", file.path);
+            seen.push(file.path.clone());
+        }
+        if page.files.is_empty() {
+            assert_eq!(page.next_offset, page.candidates);
+            break;
+        }
+        offset = page.next_offset;
+    }
+    seen.sort();
+    assert_eq!(seen.len(), 6, "续审应覆盖全部候选");
 }

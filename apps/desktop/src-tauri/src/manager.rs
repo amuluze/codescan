@@ -103,6 +103,16 @@ impl ScanManager {
         result
     }
 
+    /// 按扫描相同的忽略规则列出工作区文件（LLM 审查等只读消费者使用）。
+    pub fn list_workspace_files(&self, root: &std::path::Path) -> Vec<(std::path::PathBuf, String)> {
+        codescan_engine::scan::list_workspace_files(
+            root,
+            &codescan_engine::scan::ScanOptions {
+                global_ignore_file: self.global_ignore_file.clone(),
+            },
+        )
+    }
+
     /// 注入外部 token 的扫描入口（A11 无头测试用：预置取消令牌）。
     pub fn run_scan_with_token(
         &self,

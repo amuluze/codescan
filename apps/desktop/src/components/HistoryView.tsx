@@ -16,10 +16,27 @@ export function HistoryView() {
     openScan,
     setBaseline,
     refreshGate,
+    deleteScan,
   } = useHistoryStore();
   const [error, setError] = useState<string | null>(null);
   const [selectedFingerprint, setSelectedFingerprint] = useState<string | null>(null);
   const [exportPickerOpen, setExportPickerOpen] = useState(false);
+  /** 待确认删除的扫描 id（二次确认，避免误删）。 */
+  const [confirmingId, setConfirmingId] = useState<number | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
+
+  const removeScan = async (scanId: number) => {
+    setDeletingId(scanId);
+    setError(null);
+    try {
+      await deleteScan(scanId);
+      setConfirmingId(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   useEffect(() => {
     load().catch((e) => setError(String(e)));
@@ -78,19 +95,55 @@ export function HistoryView() {
               <td>{new Date(s.started_at_ms).toLocaleString()}</td>
               <td>{s.findings}</td>
               <td>
-                <button
-                  onClick={() => {
-                    setSelectedFingerprint(null);
-                    void openScan(s.id);
-                  }}
-                >
-                  查看
-                </button>
-                <button onClick={() => void setBaseline(s.id)}>设为基线</button>
-                <button onClick={() => void refreshGate(s.id)}>门禁差异</button>
-                {openScanId === s.id && (
-                  <button onClick={() => void exportSarif()}>导出 SARIF</button>
-                )}
+                <div className="table-actions">
+                  {confirmingId === s.id ? (
+                    <>
+                      <button
+                        className="danger btn-sm"
+                        disabled={deletingId === s.id}
+                        onClick={() => void removeScan(s.id)}
+                      >
+                        {deletingId === s.id ? "删除中…" : "确认删除"}
+                      </button>
+                      <button
+                        className="ghost btn-sm"
+                        disabled={deletingId === s.id}
+                        onClick={() => setConfirmingId(null)}
+                      >
+                        取消
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        className="btn-sm"
+                        onClick={() => {
+                          setSelectedFingerprint(null);
+                          void openScan(s.id);
+                        }}
+                      >
+                        查看
+                      </button>
+                      <button className="ghost btn-sm" onClick={() => void setBaseline(s.id)}>
+                        设为基线
+                      </button>
+                      <button className="ghost btn-sm" onClick={() => void refreshGate(s.id)}>
+                        门禁差异
+                      </button>
+                      {openScanId === s.id && (
+                        <button className="ghost btn-sm" onClick={() => void exportSarif()}>
+                          导出 SARIF
+                        </button>
+                      )}
+                      <button
+                        className="ghost btn-sm danger-text"
+                        onClick={() => setConfirmingId(s.id)}
+                      >
+                        删除
+                      </button>
+                    </>
+                  )}
+                </div>
               </td>
             </tr>
           ))}

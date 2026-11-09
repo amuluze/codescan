@@ -677,6 +677,14 @@ fn run_text_rule(rule: &TextRule, source: &str, path: &str, degraded: bool) -> V
 
 /// `ignore` 遍历：尊重 .gitignore（无需 .git 存在）、`.codescanignore`、
 /// 全局忽略文件与内置默认排除目录；跳过隐藏文件、不跟随符号链接。
+/// 按与扫描相同的忽略边界列出工作区文件（绝对路径, 相对路径），按相对路径排序。
+/// 供扫描之外的只读消费者（如 LLM 源码审查）复用同一文件集合。
+pub fn list_workspace_files(root: &Path, options: &ScanOptions) -> Vec<(PathBuf, String)> {
+    let mut files = walk_workspace(root, options);
+    files.sort_by(|a, b| a.1.cmp(&b.1));
+    files
+}
+
 fn walk_workspace(root: &Path, options: &ScanOptions) -> Vec<(PathBuf, String)> {
     let mut out = Vec::new();
     let mut builder = ignore::WalkBuilder::new(root);

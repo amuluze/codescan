@@ -2,7 +2,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { filteredFindings, useScanStore } from "../stores/scanStore";
 import { useLlmStore } from "../stores/llmStore";
+import { CopyButton } from "./CopyButton";
 import type { Finding } from "../types";
+import { DIMENSION_LABEL, SEVERITY_LABEL } from "../labels";
 
 const DIMENSIONS: Array<"all" | Finding["dimension"]> = [
   "all",
@@ -12,16 +14,6 @@ const DIMENSIONS: Array<"all" | Finding["dimension"]> = [
 ];
 const SEVERITIES: Array<"all" | Finding["severity"]> = ["all", "error", "warning", "info"];
 
-const SEVERITY_LABEL: Record<Finding["severity"], string> = {
-  error: "错误",
-  warning: "警告",
-  info: "提示",
-};
-const DIMENSION_LABEL: Record<Finding["dimension"], string> = {
-  security: "安全",
-  "business-logic": "业务逻辑",
-  quality: "质量",
-};
 
 export function FindingsView() {
   const state = useScanStore();
@@ -45,6 +37,8 @@ export function FindingsView() {
   } = useLlmStore();
   const scanId = state.lastScanId;
   const [saveFixture, setSaveFixture] = useState(false);
+  const triageValue = selected ? triage[selected.fingerprint] : null;
+  const streamValue = selected ? (triageStreams[selected.fingerprint] ?? "") : "";
 
   const counts = useMemo(() => {
     const base = { error: 0, warning: 0, info: 0 };
@@ -149,15 +143,23 @@ export function FindingsView() {
             <span className="discipline-tag">非确定性参考 · 不参与门禁</span>
           </header>
           <ul>
-            {batch.map((entry) => {
+            {batch.map((entry, index) => {
               const finding = shown.find((f) => f.fingerprint === entry.fingerprint);
+              const label = finding
+                ? `${finding.path}:${finding.span.start.line}`
+                : entry.fingerprint;
+              const assessment = entry.missing ? "missing" : entry.assessment;
               return (
-                <li key={entry.fingerprint}>
-                  <span className="path">
-                    {finding ? `${finding.path}:${finding.span.start.line}` : entry.fingerprint}
-                  </span>{" "}
-                  <span className="assessment">{entry.missing ? "missing" : entry.assessment}</span>{" "}
-                  <span className="muted">{entry.rationale}</span>
+                <li key={entry.fingerprint} className="batch-entry">
+                  <div>
+                    <span className="path">{label}</span>{" "}
+                    <span className="assessment">{assessment}</span>{" "}
+                    <span className="muted">{entry.rationale}</span>
+                  </div>
+                  <CopyButton
+                    text={`${label} | ${assessment} | ${entry.rationale}`}
+                    label={`复制批量分诊第 ${index + 1} 条`}
+                  />
                 </li>
               );
             })}
@@ -279,27 +281,28 @@ export function FindingsView() {
               {streamPending[selected.fingerprint] && (
                 <p className="muted">流式分诊接收中…</p>
               )}
-              {triageStreams[selected.fingerprint] && (
-                <pre data-testid="triage-stream" className="code-block triage-stream">
-                  <code>{triageStreams[selected.fingerprint]}</code>
-                </pre>
+              {streamValue && (
+                <>
+                  <div className="output-tools">
+                    <CopyButton text={streamValue} label="复制流式分诊输出" />
+                  </div>
+                  <pre data-testid="triage-stream" className="code-block triage-stream">
+                    <code>{streamValue}</code>
+                  </pre>
+                </>
               )}
               {triage[selected.fingerprint] === "loading" && <p className="muted">分诊中…</p>}
-              {triage[selected.fingerprint] && triage[selected.fingerprint] !== "loading" && (
+              {triageValue && triageValue !== "loading" && (
                 <div data-testid="triage-result">
-                  <h4>分诊建议（参考）</h4>
-                  <p className="assessment">
-                    {(() => {
-                      const t = triage[selected.fingerprint];
-                      return t && t !== "loading" ? t.assessment : "";
-                    })()}
-                  </p>
-                  <p className="muted">
-                    {(() => {
-                      const t = triage[selected.fingerprint];
-                      return t && t !== "loading" ? t.rationale : "";
-                    })()}
-                  </p>
+                  <div className="detail-section-head">
+                    <h4>分诊建议（参考）</h4>
+                    <CopyButton
+                      text={`分诊：${triageValue.assessment}\n理由：${triageValue.rationale}`}
+                      label="复制分诊建议"
+                    />
+                  </div>
+                  <p className="assessment">{triageValue.assessment}</p>
+                  <p className="muted">{triageValue.rationale}</p>
                 </div>
               )}
               {candidates[selected.fingerprint] === "loading" && (
