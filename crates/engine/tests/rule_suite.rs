@@ -2,7 +2,7 @@
 //! 集合精确相等（Task Spec「规则 fixture 格式」）。
 
 use codescan_engine::{CancelToken, Engine};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 const RULES_TESTS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/rules/tests");
@@ -104,27 +104,47 @@ fn rule_fixtures_match_exactly() {
             covered_rule_ids.insert(rule_id.clone());
         }
 
-        let actual: BTreeSet<Expectation> = report
+        // 多重集比较：同 (rule, file, line) 出现 N 次即要求 N 次。
+        let expected_counts: BTreeMap<Expectation, usize> = expected
+            .iter()
+            .fold(BTreeMap::new(), |mut acc, key| {
+                *acc.entry(key.clone()).or_insert(0) += 1;
+                acc
+            });
+        let actual_counts: BTreeMap<Expectation, usize> = report
             .findings
             .iter()
-            .map(|f| {
-                (
-                    f.rule_id.clone(),
-                    f.path.clone(),
-                    f.span.start.line,
-                )
-            })
-            .collect();
+            .fold(BTreeMap::new(), |mut acc, f| {
+                *acc.entry((f.rule_id.clone(), f.path.clone(), f.span.start.line))
+                    .or_insert(0) += 1;
+                acc
+            });
 
-        if expected != actual {
-            let missing: Vec<String> = expected
-                .difference(&actual)
-                .map(|(r, f, l)| format!("漏报 {r} @ {f}:{l}"))
-                .collect();
-            let extra: Vec<String> = actual
-                .difference(&expected)
-                .map(|(r, f, l)| format!("误报 {r} @ {f}:{l}"))
-                .collect();
+        if expected_counts != actual_counts {
+            let mut missing: Vec<String> = Vec::new();
+            let mut extra: Vec<String> = Vec::new();
+            for (key, want) in &expected_counts {
+                let got = actual_counts.get(key).copied().unwrap_or(0);
+                if got < *want {
+                    missing.push(format!(
+                        "漏报 {rule} @ {file}:{line}（期望 {want} 次，实际 {got} 次）",
+                        rule = key.0,
+                        file = key.1,
+                        line = key.2
+                    ));
+                }
+            }
+            for (key, got) in &actual_counts {
+                let want = expected_counts.get(key).copied().unwrap_or(0);
+                if *got > want {
+                    extra.push(format!(
+                        "误报 {rule} @ {file}:{line}（期望 {want} 次，实际 {got} 次）",
+                        rule = key.0,
+                        file = key.1,
+                        line = key.2
+                    ));
+                }
+            }
             failures.push(format!(
                 "fixture 目录 {:?}：\n  {}\n  {}",
                 dir.file_name().unwrap_or_default(),

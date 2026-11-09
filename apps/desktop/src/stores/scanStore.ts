@@ -22,14 +22,14 @@ function emptyStats(): ScanStats {
 }
 
 /** finished 事件载荷（Rust ScanFinished，Tauri 自动转 camelCase 键）。 */
-type FinishedPayload = { scanId: number; stats: Partial<ScanStats> };
+type FinishedPayload = { scan_id: number; stats: Partial<ScanStats> };
 
 function isFinishedPayload(payload: unknown): payload is FinishedPayload {
   return (
     typeof payload === "object" &&
     payload !== null &&
-    "scanId" in payload &&
-    typeof payload.scanId === "number"
+    "scan_id" in payload &&
+    typeof payload.scan_id === "number"
   );
 }
 
@@ -69,7 +69,7 @@ export const useScanStore = create<ScanState>((set, get) => ({
     });
     await platform.listen("scan://finished", async (payload) => {
       if (!isFinishedPayload(payload)) return;
-      await get().loadScan(payload.scanId, payload.stats);
+      await get().loadScan(payload.scan_id, payload.stats);
     });
     await platform.listen("scan://cancelled", () => {
       set({ phase: "cancelled", progress: null });

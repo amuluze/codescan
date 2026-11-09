@@ -102,7 +102,7 @@ pub(crate) fn profile(lang: Language) -> Profile {
                 "ternary_expression",
             ],
             logic_ops: &["binary_expression"],
-                        statement_wrapper: Some("block_statement"),
+                        statement_wrapper: None,
             assignments: &[
                 ("assignment_expression", "left", "right"),
                 ("variable_declarator", "name", "value"),
@@ -400,6 +400,15 @@ fn is_terminal_statement(node: Node<'_>, prof: &Profile, source: &str, lang: Lan
     if prof.terminal.contains(&node.kind()) {
         return true;
     }
+    // 某些语法（如 Rust）把终止表达式包在 expression_statement 里：
+    // 内层表达式属于终止集合时同样视为终止。
+    if node.kind() == "expression_statement" {
+        if let Some(inner) = node.named_child(0) {
+            if prof.terminal.contains(&inner.kind()) {
+                return true;
+            }
+        }
+    }
     match lang {
         // Go: panic 调用的表达式语句视为终止。
         Language::Go if node.kind() == "expression_statement" => {
@@ -629,5 +638,144 @@ impl Sha256Hasher {
 
     fn finalize64(&self) -> u64 {
         self.state
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::language::{parse, Language};
+
+    fn run(
+        lang: Language,
+        source: &str,
+        kind: MetricKind,
+        options: &[(&str, f64)],
+    ) -> Vec<Finding> {
+        let parsed = parse(lang, source.as_bytes());
+        let configs = vec![(
+            kind,
+            options
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), *v))
+                .collect(),
+        )];
+        file_metrics(lang, &parsed.tree, &parsed.source, "t", false, &configs)
+    }
+
+    fn assert_contains(findings: &[Finding], needle: &str) {
+        assert!(
+            findings.iter().any(|f| f.message.contains(needle)),
+            "未找到包含 {needle:?} 的度量发现：{:?}",
+            findings.iter().map(|f| &f.message).collect::<Vec<_>>()
+        );
+    }
+
+    // ---- Python ----
+
+    #[test]
+    fn python_cyclomatic_known_answer() {
+        let src = "def f(a, b):\n    if a > 0:\n        return 1\n    elif b > 0:\n        return 2\n    while a < b:\n        a += 1\n    return 0\n";
+        let findings = run(Language::Python, src, MetricKind::CyclomaticComplexity, &[("threshold", 1.0)]);
+        assert_contains(&findings, "函数 f 圈复杂度 4");
+    }
+
+    #[test]
+    fn python_nesting_known_answer() {
+        let src = "def h(v):\n    if v:\n        while v:\n            for i in v:\n                v = i\n    return 0\n";
+        let findings = run(Language::Python, src, MetricKind::NestingDepth, &[("threshold", 2.0)]);
+        assert_contains(&findings, "嵌套深度 3");
+    }
+
+    #[test]
+    fn python_unreachable_after_return() {
+        let src = "def g():\n    return 1\n    x = 2\n";
+        let findings = run(Language::Python, src, MetricKind::UnreachableCode, &[]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 3);
+    }
+
+    #[test]
+    fn python_function_length_known_answer() {
+        let src = "def f():\n    a = 1\n    b = 2\n    c = 3\n    return a\n";
+        let findings = run(Language::Python, src, MetricKind::FunctionLength, &[("threshold", 3.0)]);
+        assert_contains(&findings, "函数 f 长度 5 行");
+    }
+
+    // ---- Java ----
+
+    #[test]
+    fn java_cyclomatic_known_answer() {
+        let src = "class A {\n  int f(int a, int b) {\n    if (a > 0 && b > 0) {\n      return 1;\n    }\n    for (int i = 0; i < a; i++) {\n      b += i;\n    }\n    while (b > 0) {\n      b--;\n    }\n    return 0;\n  }\n}\n";
+        let findings = run(Language::Java, src, MetricKind::CyclomaticComplexity, &[("threshold", 1.0)]);
+        assert_contains(&findings, "函数 f 圈复杂度 5");
+    }
+
+    #[test]
+    fn java_unreachable_after_return() {
+        let src = "class A {\n  int f() {\n    return 1;\n    int x = 2;\n  }\n}\n";
+        let findings = run(Language::Java, src, MetricKind::UnreachableCode, &[]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 4);
+    }
+
+    #[test]
+    fn java_nesting_known_answer() {
+        let src = "class A {\n  void f(int v) {\n    if (v > 0) {\n      while (v > 1) {\n        for (int i = 0; i < v; i++) {\n          v = i;\n        }\n      }\n    }\n  }\n}\n";
+        let findings = run(Language::Java, src, MetricKind::NestingDepth, &[("threshold", 2.0)]);
+        assert_contains(&findings, "嵌套深度 3");
+    }
+
+    // ---- Go ----
+
+    #[test]
+    fn go_cyclomatic_known_answer() {
+        let src = "package main\n\nfunc f(a int) int {\n\tif a > 0 && a < 10 {\n\t\treturn 1\n\t}\n\tfor i := 0; i < a; i++ {\n\t\ta++\n\t}\n\treturn 0\n}\n";
+        let findings = run(Language::Go, src, MetricKind::CyclomaticComplexity, &[("threshold", 1.0)]);
+        assert_contains(&findings, "函数 f 圈复杂度 4");
+    }
+
+    #[test]
+    fn go_unreachable_after_return_and_panic() {
+        let src = "package main\n\nfunc g() int {\n\treturn 1\n\tx := 2\n\t_ = x\n}\n";
+        let findings = run(Language::Go, src, MetricKind::UnreachableCode, &[]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 5);
+
+        let src = "package main\n\nfunc h() {\n\tpanic(\"boom\")\n\tprintln(\"never\")\n}\n";
+        let findings = run(Language::Go, src, MetricKind::UnreachableCode, &[]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 5);
+    }
+
+    // ---- Rust ----
+
+    #[test]
+    fn rust_cyclomatic_known_answer() {
+        let src = "fn f(a: i32) -> i32 {\n    if a > 0 && a < 10 {\n        return 1;\n    }\n    for i in 0..a {\n        println!(\"{}\", i);\n    }\n    match a {\n        0 => 0,\n        _ => 1,\n    }\n}\n";
+        let findings = run(Language::Rust, src, MetricKind::CyclomaticComplexity, &[("threshold", 1.0)]);
+        assert_contains(&findings, "函数 f 圈复杂度 6");
+    }
+
+    #[test]
+    fn rust_unreachable_after_return() {
+        let src = "fn g() -> i32 {\n    return 1;\n    let x = 2;\n    x\n}\n";
+        let findings = run(Language::Rust, src, MetricKind::UnreachableCode, &[]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 3);
+    }
+
+    #[test]
+    fn rust_nesting_known_answer() {
+        let src = "fn h(v: i32) -> i32 {\n    if v > 0 {\n        while v > 1 {\n            for i in 0..v {\n                v = i;\n            }\n        }\n    }\n    0\n}\n";
+        let findings = run(Language::Rust, src, MetricKind::NestingDepth, &[("threshold", 2.0)]);
+        assert_contains(&findings, "嵌套深度 3");
+    }
+
+    #[test]
+    fn rust_function_length_known_answer() {
+        let src = "fn f() -> i32 {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    a + b + c\n}\n";
+        let findings = run(Language::Rust, src, MetricKind::FunctionLength, &[("threshold", 3.0)]);
+        assert_contains(&findings, "函数 f 长度 6 行");
     }
 }

@@ -28,11 +28,11 @@ export type RuleInfo = {
 export type ScanSummary = {
   id: number;
   root: string;
-  engineVersion: string;
-  startedAtMs: number;
-  durationMs: number;
+  engine_version: string;
+  started_at_ms: number;
+  duration_ms: number;
   findings: number;
-  filesScanned: number;
+  files_scanned: number;
 };
 
 export type BaselineInfo = { engine_version: string; entries: number };

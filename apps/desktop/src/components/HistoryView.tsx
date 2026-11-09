@@ -17,6 +17,7 @@ export function HistoryView() {
     refreshGate,
   } = useHistoryStore();
   const [error, setError] = useState<string | null>(null);
+  const [selectedFingerprint, setSelectedFingerprint] = useState<string | null>(null);
 
   useEffect(() => {
     load().catch((e) => setError(String(e)));
@@ -60,10 +61,17 @@ export function HistoryView() {
             <tr key={s.id}>
               <td>{s.id}</td>
               <td>{s.root}</td>
-              <td>{new Date(s.startedAtMs).toLocaleString()}</td>
+              <td>{new Date(s.started_at_ms).toLocaleString()}</td>
               <td>{s.findings}</td>
               <td>
-                <button onClick={() => void openScan(s.id)}>查看</button>
+                <button
+                  onClick={() => {
+                    setSelectedFingerprint(null);
+                    void openScan(s.id);
+                  }}
+                >
+                  查看
+                </button>
                 <button onClick={() => void setBaseline(s.id)}>设为基线</button>
                 <button onClick={() => void refreshGate(s.id)}>门禁差异</button>
                 {openScanId === s.id && (
@@ -99,8 +107,63 @@ export function HistoryView() {
         </div>
       )}
 
-      {openScanId && gateNew === null && (
-        <p className="muted">已打开扫描 #{openScanId}（{openFindings.length} 条发现）</p>
+      {openScanId && (
+        <div className="history-findings" data-testid="history-findings">
+          <h3>
+            扫描 #{openScanId} 的发现（{openFindings.length} 条）
+          </h3>
+          <div className="findings-body">
+            <ul className="finding-list">
+              {openFindings.map((f) => (
+                <li
+                  key={f.fingerprint}
+                  className={selectedFingerprint === f.fingerprint ? "selected" : ""}
+                  onClick={() => setSelectedFingerprint(f.fingerprint)}
+                >
+                  <span className={`sev sev-${f.severity}`}>{f.severity}</span>
+                  <span className="dim">{f.dimension}</span>
+                  <span className="path">
+                    {f.path}:{f.span.start.line}
+                  </span>
+                  <span className="rule">{f.rule_id}</span>
+                  {f.degraded && <span className="degraded">degraded</span>}
+                </li>
+              ))}
+              {openFindings.length === 0 && <li className="muted">无发现</li>}
+            </ul>
+            {(() => {
+              const selected = openFindings.find(
+                (f) => f.fingerprint === selectedFingerprint,
+              );
+              if (!selected) return null;
+              return (
+                <aside className="finding-detail" data-testid="history-finding-detail">
+                  <h3>{selected.rule_id}</h3>
+                  <p className="muted">
+                    {selected.path}:{selected.span.start.line}-
+                    {selected.span.end.line}
+                  </p>
+                  <p>{selected.message}</p>
+                  <pre>
+                    <code>{selected.match_text}</code>
+                  </pre>
+                  {selected.flows.length > 0 && (
+                    <div data-testid="history-taint-flows">
+                      <h4>污点来源（过程内近似）</h4>
+                      <ul>
+                        {selected.flows.map((p) => (
+                          <li key={`${p.line}:${p.column}`}>
+                            第 {p.line} 行第 {p.column} 列 → 当前 sink
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </aside>
+              );
+            })()}
+          </div>
+        </div>
       )}
     </section>
   );

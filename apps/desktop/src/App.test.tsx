@@ -94,7 +94,17 @@ beforeEach(() => {
       case "custom_rules_status":
         return null;
       case "list_scans":
-        return [];
+        return [
+          {
+            id: 7,
+            root: "/tmp/ws",
+            engine_version: "0.1.0",
+            started_at_ms: 0,
+            duration_ms: 12,
+            findings: 2,
+            files_scanned: 1,
+          },
+        ];
       case "baseline_info":
         return null;
       case "get_scan":
@@ -174,7 +184,7 @@ describe("App 主链路", () => {
     await user.click(screen.getByRole("button", { name: "开始扫描" }));
     const finished = listeners.get("scan://finished");
     await act(async () => {
-      finished!({ scanId: 7, stats: { files_scanned: 1 } });
+      finished!({ scan_id: 7, stats: { files_scanned: 1 } });
     });
     await user.click(screen.getByRole("button", { name: "发现" }));
     await user.click(await screen.findByText("src/a.ts:3"));
@@ -201,6 +211,27 @@ describe("App 主链路", () => {
     });
   });
 
+  it("历史页可下钻查看发现详情与污点链", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "历史" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("list_scans");
+    });
+
+    await user.click(await screen.findByRole("button", { name: "查看" }));
+    const list = await screen.findByTestId("history-findings");
+    expect(list.textContent).toContain("src/a.ts:3");
+    expect(list.textContent).toContain("metric/long");
+
+    await user.click(screen.getByText("src/a.ts:3"));
+    const detail = await screen.findByTestId("history-finding-detail");
+    expect(detail.textContent).toContain("eval(x)");
+    const flows = screen.getByTestId("history-taint-flows");
+    expect(flows.textContent).toContain("第 2 行");
+  });
+
   it("选择工作区 → 扫描 → finished 事件 → 发现列表与过滤", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -220,7 +251,7 @@ describe("App 主链路", () => {
     expect(finished).toBeTruthy();
     await act(async () => {
       finished!({
-        scanId: 7,
+        scan_id: 7,
         stats: { files_scanned: 2, files_total: 2 },
       });
     });
