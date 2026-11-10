@@ -23,7 +23,7 @@ tauri = { version = "2", features = [] }
 # 按签名凭据注入）时 lib.rs 才注册 updater 插件，开发/无密钥构建保持未配置。
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 reqwest = { version = "0.13.4", features = ["json", "stream"] }
 futures-util = "0.3"
 
@@ -32,5 +32,5 @@ tempfile = "3"
 tokio = { version = "1", features = ["rt", "time"] }
 # updater 工件发布验收（tests/updater_signature.rs）：与 tauri-plugin-updater
 # 更新时同一 minisign 验证实现，对已构建工件验证 tauri.release.conf.json 公钥
-base64 = "0.22"
-minisign-verify = "0.2"
+base64 = "0.23"
+minisign-verify = "0.3"
