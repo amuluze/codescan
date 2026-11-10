@@ -1,5 +1,7 @@
 version: 2
 updates:
+  # 只自动接收 patch/minor；major 留给人工评审（tree-sitter、sha2 等 major
+  # 会带来 API 破坏，且本仓库没有 CI 对依赖 PR 做自动校验）。
   - package-ecosystem: cargo
     directory: "/"
     schedule:
@@ -7,7 +9,11 @@ updates:
     open-pull-requests-limit: 5
     groups:
       rust:
-        patterns: ["*"]
+        update-types:
+          - patch
+          - minor
+        patterns:
+          - "*"
 
   - package-ecosystem: npm
     directory: "/"
@@ -16,9 +22,21 @@ updates:
     open-pull-requests-limit: 5
     groups:
       js:
-        patterns: ["*"]
+        update-types:
+          - patch
+          - minor
+        patterns:
+          - "*"
 
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: monthly
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        update-types:
+          - patch
+          - minor
+        patterns:
+          - "*"
