@@ -188,6 +188,7 @@ task check          # full gate: typecheck + vitest + build + clippy -D warnings
 | [.specs/tasks/](.specs/tasks/) | Task specs with objectively verifiable acceptance criteria |
 | [AGENTS.md](AGENTS.md) | Engineering conventions (spec-driven workflow, determinism rules) |
 | [CHANGELOG.md](CHANGELOG.md) | Release notes (Keep a Changelog) |
+| [`website/`](website/) | Official website source (static site, deployable to GitHub Pages) |
 
 ## Known limitations
 

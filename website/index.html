@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CodeScan — Local-first code scanning</title>
+  <meta name="description" data-i18n="meta.description" content="CodeScan is a local-first code scanning tool: a self-built deterministic AST engine (tree-sitter) covering security, business logic and code quality. Tauri 2 desktop app + headless CLI. No external scanner, no telemetry, read-only scans." />
+  <meta property="og:title" data-i18n="meta.og_title" content="CodeScan — Local-first code scanning" />
+  <meta property="og:description" data-i18n="meta.og_description" content="Deterministic AST engine covering security, business logic and code quality. Desktop app + CLI. No external scanner, no telemetry." />
+  <meta property="og:image" content="assets/img/findings.png" />
+  <meta property="og:type" content="website" />
+  <link rel="icon" type="image/svg+xml" href="assets/brand/icon.svg" />
+  <link rel="stylesheet" href="assets/css/site.css" />
+</head>
+<body>
+
+<header class="site-header" id="top">
+  <div class="wrap header-inner">
+    <a class="brand" href="#top">
+      <img src="assets/brand/icon.svg" alt="" width="32" height="32" />
+      <span>Code<em>Scan</em></span>
+    </a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="#why" data-i18n="nav.why">Why</a>
+      <a href="#features" data-i18n="nav.features">Features</a>
+      <a href="#coverage" data-i18n="nav.coverage">Coverage</a>
+      <a href="#screens" data-i18n="nav.screens">Screens</a>
+      <a href="#start" data-i18n="nav.start">Get started</a>
+      <a href="#architecture" data-i18n="nav.architecture">Architecture</a>
+      <a href="#privacy" data-i18n="nav.privacy">Privacy</a>
+      <a class="btn btn-primary" href="https://github.com/amuluze/codescan/releases" data-i18n="cta.download">Download</a>
+    </nav>
+    <button class="theme-toggle" id="theme-toggle" aria-label="Toggle colour theme" title="Toggle colour theme">◐</button>
+    <button class="lang-toggle" id="lang-toggle" aria-label="切换语言 / Switch language">中文</button>
+    <button class="nav-toggle" aria-label="Toggle navigation" aria-expanded="false">
+      <span></span><span></span><span></span>
+    </button>
+  </div>
+</header>
+
+<main>
+
+<section class="hero">
+  <div class="wrap hero-inner">
+    <div class="hero-copy">
+      <p class="eyebrow" data-i18n="hero.eyebrow">Local-first · Deterministic · Self-contained</p>
+      <h1 data-i18n="hero.title">Find real defects in code you own.</h1>
+      <p class="lede" data-i18n="hero.lede">CodeScan pairs a self-built AST rule engine (tree-sitter) with a Tauri 2 desktop app and a headless CLI. It covers <strong>security</strong>, <strong>business logic</strong> and <strong>code quality</strong> — with no external scanner, no telemetry, and scans that never touch your files.</p>
+      <div class="hero-actions">
+        <a class="btn btn-primary btn-lg" href="https://github.com/amuluze/codescan/releases" data-i18n="hero.cta_download">Download for macOS</a>
+        <a class="btn btn-ghost btn-lg" href="https://github.com/amuluze/codescan" data-i18n="hero.cta_github">View on GitHub</a>
+      </div>
+      <ul class="hero-facts">
+        <li><strong>73</strong> <span data-i18n="hero.fact_rules">built-in rules</span></li>
+        <li><strong>8</strong> <span data-i18n="hero.fact_langs">language modes</span></li>
+        <li><strong>0</strong> <span data-i18n="hero.fact_engines">external engines</span></li>
+      </ul>
+    </div>
+    <div class="hero-art">
+      <img src="assets/img/findings.png" alt="CodeScan findings view listing findings with severity, dimension and rule" data-i18n-alt="hero.img_alt" />
+    </div>
+  </div>
+</section>
+
+<section class="section" id="why">
+  <div class="wrap">
+    <p class="eyebrow" data-i18n="why.eyebrow">Why</p>
+    <h2 data-i18n="why.title">Business-logic defects are project-specific</h2>
+    <p class="section-lede" data-i18n="why.lede">Security and quality issues can be expressed as rules. Ownership checks, state transitions, amount math and idempotency cannot — they live in invariants only the project owner knows. CodeScan makes that boundary explicit instead of hiding it behind a generic scanner.</p>
+    <div class="grid grid-3">
+      <article class="card">
+        <h3 data-i18n="why.card1_title">Deterministic by construction</h3>
+        <p data-i18n="why.card1_body">Same files, same enabled rule set, same engine version — identical findings and events, every time. Fingerprints stay stable when lines drift.</p>
+      </article>
+      <article class="card">
+        <h3 data-i18n="why.card2_title">Your invariants are first-class</h3>
+        <p data-i18n="why.card2_body">Write a business rule as YAML, test it with fixtures, and it behaves exactly like a built-in rule — same engine, same tooling, same gate.</p>
+      </article>
+      <article class="card">
+        <h3 data-i18n="why.card3_title">LLM output never gates</h3>
+        <p data-i18n="why.card3_body">Triage and review results are labelled advisory and stay out of findings, baselines and gate diffs. Only validated, explicitly saved rules affect later scans.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="section section-alt" id="features">
+  <div class="wrap">
+    <p class="eyebrow" data-i18n="features.eyebrow">Features</p>
+    <h2 data-i18n="features.title">Everything you need, nothing you don't</h2>
+    <div class="grid grid-2 feature-list">
+      <article class="feature">
+        <h3 data-i18n="features.f1_title">Deterministic AST engine</h3>
+        <p data-i18n="features.f1_body">Tree-sitter patterns, text patterns, metric thresholds and taint source→sink rules — compiled, versioned, unit-tested as assets.</p>
+      </article>
+      <article class="feature">
+        <h3 data-i18n="features.f2_title">Quality metrics</h3>
+        <p data-i18n="features.f2_body">Cyclomatic complexity, function length, nesting depth, duplicate blocks and unreachable code, with thresholds you control.</p>
+      </article>
+      <article class="feature">
+        <h3 data-i18n="features.f3_title">Field-sensitive taint</h3>
+        <p data-i18n="features.f3_body">Intra-procedural approximation plus explicit-import cross-file propagation, with points-to object sets and field sensitivity.</p>
+      </article>
+      <article class="feature">
+        <h3 data-i18n="features.f4_title">Baseline &amp; gate</h3>
+        <p data-i18n="features.f4_body">Freeze a scan as a baseline, then block only newly introduced findings. Fingerprint equality, nothing else.</p>
+      </article>
+      <article class="feature">
+        <h3 data-i18n="features.f5_title">SARIF 2.1.0 export</h3>
+        <p data-i18n="features.f5_body">One-to-one with internal findings, carrying the <code>degraded</code> marker. Upload straight to GitHub Code Scanning.</p>
+      </article>
+      <article class="feature">
+        <h3 data-i18n="features.f6_title">Five desktop views</h3>
+        <p data-i18n="features.f6_body">Scan, Findings, Rules, History and Settings — with rule toggles, baseline management, SARIF export and history cleanup.</p>
+      </article>
+      <article class="feature">
+        <h3 data-i18n="features.f7_title">LLM assist, BYO key</h3>
+        <p data-i18n="features.f7_body">Per-finding triage, streaming triage, batch triage, paged workspace source review and candidate rule generation with isolated regression.</p>
+      </article>
+      <article class="feature">
+        <h3 data-i18n="features.f8_title">CI-friendly CLI</h3>
+        <p data-i18n="features.f8_body"><code>codescan scan</code> with text/json/sarif output, exit codes for gating, and a GitHub Code Scanning uploader.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="coverage">
+  <div class="wrap">
+    <p class="eyebrow" data-i18n="coverage.eyebrow">Coverage</p>
+    <h2 data-i18n="coverage.title">Three dimensions, one finding model</h2>
+    <p class="section-lede" data-i18n="coverage.lede">Every finding belongs to exactly one dimension, and the dimension is declared by the rule — never inferred at runtime.</p>
+
+    <div class="dim-grid">
+      <div class="dim dim-security">
+        <span class="dim-count">59</span>
+        <h3 data-i18n="coverage.dim_security">Security</h3>
+        <p data-i18n="coverage.dim_security_body">Dynamic execution, shell injection, weak hashing, hardcoded credentials, unsafe deserialization.</p>
+      </div>
+      <div class="dim dim-business">
+        <span class="dim-count">3</span>
+        <h3 data-i18n="coverage.dim_business">Business logic</h3>
+        <p data-i18n="coverage.dim_business_body">Ownership checks, state transitions, idempotency — the built-ins are examples; your invariants are the real coverage.</p>
+      </div>
+      <div class="dim dim-quality">
+        <span class="dim-count">11</span>
+        <h3 data-i18n="coverage.dim_quality">Code quality</h3>
+        <p data-i18n="coverage.dim_quality_body">Complexity, function length, nesting depth, duplicate blocks, unreachable code and TODO debt.</p>
+      </div>
+    </div>
+
+    <h3 class="sub-head" data-i18n="coverage.languages_head">Languages</h3>
+    <div class="lang-table" role="table" aria-label="Rule counts by language">
+      <div class="lang-row lang-head" role="row"><span role="columnheader" data-i18n="coverage.col_lang">Language</span><span role="columnheader" data-i18n="coverage.col_rules">Rules</span></div>
+      <div class="lang-row" role="row"><span role="cell">TypeScript / TSX</span><span role="cell">12</span></div>
+      <div class="lang-row" role="row"><span role="cell">JavaScript / JSX</span><span role="cell">6</span></div>
+      <div class="lang-row" role="row"><span role="cell">Python</span><span role="cell">12</span></div>
+      <div class="lang-row" role="row"><span role="cell">Java</span><span role="cell">11</span></div>
+      <div class="lang-row" role="row"><span role="cell">Go</span><span role="cell">10</span></div>
+      <div class="lang-row" role="row"><span role="cell">Rust</span><span role="cell">11</span></div>
+      <div class="lang-row" role="row"><span role="cell" data-i18n="coverage.agnostic">Language-agnostic (5 metrics + 6 text rules)</span><span role="cell">11</span></div>
+    </div>
+  </div>
+</section>
+
+<section class="section section-alt" id="screens">
+  <div class="wrap">
+    <p class="eyebrow" data-i18n="screens.eyebrow">Interface</p>
+    <h2 data-i18n="screens.title">Built for reading, not for dashboards</h2>
+    <div class="shots">
+      <figure class="shot">
+        <img src="assets/img/scan.png" alt="CodeScan scan page showing result statistics and the LLM source review panel" data-i18n-alt="screens.img_scan" loading="lazy" />
+        <figcaption data-i18n="screens.cap_scan">Scan: results, statistics and the advisory LLM source review.</figcaption>
+      </figure>
+      <figure class="shot">
+        <img src="assets/img/findings.png" alt="CodeScan findings view with severity, dimension, location and rule columns plus a detail panel" data-i18n-alt="screens.img_findings" loading="lazy" />
+        <figcaption data-i18n="screens.cap_findings">Findings: filterable table with evidence, taint sources and LLM assist in the detail pane.</figcaption>
+      </figure>
+    </div>
+    <p class="shot-note" data-i18n="screens.note">Screenshots come from the intentionally vulnerable <code>examples/demo-workspace/</code> in the repository. The desktop UI is currently Chinese-only; the CLI, README and <code>docs/en/</code> are English.</p>
+  </div>
+</section>
+
+<section class="section" id="start">
+  <div class="wrap">
+    <p class="eyebrow" data-i18n="start.eyebrow">Get started</p>
+    <h2 data-i18n="start.title">Install in a minute, or build from source</h2>
+    <div class="grid grid-2">
+      <article class="card">
+        <h3 data-i18n="start.desktop_title">Desktop app</h3>
+        <ol class="steps">
+          <li data-i18n="start.step_download">Download the latest <code>.dmg</code> from <a href="https://github.com/amuluze/codescan/releases">Releases</a>.</li>
+          <li data-i18n="start.step_install">Drag <strong>CodeScan</strong> into Applications and launch it.</li>
+          <li data-i18n="start.step_scan">Scan → pick a workspace → review the findings.</li>
+        </ol>
+        <p class="muted" data-i18n="start.desktop_note">macOS Apple Silicon build.</p>
+      </article>
+      <article class="card">
+        <h3 data-i18n="start.source_title">From source</h3>
+        <pre class="code"><code>git clone https://github.com/amuluze/codescan.git
+cd codescan
+pnpm install
+pnpm tauri dev</code></pre>
+        <p class="muted" data-i18n="start.source_note">Node ≥ 22 · pnpm ≥ 10 · Rust 1.96</p>
+      </article>
+    </div>
+
+    <h3 class="sub-head" data-i18n="start.ci_head">Gate new findings in CI</h3>
+    <pre class="code"><code># establish a baseline once, commit it
+codescan scan . --save-baseline baseline.json
+
+# block only newly introduced findings
+codescan scan . \\
+  --baseline baseline.json \\
+  --fail-on new \\
+  --format sarif --out codescan.sarif</code></pre>
+    <p class="muted" data-i18n="start.ci_note">Exit codes: <code>0</code> clean · <code>1</code> gate hit · <code>2</code> usage or runtime error. See <a href="https://github.com/amuluze/codescan/blob/main/docs/en/cli.md">CLI reference</a>.</p>
+  </div>
+</section>
+
+<section class="section section-alt" id="architecture">
+  <div class="wrap">
+    <p class="eyebrow" data-i18n="arch.eyebrow">Architecture</p>
+    <h2 data-i18n="arch.title">One engine, two front doors</h2>
+    <p class="section-lede" data-i18n="arch.lede">The desktop app and the CLI are two shells around the same deterministic engine: identical rule set, identical fingerprints, identical baseline semantics.</p>
+    <div class="arch" role="img" aria-label="Architecture: desktop app and CLI both call the shared engine, which writes to the local SQLite store; an optional LLM layer sits beside it as advisory only.">
+      <div class="arch-row">
+        <div class="arch-node arch-shell"><span data-i18n="arch.desktop">Desktop app</span><br /><small>Tauri 2 · React 19</small></div>
+        <div class="arch-node arch-shell">CLI<br /><small>codescan</small></div>
+      </div>
+      <div class="arch-arrow" aria-hidden="true">↓</div>
+      <div class="arch-row">
+        <div class="arch-node arch-core">codescan-engine<br /><small>rules · metrics · taint · fingerprints · SARIF</small></div>
+      </div>
+      <div class="arch-arrow" aria-hidden="true">↓</div>
+      <div class="arch-row">
+        <div class="arch-node arch-store"><span data-i18n="arch.store">Local store</span><br /><small>~/.codescan · SQLite</small></div>
+        <div class="arch-node arch-llm"><span data-i18n="arch.llm">LLM layer</span> <em data-i18n="arch.llm_tag">advisory only</em><br /><small>triage · review · candidate rules</small></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="privacy">
+  <div class="wrap">
+    <p class="eyebrow" data-i18n="privacy.eyebrow">Privacy</p>
+    <h2 data-i18n="privacy.title">Your code stays on your machine</h2>
+    <div class="grid grid-2">
+      <article class="card">
+        <h3 data-i18n="privacy.p1_title">Scans are read-only</h3>
+        <p data-i18n="privacy.p1_body">Nothing is written into the scanned workspace. History, baselines and rules go to CodeScan's own data root; exports require an explicit action.</p>
+      </article>
+      <article class="card">
+        <h3 data-i18n="privacy.p2_title">No telemetry</h3>
+        <p data-i18n="privacy.p2_body">No usage reporting, no crash analytics, no third-party fallback. The engine has no network dependency at all.</p>
+      </article>
+      <article class="card">
+        <h3 data-i18n="privacy.p3_title">Keys stay local</h3>
+        <p data-i18n="privacy.p3_body">An API key is stored in a Rust-owned SQLite <code>secrets</code> table. No command returns key material, and keys never reach logs, findings, errors or exports.</p>
+      </article>
+      <article class="card">
+        <h3 data-i18n="privacy.p4_title">Requests go where you say</h3>
+        <p data-i18n="privacy.p4_body">LLM traffic only reaches the base URL you configure. The token for SARIF upload is read solely from <code>GITHUB_TOKEN</code>.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="section section-alt" id="open">
+  <div class="wrap">
+    <p class="eyebrow" data-i18n="open.eyebrow">Open source</p>
+    <h2 data-i18n="open.title">Built in the open</h2>
+    <p class="section-lede" data-i18n="open.lede">CodeScan is MIT licensed. Domain invariants, task specs and implementation plans live in the repository, so every design decision can be reviewed and challenged.</p>
+    <div class="cta-row">
+      <a class="btn btn-primary btn-lg" href="https://github.com/amuluze/codescan" data-i18n="open.cta_star">Star on GitHub</a>
+      <a class="btn btn-ghost btn-lg" href="https://github.com/amuluze/codescan/blob/main/CONTRIBUTING.md" data-i18n="open.cta_contribute">Contribute</a>
+      <a class="btn btn-ghost btn-lg" href="https://github.com/amuluze/codescan/blob/main/README.md" data-i18n="open.cta_readme">Read the README</a>
+    </div>
+    <div class="link-grid">
+      <a class="link-card" href="https://github.com/amuluze/codescan/blob/main/docs/en/rules.md"><strong data-i18n="open.link_rules">Rule authoring</strong><span data-i18n="open.link_rules_desc">Pattern language, fixtures, taint rules</span></a>
+      <a class="link-card" href="https://github.com/amuluze/codescan/blob/main/docs/en/cli.md"><strong data-i18n="open.link_cli">CLI reference</strong><span data-i18n="open.link_cli_desc">Options, exit codes, CI usage</span></a>
+      <a class="link-card" href="https://github.com/amuluze/codescan/blob/main/docs/en/llm.md"><strong data-i18n="open.link_llm">LLM assist</strong><span data-i18n="open.link_llm_desc">Provider setup and boundaries</span></a>
+      <a class="link-card" href="https://github.com/amuluze/codescan/blob/main/.specs/domain/scan-engine.md"><strong data-i18n="open.link_domain">Domain spec</strong><span data-i18n="open.link_domain_desc">The invariants the engine must hold</span></a>
+      <a class="link-card" href="https://github.com/amuluze/codescan/blob/main/CHANGELOG.md"><strong data-i18n="open.link_changelog">Changelog</strong><span data-i18n="open.link_changelog_desc">What changed, release by release</span></a>
+      <a class="link-card" href="https://github.com/amuluze/codescan/blob/main/SECURITY.md"><strong data-i18n="open.link_security">Security</strong><span data-i18n="open.link_security_desc">Private reporting channel</span></a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="wrap footer-inner">
+    <div class="footer-brand">
+      <img src="assets/brand/icon.svg" alt="" width="28" height="28" />
+      <span>CodeScan</span>
+    </div>
+    <p class="muted" data-i18n="footer.tagline">MIT licensed · Local-first · No external scanner</p>
+    <nav class="footer-nav" aria-label="Footer">
+      <a href="https://github.com/amuluze/codescan">GitHub</a>
+      <a href="https://github.com/amuluze/codescan/releases" data-i18n="footer.releases">Releases</a>
+      <a href="https://github.com/amuluze/codescan/blob/main/README.md" data-i18n="footer.docs">Docs</a>
+      <a href="https://github.com/amuluze/codescan/blob/main/LICENSE" data-i18n="footer.license">License</a>
+    </nav>
+  </div>
+</footer>
+
+<script src="assets/js/i18n.js"></script>
+<script src="assets/js/site.js"></script>
+</body>
+</html>
