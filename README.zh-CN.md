@@ -98,7 +98,7 @@ cargo run -p codescan-cli -- scan <repo> \
 
 ## 扫描流程
 
-1. **收集**：按下方忽略规则遍历工作区，路径排序保证确定性；
+1. **收集**：按配置的忽略源遍历工作区，路径排序保证确定性；
 2. **分类**：大小上限、二进制检测、语言识别（未知语言计数上报，不静默丢弃）；
 3. **解析**：tree-sitter 容错解析，含语法错误的文件仍出发现并标记 `degraded`；
 4. **匹配**：AST 模式、文本模式、度量阈值、污点规则逐文件执行；
@@ -113,10 +113,6 @@ cargo run -p codescan-cli -- scan <repo> \
 - **门禁差异** = 新扫描指纹集合 \ 基线集合，仅依赖指纹相等性；
 - 基线之外没有隐性白名单，移除基线条目即恢复其拦截作用；
 - 任何非确定性来源（LLM、启发式、未经冻结的人工标注）都不得进入门禁差异。
-
-## 忽略规则
-
-扫描范围 = 工作区 `.gitignore` + 工作区 `.codescanignore` + 全局 `~/.codescan/ignore`（均为 gitignore 语法）+ 内置默认目录（`node_modules`、`target`、`dist`、`build`、`.venv`、`__pycache__`、`.next`、`coverage`）。被忽略与未知语言文件以汇总事件上报，不静默丢弃。
 
 ## LLM 辅助层（可选，自带 Key）
 
@@ -185,7 +181,7 @@ task check          # 完整门禁：typecheck + vitest + 构建 + clippy -D war
 | 文档 | 内容 |
 |---|---|
 | [docs/cli.md](docs/cli.md) · [English](docs/en/cli.md) | CLI 参考、退出码、CI 用法、SARIF 上传 |
-| [docs/rules.md](docs/rules.md) · [English](docs/en/rules.md) | 规则格式、模式语言、fixture、污点规则、忽略规则 |
+| [docs/rules.md](docs/rules.md) · [English](docs/en/rules.md) | 规则格式、模式语言、fixture、污点规则 |
 | [docs/llm.md](docs/llm.md) · [English](docs/en/llm.md) | LLM Provider 配置与能力边界 |
 | [docs/release.md](docs/release.md) · [English](docs/en/release.md) | 发布链路、签名/公证凭据、updater、故障排查 |
 | [.specs/domain/scan-engine.md](.specs/domain/scan-engine.md) | 领域不变量——引擎的最高优先级约束 |
@@ -195,8 +191,6 @@ task check          # 完整门禁：typecheck + vitest + 构建 + clippy -D war
 
 ## 已知限制
 
-- 仅 macOS arm64；Windows / Linux 打包尚未接通。
-- 未配置发布凭据时产物为未签名构建，首次启动需右键 → *打开*。
 - 污点分析是近似：不是可达性证明，跨文件传播要求显式导入。
 - 内置业务逻辑规则是机制示例，不是通用业务规则库——项目不变量需要自己写。
 - LLM 工作区审查受单次文件数与体积预算限制，每次只审一部分，需「继续审查」逐页覆盖。

@@ -98,7 +98,7 @@ Exit codes: `0` clean · `1` gate hit · `2` usage/runtime error. Full reference
 
 ## How a scan works
 
-1. **Walk** — collect files under the workspace honouring the ignore sources below; paths are sorted for determinism.
+1. **Walk** — collect files under the workspace honouring the configured ignore sources; paths are sorted for determinism.
 2. **Classify** — size cap, binary detection, language detection (unknown languages are counted, not silently dropped).
 3. **Parse** — tree-sitter with error recovery; files with syntax errors still produce findings, flagged `degraded`.
 4. **Match** — AST patterns, text patterns, metric thresholds, and taint source→sink rules run per file.
@@ -113,10 +113,6 @@ Determinism guarantees: identical (file set, enabled rule set, engine version) y
 - **Gate diff** = fingerprints of a new scan minus the baseline; only fingerprint equality matters.
 - No implicit allow-list exists outside the baseline; removing an entry from the baseline restores its gating effect.
 - Non-deterministic sources (LLM, heuristics, unreviewed manual notes) can never enter the gate diff.
-
-## Ignore sources
-
-Scan scope = workspace `.gitignore` + workspace `.codescanignore` + global `~/.codescan/ignore` (all gitignore syntax) + built-in default directories (`node_modules`, `target`, `dist`, `build`, `.venv`, `__pycache__`, `.next`, `coverage`). Ignored and unknown-language files are reported as aggregate scan events, never silently dropped.
 
 ## LLM assist (optional, BYO key)
 
@@ -185,7 +181,7 @@ task check          # full gate: typecheck + vitest + build + clippy -D warnings
 | Document | Contents |
 |---|---|
 | [docs/en/cli.md](docs/en/cli.md) · [中文](docs/cli.md) | CLI reference, exit codes, CI usage, SARIF upload |
-| [docs/en/rules.md](docs/en/rules.md) · [中文](docs/rules.md) | Rule format, pattern language, fixtures, taint rules, ignore rules |
+| [docs/en/rules.md](docs/en/rules.md) · [中文](docs/rules.md) | Rule format, pattern language, fixtures, taint rules |
 | [docs/en/llm.md](docs/en/llm.md) · [中文](docs/llm.md) | LLM provider configuration and boundaries |
 | [docs/en/release.md](docs/en/release.md) · [中文](docs/release.md) | Release chain, signing/notarization credentials, updater, troubleshooting |
 | [.specs/domain/scan-engine.md](.specs/domain/scan-engine.md) | Domain invariants — the highest-priority constraint for the engine |
@@ -195,8 +191,6 @@ task check          # full gate: typecheck + vitest + build + clippy -D warnings
 
 ## Known limitations
 
-- macOS arm64 only; Windows/Linux builds are not wired up yet.
-- Release builds are unsigned unless release credentials are configured — first launch needs right-click → *Open*.
 - Taint analysis is an approximation: it is not a proof of reachability, and cross-file propagation requires explicit imports.
 - The built-in business-logic rules are examples of the mechanism, not a generic business-rule library — project invariants must be written by you.
 - LLM workspace review is bounded by per-run file and byte budgets and is advisory; it reviews a subset per run and continues page by page.
