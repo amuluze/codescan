@@ -4,6 +4,8 @@
  */
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
+import { check as updaterCheck, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import type { Finding } from "./types";
 
 export type ProgressPayload = {
@@ -109,6 +111,33 @@ export type CandidateRegression = {
   actual: RegressionActual[];
   failures: string[];
   saved_paths: string[];
+};
+
+export type UpdateInfo = { version: string; notes: string };
+
+/** 检查到的更新对象须跨调用保留（downloadAndInstall 依赖同一实例）。 */
+let pendingUpdate: Update | null = null;
+
+/**
+ * 自更新：端点为 GitHub Releases 的 latest.json（draft 发布后生效），更新包
+ * 经 minisign 签名校验（tauri.release.conf.json 的 plugins.updater.pubkey）。
+ * 开发模式 / 无 updater 配置构建下 check 会失败——由 UI 容忍并展示错误态。
+ */
+export const updater = {
+  /** 检查更新；无更新返回 null，失败向上抛错由 UI 展示。 */
+  async check(): Promise<UpdateInfo | null> {
+    const update = await updaterCheck();
+    if (!update) return null;
+    pendingUpdate = update;
+    return { version: update.version, notes: update.body ?? "" };
+  },
+
+  /** 下载并安装已检查到的更新，随后重启应用。 */
+  async installAndRelaunch(): Promise<void> {
+    if (!pendingUpdate) throw new Error("没有待安装的更新（请先检查更新）");
+    await pendingUpdate.downloadAndInstall();
+    await relaunch();
+  },
 };
 
 export const platform = {

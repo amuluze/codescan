@@ -3,6 +3,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
+import { updater } from "./platform";
 import { useLlmStore } from "./stores/llmStore";
 import { useScanStore } from "./stores/scanStore";
 import type { Finding } from "./types";
@@ -77,7 +78,11 @@ vi.mock("./platform", () => {
       }),
     saveCustomRule: (yaml: string) => platform.invoke("save_custom_rule", { yaml }),
   };
-  return { platform, api };
+  const updater = {
+    check: vi.fn(async () => null),
+    installAndRelaunch: vi.fn(async () => {}),
+  };
+  return { platform, api, updater };
 });
 
 const finding = (overrides: Partial<Finding>) => ({
@@ -109,6 +114,8 @@ const findings = [
 beforeEach(() => {
   listeners.clear();
   invokeMock.mockReset();
+  vi.mocked(updater.check).mockReset().mockResolvedValue(null);
+  vi.mocked(updater.installAndRelaunch).mockReset().mockResolvedValue(undefined);
   useScanStore.setState({
     phase: "idle",
     workspace: null,
@@ -533,6 +540,28 @@ describe("App 主链路", () => {
     await user.click(screen.getByRole("button", { name: "测试连接" }));
     const err = await screen.findByTestId("provider-test-error");
     expect(err).toHaveTextContent("401");
+  });
+
+  it("设置页检查更新：有更新可安装，失败时错误可见（开发模式降级）", async () => {
+    const user = userEvent.setup();
+    vi.mocked(updater.check).mockResolvedValueOnce({
+      version: "0.2.0",
+      notes: "修复与改进",
+    });
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    await user.click(await screen.findByTestId("update-check"));
+    expect(await screen.findByTestId("update-install")).toHaveTextContent(
+      "下载并安装 v0.2.0",
+    );
+    await user.click(screen.getByTestId("update-install"));
+    await waitFor(() => expect(updater.installAndRelaunch).toHaveBeenCalled());
+
+    // 检查失败（开发模式无已发布 release 属预期）：错误展示，不阻断页面。
+    vi.mocked(updater.check).mockRejectedValueOnce(new Error("更新端点不可达"));
+    await user.click(screen.getByTestId("update-check"));
+    const err = await screen.findByTestId("update-error");
+    expect(err).toHaveTextContent("更新端点不可达");
   });
 
   it("批量分诊、流式分诊与 LLM 分诊输出支持一键复制", async () => {

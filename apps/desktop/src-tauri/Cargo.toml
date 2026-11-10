@@ -18,6 +18,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 tauri = { version = "2", features = [] }
+# 自更新：updater 拉取 latest.json 并校验 minisign 签名，process 提供 relaunch。
+# 插件常驻编译；仅当配置存在 plugins.updater（scripts/generate-release-config.mjs
+# 按签名凭据注入）时 lib.rs 才注册 updater 插件，开发/无密钥构建保持未配置。
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.13.4", features = ["json", "stream"] }
 futures-util = "0.3"
@@ -25,3 +30,7 @@ futures-util = "0.3"
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["rt", "time"] }
+# updater 工件发布验收（tests/updater_signature.rs）：与 tauri-plugin-updater
+# 更新时同一 minisign 验证实现，对已构建工件验证 tauri.release.conf.json 公钥
+base64 = "0.22"
+minisign-verify = "0.2"

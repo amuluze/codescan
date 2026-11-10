@@ -87,4 +87,4 @@ codescan github-upload --sarif codescan.sarif --repo owner/name \
 
 ## 发布
 
-打 tag（`v*`）触发 `.github/workflows/release.yml`：仅 macOS Apple Silicon（aarch64）未签名构建，产出 draft release。Windows / Linux 构建暂不支持。签名与公证需在仓库 Secrets 注入证书后在 workflow 中启用（当前未配置，macOS 首次打开需右键 → 打开）。
+打 tag（`v*`）触发 `.github/workflows/release.yml`：仅 macOS Apple Silicon（aarch64），Developer ID 签名 + 公证（notarization + staple）+ 应用内自动更新（updater），产出 draft release（手动 publish 后下载直链与 updater 端点生效）。凭据缺失时自动降级为 adhoc 未签名构建（附 quarantine 安装说明），不视为失败。本地发布 `task build:dmg`（自动 source `~/.codescan/release-credentials.env`）。凭据约定、验收命令与故障排查详见 [docs/release.md](docs/release.md)。Windows / Linux 构建暂不支持。

@@ -38,7 +38,7 @@ tasks:
     cmd: pnpm run build
 
   build:app:
-    desc: 本地 release 构建 .app（arm64，不打包 DMG）
+    desc: 本地 release 构建 .app（arm64，base 配置快速验证，adhoc 不签名）
     platforms: [darwin]
     preconditions:
       - sh: 'test "$(uname -m)" = arm64'
@@ -46,12 +46,38 @@ tasks:
     cmd: pnpm run build:app
 
   build:dmg:
-    desc: 本地 release 构建 macOS arm64 DMG（.app + .dmg，未签名）
+    desc: |
+      本地 release 构建 macOS arm64 DMG（.app + .dmg + updater 工件）。
+      构建前自动 source ~/.codescan/release-credentials.env（可选，0600 不入库）：
+      提供 APPLE_SIGNING_IDENTITY + 公证凭据时 tauri 自动签名并公证 staple，
+      提供 TAURI_SIGNING_PRIVATE_KEY 时产出 updater 工件（.app.tar.gz + .sig）；
+      缺省保持 adhoc 未公证（updater 剥离），不视为失败。
     platforms: [darwin]
     preconditions:
       - sh: 'test "$(uname -m)" = arm64'
         msg: '仅支持 macOS Apple Silicon（arm64）'
-    cmd: pnpm run build:dmg
+    # generate-release-config 与凭据 source 必须同条执行（cmd 间独立 shell）：
+    # updater 自动检测依赖 TAURI_SIGNING_PRIVATE_KEY 环境变量，分离会导致
+    # 配置被剥离、构建静默产出无 updater 工件（axiom 同款踩坑注释）
+    cmd: |
+      set -euo pipefail
+      if [ -f "$HOME/.codescan/release-credentials.env" ]; then
+        set -a; . "$HOME/.codescan/release-credentials.env"; set +a
+      fi
+      pnpm run build:dmg
+      # bundler 的 staple 可能静默跳过；有签名身份时显式补打并验收（未公证
+      # 会在此 fail-closed，避免发布被 Gatekeeper 拦截的产物）
+      if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+        # 产物路径在 workspace 根 target/（Cargo workspace 约定），不在 src-tauri 下
+        APP="target/aarch64-apple-darwin/release/bundle/macos/Codescan.app"
+        xcrun stapler staple "$APP"
+        xcrun stapler validate "$APP"
+      fi
+
+  release:signing-check:
+    desc: 发布产物签名验收（codesign/spctl/stapler；--allow-adhoc 放行未签名）
+    platforms: [darwin]
+    cmd: pnpm run release:signing-check -- "{{.CLI_ARGS}}"
 
   clean:build:
     desc: 清理构建产物（不做依赖级清理）

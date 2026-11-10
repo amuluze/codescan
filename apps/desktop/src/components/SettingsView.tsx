@@ -1,6 +1,7 @@
-/** 设置页：LLM Provider（兼容 OpenAI / Anthropic）与 API Key（只写）。 */
+/** 设置页：LLM Provider（兼容 OpenAI / Anthropic）、API Key（只写）与应用更新。 */
 import { useEffect, useState } from "react";
 import { useLlmStore } from "../stores/llmStore";
+import { updater, type UpdateInfo } from "../platform";
 
 export function SettingsView() {
   const {
@@ -19,6 +20,11 @@ export function SettingsView() {
   const [model, setModel] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [message, setMessage] = useState<string | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateInstalling, setUpdateInstalling] = useState(false);
+  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+  const [updateError, setUpdateError] = useState<string | null>(null);
 
   useEffect(() => {
     loadProvider()
@@ -52,6 +58,39 @@ export function SettingsView() {
       setMessage("API Key 已保存（仅存本地 SQLite secrets 表）");
     } catch (e) {
       setMessage(String(e));
+    }
+  };
+
+  const checkUpdate = async () => {
+    setUpdateMessage(null);
+    setUpdateError(null);
+    setUpdateInfo(null);
+    setUpdateChecking(true);
+    try {
+      const info = await updater.check();
+      if (info) {
+        setUpdateInfo(info);
+      } else {
+        setUpdateMessage("已是最新版本");
+      }
+    } catch (e) {
+      setUpdateError(String(e));
+    } finally {
+      setUpdateChecking(false);
+    }
+  };
+
+  const installUpdate = async () => {
+    setUpdateError(null);
+    setUpdateInstalling(true);
+    try {
+      await updater.installAndRelaunch();
+      // 成功路径应用会重启；若未重启则提示手动操作。
+      setUpdateMessage("更新已安装，请重启应用完成升级");
+    } catch (e) {
+      setUpdateError(String(e));
+    } finally {
+      setUpdateInstalling(false);
     }
   };
 
@@ -152,6 +191,46 @@ export function SettingsView() {
           {testError && (
             <p role="alert" className="notice failure" data-testid="provider-test-error">
               {testError}
+            </p>
+          )}
+        </section>
+
+        <section className="card">
+          <header className="card-head">
+            <div>
+              <h3>应用更新</h3>
+              <p className="card-sub">经 GitHub Releases 检查新版本；更新包经 minisign 签名校验后替换安装并重启。</p>
+            </div>
+          </header>
+          <div className="key-row">
+            <button
+              className="ghost"
+              data-testid="update-check"
+              onClick={() => void checkUpdate()}
+              disabled={updateChecking || updateInstalling}
+            >
+              {updateChecking ? "检查中…" : "检查更新"}
+            </button>
+            {updateInfo && (
+              <button
+                className="primary"
+                data-testid="update-install"
+                onClick={() => void installUpdate()}
+                disabled={updateInstalling}
+              >
+                {updateInstalling ? "下载安装中…" : `下载并安装 v${updateInfo.version}`}
+              </button>
+            )}
+          </div>
+          {updateInfo && updateInfo.notes && <p className="key-note">{updateInfo.notes}</p>}
+          {updateMessage && (
+            <p role="status" className="notice" data-testid="update-status">
+              {updateMessage}
+            </p>
+          )}
+          {updateError && (
+            <p role="alert" className="notice failure" data-testid="update-error">
+              {updateError}
             </p>
           )}
         </section>

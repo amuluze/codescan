@@ -26,7 +26,8 @@ pub fn run() {
     let store = store::Store::open(&db_path).expect("打开 Codescan 数据库失败");
     let store = Arc::new(Mutex::new(store));
 
-    tauri::Builder::default()
+    let context = tauri::generate_context!();
+    let builder = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             commands::list_directory,
             commands::list_rules,
@@ -58,7 +59,17 @@ pub fn run() {
             manager: manager::ScanManager::new(store.clone())
                 .with_global_ignore(Some(data_root.join("ignore"))),
             store,
-        })
-        .run(tauri::generate_context!())
+        });
+    // 自更新插件按需注册：updater 的 Config 反序列化不接受 null，配置缺失
+    // （开发模式 / 无签名凭据构建，见 scripts/generate-release-config.mjs）时
+    // 注册会在 PluginInitialization 阶段失败并阻断启动，故仅在配置存在时挂载。
+    let builder = if context.config().plugins.0.contains_key("updater") {
+        builder.plugin(tauri_plugin_updater::Builder::new().build())
+    } else {
+        builder
+    };
+    builder
+        .plugin(tauri_plugin_process::init())
+        .run(context)
         .expect("error while running codescan desktop");
 }

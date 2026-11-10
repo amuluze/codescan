@@ -2,6 +2,18 @@ name: Release
 
 # 平台支持：仅 macOS Apple Silicon (arm64)。
 # Windows / Linux 构建暂不支持（发布矩阵刻意保持单目标）。
+#
+# 发布认证链（参照 axiom 实证链，凭据缺失时自动降级 adhoc / updater 剥离，构建不失败）：
+#   1. Secrets 条件映射（非空才注入 GITHUB_ENV——GHA 对未配置 secret 注入空串，
+#      常驻 env 会让下游把空串误判为已配置，见 scripts/ci-macos-credentials.sh 头注）
+#   2. 凭据装配（.p12 → 临时钥匙串自动发现身份 / .p8 落盘，原始密钥材料不出脚本）
+#   3. sign-only 构建（tauri 原生公证在 GHA 托管 runner 会无限挂起，axiom 两轮实跑
+#      复现——公证由下一步 xcrun notarytool 显式提交，可观测可重试）
+#   4. notarytool 公证 DMG + stapler staple（各 3 次重试；staple 回执拉取是独立
+#      网络交互，axiom v0.7.6 实跑单独失败过）
+#   5. 签名验收（codesign/spctl/stapler，adhoc 需显式放行）
+#   6. latest.json（updater 清单）+ gh release draft + 资产上传
+# updater 端点为 GitHub Releases 直链，draft 发布（publish）后生效。
 
 on:
   push:
@@ -14,10 +26,16 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  TARGET: aarch64-apple-darwin
+
 jobs:
   build:
-    name: build aarch64-apple-darwin
-    runs-on: macos-14
+    name: build aarch64-apple-darwin（签名 + 公证 + updater）
+    # GitHub 已下线 macos-14 镜像（标签解析到不支持的 runner 池，job 秒退）；
+    # macos-15 实测为 arm64 主机，与原 macos-14 同架构（axiom 同款迁移）。
+    runs-on: macos-15
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -41,17 +59,168 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
 
-      # 未签名产物：macOS 需用户右键打开或 xattr 清除隔离属性；
-      # 正式分发时通过仓库 Secrets 注入证书并在此处补签名/公证步骤。
-      - uses: tauri-apps/tauri-action@v0
+      # secrets 条件映射：非空才写入 GITHUB_ENV，未配置 = 变量不存在 = 自动降级。
+      # 值假定单行（minisign 私钥为 base64 包裹形态、密码/身份不含换行）。
+      - name: 映射 Secrets（非空才注入 GITHUB_ENV）
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          S_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          S_KEYCHAIN_PW: ${{ secrets.KEYCHAIN_PASSWORD }}
+          S_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          S_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          S_APPLE_ID: ${{ secrets.APPLE_ID }}
+          S_APPLE_PW: ${{ secrets.APPLE_PASSWORD }}
+          S_TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          S_UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          S_UPDATER_PW: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          append() {
+            [ -n "$2" ] || return 0
+            printf '%s=%s\n' "$1" "$2" >> "$GITHUB_ENV"
+          }
+          append APPLE_SIGNING_IDENTITY "$S_IDENTITY"
+          append KEYCHAIN_PASSWORD "$S_KEYCHAIN_PW"
+          append APPLE_API_ISSUER "$S_ISSUER"
+          append APPLE_API_KEY_ID "$S_KEY_ID"
+          append APPLE_ID "$S_APPLE_ID"
+          append APPLE_PASSWORD "$S_APPLE_PW"
+          append APPLE_TEAM_ID "$S_TEAM"
+          append TAURI_SIGNING_PRIVATE_KEY "$S_UPDATER_KEY"
+          append TAURI_SIGNING_PRIVATE_KEY_PASSWORD "$S_UPDATER_PW"
+
+      # 证书与 .p8 经 step 级 env 只给凭据脚本：脚本导入/落盘后把派生量
+      # （APPLE_SIGNING_IDENTITY / APPLE_API_KEY_PATH / APPLE_API_KEY）写 GITHUB_ENV，
+      # 原始密钥材料不进入构建步骤环境（tauri 也不会二次导入证书）
+      - name: 签名/公证凭据装配（缺失自动降级 adhoc/无 updater）
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: bash scripts/ci-macos-credentials.sh
+
+      # 构建（tauri 仅签名 + updater 工件；先移除公证凭据——公证显式做）
+      - name: 构建（sign-only + updater 工件）
+        run: |
+          set -euo pipefail
+          unset APPLE_API_KEY APPLE_API_KEY_PATH APPLE_API_ISSUER APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+          pnpm run build:dmg
+
+      - name: 公证 DMG 并 staple（notarytool 显式提交，带重试；adhoc 跳过）
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            echo '无签名身份，跳过公证'
+            exit 0
+          fi
+          # 产物路径在 workspace 根 target/（Cargo workspace 约定），不在 src-tauri 下
+          BUNDLE="target/$TARGET/release/bundle"
+          V="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          DMG="$BUNDLE/dmg/Codescan_${V}_aarch64.dmg"
+          for ATTEMPT in 1 2 3; do
+            if xcrun notarytool submit "$DMG" \
+                --key "${APPLE_API_KEY_PATH:?}" \
+                --key-id "${APPLE_API_KEY_ID:?}" \
+                --issuer "${APPLE_API_ISSUER:?}" \
+                --wait; then
+              echo "公证提交成功（第 $ATTEMPT 次尝试）"
+              break
+            fi
+            [ "$ATTEMPT" = "3" ] && { echo 'notarytool 三次提交均失败' >&2; exit 1; }
+            echo "notarytool 第 $ATTEMPT 次失败，60s 后重试"
+            sleep 60
+          done
+          # staple 也要重试：回执取回走 Apple 公证回执服务（CloudKit lookup），
+          # 与公证提交是两次独立网络交互，回执已受理时重试即可取回
+          for ATTEMPT in 1 2 3; do
+            if xcrun stapler staple "$DMG" && xcrun stapler validate "$DMG"; then
+              echo "staple 成功（第 $ATTEMPT 次尝试）"
+              break
+            fi
+            [ "$ATTEMPT" = "3" ] && { echo 'stapler 三次尝试均失败' >&2; exit 1; }
+            echo "stapler 第 $ATTEMPT 次失败，60s 后重试"
+            sleep 60
+          done
+
+      - name: 签名验收（adhoc 需显式放行）
+        run: |
+          set -euo pipefail
+          BUNDLE="apps/desktop/src-tauri/target/$TARGET/release/bundle"
+          V="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          DMG="$BUNDLE/dmg/Codescan_${V}_aarch64.dmg"
+          if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+            pnpm run release:signing-check -- "$BUNDLE/macos/Codescan.app" "$DMG"
+          else
+            pnpm run release:signing-check -- --allow-adhoc "$BUNDLE/macos/Codescan.app" "$DMG"
+          fi
+
+      # 汇集发布资产：命名与本地发布链一致（_aarch64 后缀），SHA256SUMS 供校验
+      - name: 汇集资产 + 生成 latest.json
+        run: |
+          set -euo pipefail
+          BUNDLE="target/$TARGET/release/bundle"
+          V="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+          TAG="$GITHUB_REF_NAME"
+          PUBLISH='artifacts/release-publish'
+          NOTES='artifacts/release-notes'
+          mkdir -p "$PUBLISH" "$NOTES"
+          DMG="$BUNDLE/dmg/Codescan_${V}_aarch64.dmg"
+          [ -f "$DMG" ] || { echo "缺少 DMG 产物：$DMG" >&2; exit 1; }
+          cp "$DMG" "$PUBLISH/"
+          TARBALL="$BUNDLE/macos/Codescan.app.tar.gz"
+          if [ -f "$TARBALL" ] && [ -f "$TARBALL.sig" ]; then
+            cp "$TARBALL" "$PUBLISH/Codescan_${V}_aarch64.app.tar.gz"
+            cp "$TARBALL.sig" "$PUBLISH/Codescan_${V}_aarch64.app.tar.gz.sig"
+            TARBALL_URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/Codescan_${V}_aarch64.app.tar.gz"
+            node scripts/generate-latest-json.mjs \
+              --tag "$TAG" \
+              --sig "$PUBLISH/Codescan_${V}_aarch64.app.tar.gz.sig" \
+              --tarball-url "$TARBALL_URL" \
+              --out "$PUBLISH/latest.json" \
+              --notes "Codescan $TAG"
+          else
+            echo '无 updater 工件（降级构建），跳过 latest.json'
+          fi
+          (cd "$PUBLISH" && shasum -a 256 * > SHA256SUMS.txt)
+          # adhoc 构建留下 quarantine 安装说明，拼进 release body
+          if codesign -dv "$BUNDLE/macos/Codescan.app" 2>&1 | grep -q 'Signature=adhoc'; then
+            {
+              printf '%s\n' \
+                '' \
+                '## 安装说明（未签名构建）' \
+                '' \
+                '本版本为 adhoc 签名、未公证。首次打开会被 Gatekeeper 拦截，需移除' \
+                'quarantine 属性：' \
+                '' \
+                '1. 校验完整性：`shasum -a 256 -c SHA256SUMS.txt --ignore-missing`' \
+                '2. 挂载 DMG，将 Codescan.app 拖入 /Applications' \
+                '3. 移除隔离属性：`sudo xattr -rd com.apple.quarantine /Applications/Codescan.app`'
+            } > "$NOTES/notes-macos-install.md"
+          fi
+
+      - name: 创建 draft release 并上传资产
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          PUBLISH='artifacts/release-publish'
+          NOTES='artifacts/release-notes'
+          BODY='artifacts/body.md'
+          {
+            printf '%s\n' '本地代码扫描桌面工具（macOS Apple Silicon）。Windows / Linux 暂不支持。'
+            if [ -f "$NOTES/notes-macos-install.md" ]; then
+              cat "$NOTES/notes-macos-install.md"
+            else
+              printf '%s\n' '' '已签名并公证（Developer ID + notarization），首次打开无 Gatekeeper 拦截；' \
+                '支持应用内自动更新（draft 发布后 updater 端点生效）。'
+            fi
+          } > "$BODY"
+          gh release create "$TAG" --draft --title "Codescan $TAG" --notes-file "$BODY"
+          gh release upload "$TAG" "$PUBLISH"/*
+
+      - uses: actions/upload-artifact@v4
         with:
-          projectPath: apps/desktop
-          tauriScript: pnpm tauri
-          args: --target aarch64-apple-darwin
-          tagName: ${{ github.ref_name }}
-          releaseName: "Codescan ${{ github.ref_name }}"
-          releaseBody: "本地代码扫描桌面工具（macOS Apple Silicon，未签名构建，首次打开需右键 → 打开）。Windows / Linux 暂不支持。"
-          releaseDraft: true
-          prerelease: false
+          name: codescan-assets
+          path: artifacts/release-publish/
+          if-no-files-found: error
+          retention-days: 14

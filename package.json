@@ -17,7 +17,10 @@
     "check:rust": "cargo clippy --workspace --all-targets -- -D warnings",
     "check": "pnpm typecheck && pnpm test && pnpm build && pnpm check:rust && pnpm test:rust",
     "build:app": "pnpm --filter @codescan/desktop tauri build --target aarch64-apple-darwin --bundles app",
-    "build:dmg": "pnpm --filter @codescan/desktop tauri build --target aarch64-apple-darwin",
+    "build:dmg": "pnpm run generate:release-config && pnpm --filter @codescan/desktop tauri build --target aarch64-apple-darwin --config src-tauri/tauri.ci.conf.json",
+    "generate:release-config": "node scripts/generate-release-config.mjs",
+    "release:signing-check": "bash scripts/release-signing-check.sh",
+    "release:latest-json": "node scripts/generate-latest-json.mjs",
     "tauri": "pnpm --filter @codescan/desktop tauri"
   }
 }
