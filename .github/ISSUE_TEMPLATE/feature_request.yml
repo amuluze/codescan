@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest a capability or a change in behaviour
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what blocks you today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+    validations:
+      required: true
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Impact on invariants
+      description: |
+        Does this touch the finding model, fingerprints, gating, determinism, or the
+        LLM boundary (LLM output must never enter findings/baselines/gates)?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

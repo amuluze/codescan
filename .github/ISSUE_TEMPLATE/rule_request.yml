@@ -1,0 +1,44 @@
+name: Rule request
+description: Ask for a new built-in rule or a language to be covered
+labels: ["rules"]
+body:
+  - type: dropdown
+    id: language
+    attributes:
+      label: Language
+      options:
+        - TypeScript / TSX
+        - JavaScript / JSX
+        - Python
+        - Java
+        - Go
+        - Rust
+        - Other / language-agnostic
+    validations:
+      required: true
+  - type: dropdown
+    id: dimension
+    attributes:
+      label: Dimension
+      options:
+        - security
+        - business-logic
+        - quality
+    validations:
+      required: true
+  - type: textarea
+    id: construct
+    attributes:
+      label: Which construct should be reported?
+      description: |
+        Describe the syntax pattern, not the exploit. Rule messages state that a
+        construct is present — they never claim exploitability or reachability.
+    validations:
+      required: true
+  - type: textarea
+    id: fixture
+    attributes:
+      label: Example code
+      description: A minimal snippet that should be reported (and one that should not)
+    validations:
+      required: true
