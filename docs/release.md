@@ -44,7 +44,9 @@ App Store Connect API Key 同 axiom 机器约定存放）。
 ## updater（自动更新）
 
 - 端点：`https://github.com/amuluze/codescan/releases/latest/download/latest.json`
-  （静态直链；**draft release 发布后才生效**）。
+  （静态直链；**draft release 发布后生效**。当前仓库为 private——未公开时该端点与
+  release 页面对未认证访问一律 404，应用内检查更新会失败；仓库公开后**无需任何
+  改动**，端点自动生效）。
 - 工件：`Codescan.app.tar.gz` + `.sig`（`createUpdaterArtifacts`，bundler 产出），
   CI 重命名为 `Codescan_<v>_aarch64.app.tar.gz(.sig)`；`latest.json` 由
   `scripts/generate-latest-json.mjs` 生成（signature 取 .sig 全文）。
