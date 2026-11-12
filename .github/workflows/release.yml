@@ -144,7 +144,7 @@ jobs:
       - name: 签名验收（adhoc 需显式放行）
         run: |
           set -euo pipefail
-          BUNDLE="apps/desktop/src-tauri/target/$TARGET/release/bundle"
+          BUNDLE="target/$TARGET/release/bundle"
           V="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
           DMG="$BUNDLE/dmg/Codescan_${V}_aarch64.dmg"
           if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
