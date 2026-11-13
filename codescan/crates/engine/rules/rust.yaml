@@ -1,4 +1,4 @@
-# Rust AST 规则。fixture 位于 rules/tests/<rule-id>/。
+# Rust AST 规则。fixture 位于 tests/fixtures/rules/<rule-id>/。
 # 节点名依据 tree-sitter-rust 0.23.3 node-types.json；#eq?/#match? 为
 # tree-sitter 原生文本谓词（引擎经 QueryCursor 自动执行）。
 rules:

@@ -5,7 +5,7 @@ use codescan_engine::{CancelToken, Engine};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-const RULES_TESTS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/rules/tests");
+const RULES_TESTS_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/rules");
 
 /// (rule_id, file, line)
 type Expectation = (String, String, usize);
@@ -52,7 +52,7 @@ fn parse_annotations(path: &Path, file_name: &str, source: &str) -> Vec<Expectat
 
 fn fixture_dirs(dir_prefix: Option<&str>) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(RULES_TESTS_DIR)
-        .expect("rules/tests 目录存在")
+        .expect("tests/fixtures/rules 目录存在")
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.is_dir())

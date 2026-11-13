@@ -19,7 +19,7 @@ bump version (package.json / apps/desktop/package.json / tauri.conf.json)
   → publish the draft release manually (the updater endpoint works after publish)
 ```
 
-Local release: `task build:dmg` (auto-sources `~/.codescan/release-credentials.env`); artifacts land in the workspace-root `target/aarch64-apple-darwin/release/bundle/` (Cargo workspace convention, not under `src-tauri`).
+Local release: run `task build:dmg` from the repository root (it auto-sources `~/.codescan/release-credentials.env`); artifacts land in `codescan/target/aarch64-apple-darwin/release/bundle/` (not under `src-tauri`).
 
 ## Credential conventions
 

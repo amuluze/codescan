@@ -3,7 +3,7 @@ updates:
   # 只自动接收 patch/minor；major 留给人工评审（tree-sitter、sha2 等 major
   # 会带来 API 破坏，且本仓库没有 CI 对依赖 PR 做自动校验）。
   - package-ecosystem: cargo
-    directory: "/"
+    directory: "/codescan"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
@@ -16,7 +16,7 @@ updates:
           - "*"
 
   - package-ecosystem: npm
-    directory: "/"
+    directory: "/codescan"
     schedule:
       interval: weekly
     open-pull-requests-limit: 5

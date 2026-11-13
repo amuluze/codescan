@@ -2,7 +2,7 @@
 import { useEffect, useState } from "react";
 import { useHistoryStore } from "../stores/historyStore";
 import { platform } from "../platform";
-import { DirectoryPicker } from "./DirectoryPicker";
+import { DirectoryPicker } from "../components/DirectoryPicker";
 import type { Finding } from "../types";
 
 export function HistoryView() {

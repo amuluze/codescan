@@ -1,35 +1,51 @@
 # AGENTS.md
 
-本仓库的工程约定。新会话先读本文件与 `.specs/domain/scan-engine.md`。
+本仓库的跨产品工程约定。开始任务时按顺序阅读：
+
+1. 本文件：产品边界、SDD 流程、全仓验证路由。
+2. 目标产品目录的约定：`codescan/AGENTS.md` 或 `website/AGENTS.md`。
+3. 与改动相关的领域规范：`.specs/domain/*.md`。
+
+## 产品边界
+
+| 路径 | 职责 | 本地约定 |
+|---|---|---|
+| `codescan/` | CodeScan Rust/pnpm 工作区：引擎、CLI、Tauri 桌面应用 | `codescan/AGENTS.md` |
+| `website/` | 独立静态官网，无包管理与构建步骤 | `website/AGENTS.md` |
+| `.specs/`、`.plans/` | 跨产品领域规范、任务规格与实施计划 | 本文件 |
+| `.github/`、`package.json`、`pnpm-workspace.yaml`、`Taskfile.yml` | 共享 CI 与任务编排 | 本文件 |
+
+- 产品目录拥有各自的实现、依赖与本地约定；产品专属构建命令和代码规范留在产品目录，跨产品规格仍集中在 `.specs/`。
+- `website/` 不共享 CodeScan 的 Node/Rust 工作区，也不得依赖其构建产物。
+- 跨产品改动必须在 Task Spec 中列出涉及产品及各自验证入口。
 
 ## 工作流
 
-SDD（Spec-Driven Development），约定与 axiom 仓库一致（参照 `axiom/.specs/domain/spec-authoring.md`）：
+采用 SDD（Spec-Driven Development）：
 
 - `.specs/domain/`：领域不变量，长期演进，最高约束来源。
-- `.specs/tasks/`：任务规格，验收必须可客观判定；完成时 frontmatter `status: done`。
-- `.plans/`：实现路径（怎么建），不得反向改写 Spec 验收。
-- `reports/`：调研记录。
+- `.specs/tasks/`：任务规格，验收必须可客观判定；完成时 frontmatter 置 `status: done`。
+- `.plans/`：实现路径，不得反向改写 Spec 验收。
+- `reports/`：调研记录，不作为实现依据。
 
-## 代码约定
+长期不变量变化先修订 Domain Spec，再写 Task Spec，最后实现。实现与文档冲突时，以相关 Domain Spec 为准，并同步修正实现或文档，不保留两套口径。
 
-- Rust：`cargo clippy --workspace --all-targets -- -D warnings` 干净；公共 API 带注释说明不变量来源（Domain § 条款）。
-- `Result` 别名一律带默认错误参数：`type Result<T, E = StoreError> = std::result::Result<T, E>`。
-- TS：strict；类型导入用 `import type`；不做对象形状的内联断言访问（IPC 边界在 platform.ts 一处收口）。
-- 确定性（Domain §2）是最高优先级：任何进入 Finding/ScanEvent/Stats 的字段不得携带机器差异（时间、路径形态、并行顺序）。UI 层的耗时展示在 UI 层测，不入报告。
+## 通用约束
 
-## 引擎与规则
+- 不在仓库根添加应用依赖、产品实现或兼容转发层。根 `pnpm-workspace.yaml` 仅配置编排包、不包含工作区成员；CodeScan 的工作区配置只在 `codescan/pnpm-workspace.yaml`。
+- 不提交生成物、构建产物、凭据或本机配置；各产品目录的忽略规则必须覆盖自身产物。
+- 产品能力与数量声明以实现为事实来源，文档不得提前声称未实现能力。
+- 命令实现只有一份权威来源：CodeScan 在 `codescan/package.json`；根 `package.json` 只转发，`Taskfile.yml` 只编排。
+- 行为变更以最小、针对性的证据证明；不为走查重跑无关全套测试。
 
-- 引擎改动必须跑：`npm run test:rust`（含规则套件、确定性、fail-closed、SARIF、性能）。
-- 规则改动必须跑对应前缀的规则套件：`CODESCAN_FIXTURE_DIR=<前缀> CODESCAN_RULE_PREFIX=<前缀> cargo test -p codescan-engine --test rule_suite`。
-- 规则消息只表述「出现了构造」，不得声称可利用性或数据流可达（v1 无污点分析）。
-- 新语言接入：`language.rs` 加枚举与语法 + 语法档位（metrics.rs Profile）+ 至少 6 条规则与 fixture + 语言矩阵探针（integration.rs）。
+## 命令与验证路由
 
-## 验证习惯
+任务从仓库根执行；`task --list` 查看全部入口。
 
-- 提交前：`task check`（等价于 `pnpm run check`：typecheck + vitest + build + clippy + cargo test）。
-- CLI 改动：`task test:cli`（黑盒退出码/格式/基线/SARIF 上传 dry-run）。
-- 扫描范围/忽略改动：`cargo test -p codescan-engine --test integration ignore_sources_and_defaults`，并保持 Domain §3.1 的忽略源枚举同步。
-- 打包：`task build:dmg`（仅 macOS Apple Silicon arm64；Windows/Linux 暂不支持；CI release workflow 同样只构建 aarch64）。
-- 命令实现一律落在 `package.json` scripts，Taskfile 仅编排；新增任务先加 npm script 再暴露 task。
-- 行为变更以最小测试证明，不为走查而重跑全套。
+| 改动范围 | 验证入口 |
+|---|---|
+| CodeScan 代码、规则、CLI、桌面端 | 遵循 `codescan/AGENTS.md`；提交前 `task check` |
+| 官网 HTML/CSS/JS | 遵循 `website/AGENTS.md`；静态站点无构建门禁，按该目录说明本地预览 |
+| 跨产品文档、规格、CI、根编排 | 校验受影响路径与命令；涉及 CodeScan 代码路径时运行 `task check` |
+
+仅 CodeScan 存在打包流程：`task build:dmg`，且仅支持 macOS Apple Silicon（arm64）。真实发布、签名与公证不属于常规验证，除非用户明确要求。

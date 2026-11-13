@@ -7,12 +7,12 @@ Thanks for taking the time to contribute. This document covers the workflow, the
 ```bash
 git clone https://github.com/amuluze/codescan.git
 cd codescan
-pnpm install     # or: task install
+task install
 task check       # full gate — must be green before you open a pull request
 task dev:app     # Tauri desktop dev mode
 ```
 
-Requirements: Node ≥ 22, pnpm ≥ 10, Rust 1.96 (pinned in `rust-toolchain.toml`).
+Requirements: Node ≥ 22, pnpm ≥ 10, Rust 1.96 (pinned in `codescan/rust-toolchain.toml`).
 
 ## Engineering model (spec-driven)
 
@@ -35,21 +35,21 @@ If your change alters domain behaviour (finding model, fingerprints, gating, det
 
 Rules of thumb:
 
-- Rust must stay clean under `cargo clippy --workspace --all-targets -- -D warnings`.
+- Rust must stay clean under `cd codescan && cargo clippy --workspace --all-targets -- -D warnings`.
 - TypeScript is strict; use `import type` for type-only imports; all IPC calls go through `platform.ts`.
 - **Determinism is the top priority**: no timestamp, absolute path, or parallel-completion order may enter a finding, scan event, or stat.
 - Prefer the narrowest test that proves the change; do not re-run whole suites for walkthroughs.
 
 ## Contributing a rule
 
-Rules are YAML assets in `crates/engine/rules/`. A new rule needs:
+Rules are YAML assets in `codescan/crates/engine/rules/`. A new rule needs:
 
 1. A stable `id` (`<lang>/<slug>`) and a declared `language`, `dimension`, and `severity`.
 2. A message that states **which construct was found** — never a claim of exploitability or reachability.
-3. A fixture under `crates/engine/rules/tests/` (fixture files carry `ruleid:` annotations) so the rule is unit-tested like the built-ins.
-4. Rule-suite coverage: `CODESCAN_FIXTURE_DIR=<prefix> CODESCAN_RULE_PREFIX=<prefix> cargo test -p codescan-engine --test rule_suite`.
+3. A fixture under `codescan/crates/engine/tests/fixtures/rules/` (fixture files carry `ruleid:` annotations) so the rule is unit-tested like the built-ins.
+4. Rule-suite coverage: `cd codescan && CODESCAN_FIXTURE_DIR=<prefix> CODESCAN_RULE_PREFIX=<prefix> cargo test -p codescan-engine --test rule_suite`.
 
-Semantics for AST rules, text rules, taint rules and metrics are documented in [docs/rules.md](docs/rules.md).
+Semantics for AST rules, text rules, taint rules and metrics are documented in [docs/rules.md](codescan/docs/rules.md).
 
 ## Business-logic rules
 
@@ -60,7 +60,7 @@ Business-logic rules encode project invariants. The built-in ones are examples o
 - Keep the change focused; one concern per PR.
 - Describe **what changed and why**, and reference the spec/task id when applicable.
 - State the evidence: which tests you ran and their result. Claims without a reproduction are not accepted.
-- Update docs (`docs/`, README) when behaviour or commands change.
+- Update docs (`codescan/docs/`, README) when behaviour or commands change.
 
 ## Reporting bugs
 

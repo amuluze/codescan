@@ -1,26 +1,28 @@
 {
-  "name": "codescan",
+  "name": "codescan-workspace",
   "private": true,
-  "version": "1.0.0",
-  "description": "Local-first code scanning desktop tool (self-built AST rule engine).",
   "type": "module",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "dev": "pnpm --filter @codescan/desktop dev",
-    "build": "pnpm --filter @codescan/desktop build",
-    "typecheck": "pnpm --filter @codescan/desktop typecheck",
-    "test": "pnpm --filter @codescan/desktop test",
-    "test:cli": "cargo test -p codescan-cli",
-    "test:rust": "cargo test --workspace",
-    "check:rust": "cargo clippy --workspace --all-targets -- -D warnings",
-    "check": "pnpm typecheck && pnpm test && pnpm build && pnpm check:rust && pnpm test:rust",
-    "build:app": "pnpm --filter @codescan/desktop tauri build --target aarch64-apple-darwin --bundles app",
-    "build:dmg": "pnpm run generate:release-config && pnpm --filter @codescan/desktop tauri build --target aarch64-apple-darwin --config src-tauri/tauri.ci.conf.json",
-    "generate:release-config": "node scripts/generate-release-config.mjs",
-    "release:signing-check": "bash scripts/release-signing-check.sh",
-    "release:latest-json": "node scripts/generate-latest-json.mjs",
-    "tauri": "pnpm --filter @codescan/desktop tauri"
+    "setup": "pnpm --dir codescan install",
+    "dev": "pnpm --dir codescan run dev",
+    "build": "pnpm --dir codescan run build",
+    "typecheck": "pnpm --dir codescan run typecheck",
+    "test": "pnpm --dir codescan run test",
+    "test:cli": "pnpm --dir codescan run test:cli",
+    "test:rust": "pnpm --dir codescan run test:rust",
+    "check:rust": "pnpm --dir codescan run check:rust",
+    "check": "pnpm --dir codescan run check",
+    "build:app": "pnpm --dir codescan run build:app",
+    "build:dmg": "pnpm --dir codescan run build:dmg",
+    "generate:release-config": "pnpm --dir codescan run generate:release-config",
+    "release:signing-check": "pnpm --dir codescan run release:signing-check",
+    "release:latest-json": "pnpm --dir codescan run release:latest-json",
+    "tauri": "pnpm --dir codescan run tauri",
+    "clean": "pnpm --dir codescan run clean",
+    "scan": "pnpm --dir codescan run scan",
+    "scan:sarif": "pnpm --dir codescan run scan:sarif"
   }
 }

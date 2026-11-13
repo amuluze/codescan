@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { filteredFindings, useScanStore } from "../stores/scanStore";
 import { useLlmStore } from "../stores/llmStore";
-import { CopyButton } from "./CopyButton";
+import { CopyButton } from "../components/CopyButton";
 import type { Finding } from "../types";
 import { DIMENSION_LABEL, SEVERITY_LABEL } from "../labels";
 

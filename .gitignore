@@ -4,9 +4,9 @@ target/
 coverage/
 *.tsbuildinfo
 .DS_Store
-apps/desktop/src-tauri/gen/
-# 条件构建配置（由 scripts/generate-release-config.mjs 按 updater 凭据生成）
-apps/desktop/src-tauri/tauri.ci.conf.json
+codescan/apps/desktop/src-tauri/gen/
+# 条件构建配置（由 codescan/scripts/generate-release-config.mjs 按 updater 凭据生成）
+codescan/apps/desktop/src-tauri/tauri.ci.conf.json
 artifacts/
 
 # 调研报告（仅本地保留，不入库）

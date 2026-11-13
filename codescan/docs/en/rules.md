@@ -45,7 +45,7 @@ Key points:
 
 ## Fixtures (rule unit tests)
 
-Directory: `crates/engine/rules/tests/<rule-id>/`; the file extension selects the language.
+Directory: `crates/engine/tests/fixtures/rules/<rule-id>/`; the file extension selects the language.
 
 - The expected line is the **next non-empty, non-annotation line** pointed at by the annotation block: `// ruleid: <id>` (TS/TSX/JS/JSX/Java/Go/Rust) or `# ruleid: <id>` (Python). Stack several annotations when several rules hit the same line.
 - The runner executes **all enabled rules** per fixture directory. The expected multiset and the actual hits (triples of rule id, file, start line) must match **in count**: an annotated line that did not match is a false negative; an unannotated hit (including hits from other rules or metrics) is an over-match. Both fail the test.

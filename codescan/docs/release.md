@@ -19,8 +19,8 @@ bump 版本（package.json / apps/desktop/package.json / tauri.conf.json 三处�
   → 手动 publish draft release（updater 端点在 publish 后生效）
 ```
 
-本地发布：`task build:dmg`（自动 source `~/.codescan/release-credentials.env`），
-产物在 workspace 根 `target/aarch64-apple-darwin/release/bundle/`（Cargo workspace 约定，不在 src-tauri 下）。
+本地发布：在仓库根执行 `task build:dmg`（自动 source `~/.codescan/release-credentials.env`），
+产物在 CodeScan workspace 的 `codescan/target/aarch64-apple-darwin/release/bundle/`（不在 src-tauri 下）。
 
 ## 凭据约定
 

@@ -1,9 +1,9 @@
 # CodeScan 设计意图文档
 
 > 本文是 CodeScan **设计意图的 SSOT**。
-> 载体边界：品牌母版是 `assets/brand/icon.svg` 与 `assets/brand/logo.svg`；实现落点是 `apps/desktop/src/styles/global.css` 与 `apps/desktop/src/components/*.tsx`。
+> 载体边界：品牌母版是 `assets/brand/icon.svg` 与 `assets/brand/logo.svg`；实现落点是 `apps/desktop/src/styles/global.css`、`apps/desktop/src/views/*.tsx` 与 `apps/desktop/src/components/*.tsx`。
 > 本文描述「应然」（长什么样、为什么这样、哪些不可变）；与实现的差异集中在 §11「落地清单」，不散落在各章节。
-> 领域不变量（扫描语义、确定性、fail-closed、LLM 边界、措辞边界）见 `.specs/domain/scan-engine.md`，本文不覆盖它。
+> 领域不变量（扫描语义、确定性、fail-closed、LLM 边界、措辞边界）见 `../.specs/domain/scan-engine.md`，本文不覆盖它。
 
 ---
 
@@ -12,10 +12,10 @@
 | 载体 | 权威范围 | 不负责 |
 |---|---|---|
 | `assets/brand/icon.svg`、`logo.svg` | 品牌母色、图标与字标几何 | 界面布局、交互、文案 |
-| `.specs/domain/scan-engine.md` | 长期行为约束与不变量 | 视觉 |
+| `../.specs/domain/scan-engine.md` | 长期行为约束与不变量 | 视觉 |
 | `DESIGN.md`（本文） | 设计原则、token 体系、布局与组件规范、状态模型、文案语气、无障碍与响应式、治理口径 | 具体实现细节；缺口见 §11 |
 | `apps/desktop/src/styles/global.css` | 是否已落地、当前取值 | 规范来源 |
-| `apps/desktop/src/components/*.tsx` | 交互与数据事实 | 规范来源 |
+| `apps/desktop/src/views/*.tsx`、`apps/desktop/src/components/*.tsx` | 交互与数据事实 | 规范来源 |
 
 **冲突裁决顺序**：Domain Spec → 本文 → 品牌资产 → 实现代码。出现分歧时先按此顺序定位「谁需要改」，再改；不让实现反向定义设计。
 
@@ -34,9 +34,9 @@
 | 产品面 | 实现位置 | 用户 | 设计目标 |
 |---|---|---|---|
 | 桌面应用 | `apps/desktop`（Tauri 2 + React 19 + Rust） | 开发者 / 安全与质量负责人 | 精确、可核对：结果可复现、证据可定位、门禁差异可解释 |
-| 官方网站 | `website/`（规划中，当前仅有占位 `AGENTS.md`） | 访客 / 潜在用户 | 讲清「这是什么、怎么装、凭什么可信」；规范待补，届时以 §3.1 母色为唯一品牌来源 |
+| 官方网站 | `../website/`（独立静态 HTML/CSS/JS，无构建步骤） | 访客 / 潜在用户 | 讲清「这是什么、怎么装、凭什么可信」；以 §3.1 母色为唯一品牌来源 |
 
-桌面应用是**唯一已实现**的产品面，本文后续章节默认描述桌面应用；官网仅在 §2.3 保留品牌位规则。
+本文后续章节默认描述桌面应用；官网拥有独立的实现与维护约定，仅共享品牌来源。
 
 ### 2.1 桌面应用的产品面性质
 
@@ -265,11 +265,11 @@
 | 组件 | 落点 | 职责 |
 |---|---|---|
 | `App` | `apps/desktop/src/App.tsx` | 窗口骨架与视图切换 |
-| `ScanView` | `components/ScanView.tsx` | 工作区选择、扫描控制、进度与统计、LLM 审查 |
-| `FindingsView` | `components/FindingsView.tsx` | 发现列表 / 详情 / 筛选 / 批量分诊 |
-| `RulesView` | `components/RulesView.tsx` | 规则目录与启停 |
-| `HistoryView` | `components/HistoryView.tsx` | 扫描回溯、基线、门禁差异、SARIF 导出 |
-| `SettingsView` | `components/SettingsView.tsx` | Provider、更新、安全边界说明 |
+| `ScanView` | `views/ScanView.tsx` | 工作区选择、扫描控制、进度与统计、LLM 审查 |
+| `FindingsView` | `views/FindingsView.tsx` | 发现列表 / 详情 / 筛选 / 批量分诊 |
+| `RulesView` | `views/RulesView.tsx` | 规则目录与启停 |
+| `HistoryView` | `views/HistoryView.tsx` | 扫描回溯、基线、门禁差异、SARIF 导出 |
+| `SettingsView` | `views/SettingsView.tsx` | Provider、更新、安全边界说明 |
 | `DirectoryPicker` | `components/DirectoryPicker.tsx` | 工作区路径选择：应用内 Modal（Rust 列目录 + 可编辑路径），替代系统原生目录对话框 |
 | `CopyButton` | `components/CopyButton.tsx` | 复制按钮：`idle / copied / failed` 三态，1.6s 回落；**不负责脱敏**，调用方必须传入可公开文本 |
 | `scanStore` / `historyStore` / `rulesStore` / `llmStore` | `stores/*.ts` | 视图状态机与数据事实 |
@@ -470,7 +470,7 @@ chip 尺寸：严重级 chip `padding 1px 8px` + 11.5px/600 ≈ 20px 高；计�
 | 4 | 进度条渐变 | `global.css:268` | `--accent` → `linear-gradient(90deg, var(--accent), var(--accent-2))` |
 | 5 | 输入框边界 | `global.css` 输入规则 | 描边改 `var(--border-strong)`，保证可辨识 |
 | 6 | 字体栈补齐 | `global.css` `:root` | 补 `"SF Pro Display"`（与 `logo.svg` 字标字体栈一致） |
-| 7 | 严重级文案统一 | `components/HistoryView.tsx` | 严重级/维度沿用 `labels.ts` 的中文文案，不直出枚举值 |
+| 7 | 严重级文案统一 | `views/HistoryView.tsx` | 严重级/维度沿用 `labels.ts` 的中文文案，不直出枚举值 |
 | 8 | monochrome 字标 | `assets/brand/` | 新增单色变体，供浅色背景（官网）使用 |
 | 9 | 打包图标一致性 | `apps/desktop/src-tauri/icons/*` | 由 `icon.svg` 栅格化，保持圆角与配色一致 |
 | 10 | 导航当前项语义 | `apps/desktop/src/App.tsx` | 当前标签补 `aria-current="page"`（或 `role="tablist"` + `aria-selected`），供辅助技术识别 |

@@ -73,23 +73,23 @@ CodeScan 走确定性路线，并把这些边界写进代码：
 
 ### 从源码构建
 
-环境要求：Node ≥ 22、pnpm ≥ 10、Rust 1.96（由 `rust-toolchain.toml` 锁定），以及引擎所用的 tree-sitter 工具链。
+环境要求：Node ≥ 22、pnpm ≥ 10、Rust 1.96（由 `codescan/rust-toolchain.toml` 锁定），以及引擎所用的 tree-sitter 工具链。
 
 ```bash
 git clone https://github.com/amuluze/codescan.git
 cd codescan
-pnpm install          # 或：task install
-pnpm tauri dev        # 或：task dev:app
+task install
+task dev:app
 ```
 
 ### 命令行
 
 ```bash
 # 扫描仓库（text 输出到 stdout）
-cargo run -p codescan-cli -- scan <repo>
+cargo run --manifest-path codescan/Cargo.toml -p codescan-cli -- scan <repo>
 
 # 仅按「新增发现」拦截
-cargo run -p codescan-cli -- scan <repo> \
+cargo run --manifest-path codescan/Cargo.toml -p codescan-cli -- scan <repo> \
   --baseline codescan-baseline.json --fail-on new \
   --format sarif --out codescan.sarif
 ```
@@ -141,25 +141,24 @@ WebView 不持有密钥明文，也不直接访问 SQLite。
 ## 目录结构
 
 ```text
-codescan/
+codescan/                 # CodeScan 工作区，与 ../website/ 同级
 ├── crates/engine/        # codescan-engine：规则编译、匹配、度量、污点、指纹、SARIF、基线
-│   ├── rules/            # 内置规则（按语言分文件）+ fixture
-│   └── tests/            # 集成测试（确定性 / fail-closed / SARIF / 语言矩阵 / 性能）
+│   ├── rules/            # 仅内置规则 YAML（按语言分文件）
+│   └── tests/            # 集成测试 + fixtures/rules/ 规则夹具
 ├── crates/cli/           # codescan CLI：扫描 / SARIF 输出 / GitHub Code Scanning 上传
 ├── apps/desktop/         # Tauri 2 + React 19 桌面应用
-│   ├── src/              # 视图：扫描 / 发现 / 规则 / 历史 / 设置
+│   ├── src/views/        # 扫描 / 发现 / 规则 / 历史 / 设置页面
+│   ├── src/components/   # 跨页面复用组件
 │   └── src-tauri/        # 命令层 + SQLite（数据根 ~/.codescan）
 ├── assets/brand/         # Logo 与应用图标源文件
 ├── docs/                 # CLI、规则、LLM、发布文档
-├── .specs/               # 领域不变量 + 任务规格（Spec-Driven Development）
-├── Taskfile.yml          # task 任务入口（仅编排，命令实现在 package.json scripts）
-└── AGENTS.md             # 贡献者与 Agent 的工程约定
+└── package.json          # 命令实现；../Taskfile.yml 与 ../package.json 仅编排
 ```
 
 ## 开发
 
 ```bash
-task install        # pnpm install
+task install        # 从仓库根安装此工作区依赖
 task dev:app        # Tauri 桌面开发模式
 task check          # 完整门禁：typecheck + vitest + 构建 + clippy -D warnings + cargo test
 ```
@@ -172,9 +171,9 @@ task check          # 完整门禁：typecheck + vitest + 构建 + clippy -D war
 | `task test:cli` | CLI 黑盒测试（退出码、格式、SARIF 上传 dry-run） |
 | `task typecheck` / `task check:rust` | TS 类型检查 / clippy `-D warnings` |
 | `task build:dmg` | macOS arm64 `.app` + `.dmg`（adhoc 未签名） |
-| `task scan` / `task scan:sarif` | 用本地引擎扫描本仓库 |
+| `task scan` / `task scan:sarif` | 用本地引擎扫描 CodeScan 工作区 |
 
-`Taskfile.yml` 只是编排层，命令全部落在 `package.json` scripts，二者不会漂移。
+`../Taskfile.yml` 与仓库根 `package.json` 仅编排，命令实现统一落在本工作区的 `package.json`。
 
 ## 文档
 
@@ -184,9 +183,9 @@ task check          # 完整门禁：typecheck + vitest + 构建 + clippy -D war
 | [docs/rules.md](docs/rules.md) · [English](docs/en/rules.md) | 规则格式、模式语言、fixture、污点规则 |
 | [docs/llm.md](docs/llm.md) · [English](docs/en/llm.md) | LLM Provider 配置与能力边界 |
 | [docs/release.md](docs/release.md) · [English](docs/en/release.md) | 发布链路、签名/公证凭据、updater、故障排查 |
-| [.specs/domain/scan-engine.md](.specs/domain/scan-engine.md) | 领域不变量——引擎的最高优先级约束 |
-| [.specs/tasks/](.specs/tasks/) | 带可客观判定验收标准的任务规格 |
-| [AGENTS.md](AGENTS.md) | 工程约定（SDD 工作流、确定性要求） |
+| [.specs/domain/scan-engine.md](../.specs/domain/scan-engine.md) | 领域不变量——引擎的最高优先级约束 |
+| [.specs/tasks/](../.specs/tasks/) | 带可客观判定验收标准的任务规格 |
+| [AGENTS.md](AGENTS.md) · [仓库约定](../AGENTS.md) | CodeScan 工作区约定与共享流程 |
 | [CHANGELOG.md](CHANGELOG.md) | 变更日志（Keep a Changelog 格式） |
 
 ## 已知限制
@@ -204,11 +203,11 @@ task check          # 完整门禁：typecheck + vitest + 构建 + clippy -D war
 
 ## 贡献
 
-欢迎 Issue 与 PR——流程、本地门禁与规则贡献方式见 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题请按 [SECURITY.md](SECURITY.md) 私下报告，不要开公开 Issue。参与者均需遵守 [行为准则](CODE_OF_CONDUCT.md)。
+欢迎 Issue 与 PR——流程、本地门禁与规则贡献方式见 [CONTRIBUTING.md](../CONTRIBUTING.md)。安全问题请按 [SECURITY.md](../SECURITY.md) 私下报告，不要开公开 Issue。参与者均需遵守 [行为准则](../CODE_OF_CONDUCT.md)。
 
 ## 许可证
 
-[MIT](LICENSE) © 2026 amuluze
+[MIT](../LICENSE) © 2026 amuluze
 
 ## 致谢
 

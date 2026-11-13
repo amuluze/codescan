@@ -1,4 +1,4 @@
-# Java AST 规则。fixture 位于 rules/tests/<rule-id>/。
+# Java AST 规则。fixture 位于 tests/fixtures/rules/<rule-id>/。
 rules:
   - id: java/runtime-exec
     language: java

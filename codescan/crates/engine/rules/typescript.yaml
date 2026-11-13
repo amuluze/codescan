@@ -1,5 +1,5 @@
 # TypeScript / TSX / JavaScript / JSX AST 规则。
-# fixture 位于 rules/tests/<rule-id 中 / 换为 ->；匹配语义见 docs/rules.md。
+# fixture 位于 tests/fixtures/rules/<rule-id>/；匹配语义见 docs/rules.md。
 # 名称精确约束统一走 metavariables（与 #eq?/#match? 谓词等价，集中可读）。
 rules:
   # ---------- TypeScript（typescript，.ts） ----------

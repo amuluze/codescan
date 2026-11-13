@@ -16,6 +16,7 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Changed
 
+- Repository layout: CodeScan's complete Rust/pnpm workspace now lives in `codescan/`, separate from the static `website/`; desktop pages use `src/views/`, and rule fixtures use `crates/engine/tests/fixtures/rules/`
 - Anthropic response parsing: skip thinking blocks, concatenate text blocks (fixes `content[0].text` failure on extended-thinking responses)
 - Review requests batch at 4 files / 32 KiB per request with automatic split on `max_tokens` truncation
 - Scan / Findings / Settings pages: unified input and select height (36px), consistent card layout, responsive detail pane

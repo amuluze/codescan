@@ -18,9 +18,9 @@ website/
 ├── index.html            # single page: hero, why, features, coverage, screens, get started,
 │                         # architecture, privacy, open source
 ├── assets/
-│   ├── brand/            # logo.svg / icon.svg (copies of ../../assets/brand)
+│   ├── brand/            # logo.svg / icon.svg (copies of codescan/assets/brand)
 │   ├── css/site.css      # styles (dark first, light theme via prefers-color-scheme)
-│   ├── img/              # scan.png / findings.png (copies of ../../assets/screenshots)
+│   ├── img/              # scan.png / findings.png (copies of codescan/assets/screenshots)
 │   └── js/
 │       ├── i18n.js       # en/zh copy dictionary
 │       └── site.js       # language + theme switching, mobile nav, copy buttons
@@ -52,15 +52,15 @@ URL helpers: `?lang=zh`, `?lang=en`, `?theme=dark`, `?theme=light`.
 
 ## Updating assets
 
-Brand and screenshot assets are copied from the repository root:
+Brand and screenshot assets are copied from the CodeScan workspace (`codescan/assets/`):
 
 ```bash
-cp ../assets/brand/logo.svg ../assets/brand/icon.svg assets/brand/
-cp ../assets/screenshots/scan.png ../assets/screenshots/findings.png assets/img/
+cp ../codescan/assets/brand/logo.svg ../codescan/assets/brand/icon.svg assets/brand/
+cp ../codescan/assets/screenshots/scan.png ../codescan/assets/screenshots/findings.png assets/img/
 ```
 
 Keep the site copy consistent with the implementation — the numbers in the coverage section
-(rule counts per language and dimension) come from `crates/engine/rules/*.yaml`.
+(rule counts per language and dimension) come from `codescan/crates/engine/rules/*.yaml`.
 
 ## Conventions
 

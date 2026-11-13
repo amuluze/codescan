@@ -3,8 +3,8 @@ import { useEffect, useState } from "react";
 import { useScanStore } from "../stores/scanStore";
 import { useLlmStore } from "../stores/llmStore";
 import { CONFIDENCE_LABEL, DIMENSION_LABEL, SEVERITY_LABEL } from "../labels";
-import { CopyButton } from "./CopyButton";
-import { DirectoryPicker } from "./DirectoryPicker";
+import { CopyButton } from "../components/CopyButton";
+import { DirectoryPicker } from "../components/DirectoryPicker";
 
 /** 与后端 llm::REVIEW_MAX_FILES 一致（仅用于文案与选项上限）。 */
 const REVIEW_MAX_FILES = 24;

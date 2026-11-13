@@ -1,4 +1,4 @@
-# Go AST 规则。fixture 位于 rules/tests/<rule-id>/。
+# Go AST 规则。fixture 位于 tests/fixtures/rules/<rule-id>/。
 rules:
   - id: go/exec-shell-command
     language: go

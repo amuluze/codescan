@@ -14,11 +14,11 @@
 - [ ] `task check` (typecheck + vitest + build + clippy -D warnings + cargo test)
 - [ ] `task test:cli` (if the CLI changed)
 - [ ] Rule-suite run for the affected rule prefix (if rules changed):
-      `CODESCAN_FIXTURE_DIR=<prefix> CODESCAN_RULE_PREFIX=<prefix> cargo test -p codescan-engine --test rule_suite`
+      `cd codescan && CODESCAN_FIXTURE_DIR=<prefix> CODESCAN_RULE_PREFIX=<prefix> cargo test -p codescan-engine --test rule_suite`
 
 ## Checklist
 
 - [ ] Determinism preserved: no timestamp, absolute path, or parallel order entered a finding, scan event, or stat
 - [ ] Findings still carry rule id, relative path, span, and evidence
 - [ ] LLM output remains advisory (never enters findings, baselines, gate diffs, or SARIF)
-- [ ] Docs updated (`docs/`, README) when behaviour or commands changed
+- [ ] Docs updated (`codescan/docs/`, README) when behaviour or commands changed

@@ -2,15 +2,15 @@ version: '3'
 
 # Codescan 任务入口（taskfile.dev）。
 #
-# 定位：人机友好的编排层——底层命令一律委托 package.json 的 npm scripts，
-# 不复制命令实现。npm scripts 仍是命令的单一权威来源（CI 与文档引用他们）；
-# 改命令只改 package.json 一处，Taskfile 自动跟随。`task --list` 查看全部任务。
+# 定位：人机友好的编排层——底层命令一律委托根 package.json 的 npm scripts，
+# 根 scripts 只转发到 codescan/package.json，不复制命令实现。
+# codescan/package.json 是命令实现的单一权威来源（CI 与文档引用同一命令）；
+# 改命令只改该文件一处，Taskfile 自动跟随。`task --list` 查看全部任务。
 #
 # 平台支持：仅 macOS Apple Silicon（arm64）。Windows / Linux 构建暂不支持。
 
 vars:
   TARGET: aarch64-apple-darwin
-  SARIF_OUT: artifacts/codescan.sarif
 
 tasks:
   default:
@@ -21,7 +21,7 @@ tasks:
 
   install:
     desc: 安装依赖（Node 22+ / pnpm 10+ / Rust 1.96）
-    cmd: pnpm install
+    cmd: pnpm run setup
 
   dev:
     desc: 浏览器开发模式（无原生能力）
@@ -68,8 +68,8 @@ tasks:
       # bundler 的 staple 可能静默跳过；有签名身份时显式补打并验收（未公证
       # 会在此 fail-closed，避免发布被 Gatekeeper 拦截的产物）
       if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
-        # 产物路径在 workspace 根 target/（Cargo workspace 约定），不在 src-tauri 下
-        APP="target/aarch64-apple-darwin/release/bundle/macos/Codescan.app"
+        # 产物路径在 CodeScan workspace 的 codescan/target/，不在 src-tauri 下
+        APP="codescan/target/aarch64-apple-darwin/release/bundle/macos/Codescan.app"
         xcrun stapler staple "$APP"
         xcrun stapler validate "$APP"
       fi
@@ -81,9 +81,7 @@ tasks:
 
   clean:build:
     desc: 清理构建产物（不做依赖级清理）
-    cmds:
-      - rm -rf apps/desktop/dist
-      - cargo clean
+    cmd: pnpm run clean
 
   # ── 检查与测试 ────────────────────────────────────────────────────────
 
@@ -114,12 +112,9 @@ tasks:
   # ── 扫描自身（dogfood）───────────────────────────────────────────────
 
   scan:
-    desc: 用本地引擎扫描本仓库（text 输出）
-    cmd: cargo run -q -p codescan-cli -- scan .
+    desc: 用本地引擎扫描 CodeScan 工作区（text 输出）
+    cmd: pnpm run scan
 
   scan:sarif:
-    desc: 扫描本仓库并输出 SARIF 到 artifacts/codescan.sarif
-    cmds:
-      - mkdir -p artifacts
-      - cargo run -q -p codescan-cli -- scan . --format sarif --out {{.SARIF_OUT}}
-      - cmd: 'echo "SARIF: {{.SARIF_OUT}}"'
+    desc: 扫描 CodeScan 工作区并输出 SARIF 到 codescan/artifacts/codescan.sarif
+    cmd: pnpm run scan:sarif

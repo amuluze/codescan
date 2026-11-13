@@ -44,7 +44,7 @@ rules:
 
 ## Fixture（规则单测，A2 验收）
 
-目录：`crates/engine/rules/tests/<rule-id>/`，按文件扩展名识别语言。判定语义（Task Spec「规则 fixture 格式」）：
+目录：`crates/engine/tests/fixtures/rules/<rule-id>/`，按文件扩展名识别语言。判定语义（Task Spec「规则 fixture 格式」）：
 
 - 期望命中行 = 标注注释所处连续块指向的**下一个非空且非标注行**：`// ruleid: <id>`（TS/TSX/JS/JSX/Java/Go/Rust）或 `# ruleid: <id>`（Python）。同一行被多条规则命中时，垂直堆叠多条标注即可（都指向同一目标行）。
 - Runner 对每个 fixture 目录运行**全部启用规则**；期望多重集与实际命中的 `(规则 id, 文件, 起始行)` 三元组必须**计数一致**：标注了没命中 = 漏报；未标注的命中（含其他规则、度量的命中）= 过度匹配，同样失败。

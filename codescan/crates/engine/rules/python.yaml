@@ -1,4 +1,4 @@
-# Python AST 规则。fixture 位于 rules/tests/<rule-id>/。
+# Python AST 规则。fixture 位于 tests/fixtures/rules/<rule-id>/。
 # 格式见 docs/rules.md：@match 捕获决定 span；#eq?/#match? 为 tree-sitter 原生谓词。
 rules:
   # ---------- security ----------

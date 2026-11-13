@@ -1,9 +1,9 @@
 import { useState } from "react";
-import { ScanView } from "./components/ScanView";
-import { FindingsView } from "./components/FindingsView";
-import { RulesView } from "./components/RulesView";
-import { HistoryView } from "./components/HistoryView";
-import { SettingsView } from "./components/SettingsView";
+import { ScanView } from "./views/ScanView";
+import { FindingsView } from "./views/FindingsView";
+import { RulesView } from "./views/RulesView";
+import { HistoryView } from "./views/HistoryView";
+import { SettingsView } from "./views/SettingsView";
 
 type Tab = "scan" | "findings" | "rules" | "history" | "settings";
 

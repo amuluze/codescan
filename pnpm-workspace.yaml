@@ -1,4 +1,5 @@
-packages:
-  - apps/desktop
-allowBuilds:
-  esbuild: true
+# 根编排包没有依赖。pnpm 11 默认会在 pnpm run 前自动安装，
+# 从而在根生成空的 node_modules/ 与 pnpm-lock.yaml。
+# 这里只关闭根级自动安装；CodeScan 的独立工作区配置在 codescan/pnpm-workspace.yaml。
+packages: []
+verifyDepsBeforeRun: false
