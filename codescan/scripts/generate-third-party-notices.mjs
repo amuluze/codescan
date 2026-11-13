@@ -85,7 +85,9 @@ function repositoryUrl(value) {
 }
 
 function npmPackages() {
-  const inventory = JSON.parse(run('pnpm', ['licenses', 'ls', '--json', '--prod']))
+  const inventory = JSON.parse(run('pnpm', [
+    '--filter', '@codescan/desktop', 'licenses', 'list', '--json', '--prod',
+  ]))
   const packages = []
   for (const [groupLicense, entries] of Object.entries(inventory)) {
     for (const entry of entries) {
