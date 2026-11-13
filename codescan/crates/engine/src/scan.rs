@@ -524,7 +524,7 @@ fn run_ast_rule(
         let mut captures: Vec<(String, String)> = Vec::new();
         // (start_byte, end_byte, start_point, end_point)
         let mut primary: Option<(usize, usize, tree_sitter::Point, tree_sitter::Point)> = None;
-        for cap in m.captures {
+        for cap in m.captures() {
             let name = names
                 .get(cap.index as usize)
                 .cloned()
@@ -617,7 +617,7 @@ fn run_ast_rule(
 fn match_range(m: &tree_sitter::QueryMatch<'_, '_>) -> Option<(usize, usize)> {
     let mut start = usize::MAX;
     let mut end = 0usize;
-    for cap in m.captures {
+    for cap in m.captures() {
         start = start.min(cap.node.start_byte());
         end = end.max(cap.node.end_byte());
     }
