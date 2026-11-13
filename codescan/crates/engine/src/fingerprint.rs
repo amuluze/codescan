@@ -12,10 +12,20 @@ pub fn normalize(text: &str) -> String {
         .join("\n")
 }
 
+fn lowercase_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
 pub fn content_hash(normalized: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(normalized.as_bytes());
-    format!("{:x}", hasher.finalize())
+    lowercase_hex(&hasher.finalize())
 }
 
 fn span_sort_key(span: &Span) -> (usize, usize, usize, usize) {
@@ -69,7 +79,7 @@ pub fn finalize(raw: Vec<Finding>) -> Vec<Finding> {
         );
         let mut hasher = Sha256::new();
         hasher.update(fingerprint_input.as_bytes());
-        finding.fingerprint = format!("{:x}", hasher.finalize());
+        finding.fingerprint = lowercase_hex(&hasher.finalize());
     }
 
     // 第二遍：报告全序。
@@ -106,6 +116,23 @@ mod tests {
             flows: Vec::new(),
             fingerprint: String::new(),
         }
+    }
+
+    #[test]
+    fn content_hash_sha256_known_answer() {
+        assert_eq!(
+            content_hash("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn fingerprint_sha256_known_answer() {
+        let out = finalize(vec![raw_finding("r", "a.ts", 1, "eval(x)")]);
+        assert_eq!(
+            out[0].fingerprint,
+            "eae0a06753553f1fd5a3f71d29e290785da9c6bd3688774553e6d396b08e2fca"
+        );
     }
 
     #[test]

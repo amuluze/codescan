@@ -13,6 +13,7 @@ All notable changes to this project are documented in this file. The format is b
 - Third-party license notices are generated during check, development, and release builds and bundled into the desktop app; the generated file is no longer tracked
 - Repository layout: CodeScan's complete Rust/pnpm workspace now lives in `codescan/`, separate from the static `website/`; desktop pages use `src/views/`, and rule fixtures use `crates/engine/tests/fixtures/rules/`
 - Updated Rust and JavaScript dependencies, including tree-sitter 0.27 and rusqlite 0.41
+- Updated `sha2` to 0.11.1 with explicit lowercase-hex encoding; existing content hashes and fingerprints remain byte-identical
 
 ## [1.0.0] - 2026-11-12
 
