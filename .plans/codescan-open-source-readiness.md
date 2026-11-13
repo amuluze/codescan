@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 ---
 
 # Plan：开源发布准备修复
@@ -55,4 +55,4 @@ status: in-progress
 | 文档 | 17 份 Markdown 本地链接检查；YAML/JSON 解析；`git diff --check` | 通过 |
 | GitHub 设置 | 仓库公开后 API 启用并读回 Private Vulnerability Reporting、secret scanning、push protection、Dependabot alerts/security fixes；`main` 分支保护启用 | 通过；非 provider 自定义模式与 validity checks 当前不可用，记录为限制 |
 
-本地验证已通过；待 PR CI 合入后归档为 `done`。剩余 GitHub 功能可用性限制与 `glib` 上游告警记录在 Task Spec。
+本地验证已通过，策略由 PR #21 合入。剩余 GitHub 功能可用性限制与 `glib` 上游告警记录在 Task Spec。
