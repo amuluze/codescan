@@ -167,7 +167,7 @@ const content = [
   '',
   ...packages.flatMap((pkg) => ['', '='.repeat(78), render(pkg)]),
   '',
-].join('\n')
+].join('\n').replace(/\r\n?/g, '\n')
 
 if (check) {
   if (!existsSync(output) || readFileSync(output, 'utf8') !== content) {
