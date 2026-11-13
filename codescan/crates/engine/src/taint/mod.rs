@@ -44,7 +44,7 @@ pub(crate) fn collect_endpoints(
         while let Some(m) = it.next() {
             let mut union = Option::<(usize, usize)>::None;
             let mut best_match = Option::<(usize, usize, &str)>::None;
-            for cap in m.captures {
+            for cap in m.captures() {
                 let name = names
                     .get(cap.index as usize)
                     .cloned()
