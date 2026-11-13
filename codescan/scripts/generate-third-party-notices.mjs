@@ -172,7 +172,16 @@ const content = [
 
 if (check) {
   if (!existsSync(output) || readFileSync(output, 'utf8') !== content) {
+    const actual = existsSync(output) ? readFileSync(output, 'utf8') : ''
+    const expectedLines = content.split('\n')
+    const actualLines = actual.split('\n')
+    const limit = Math.max(expectedLines.length, actualLines.length)
+    let index = 0
+    while (index < limit && expectedLines[index] === actualLines[index]) index++
     console.error('THIRD_PARTY_NOTICES.txt is missing or stale; run pnpm run generate:notices')
+    console.error(`First difference at line ${index + 1}; generated lines=${expectedLines.length}, committed lines=${actualLines.length}`)
+    console.error(`Generated: ${JSON.stringify(expectedLines[index] ?? '<missing>')}`)
+    console.error(`Committed: ${JSON.stringify(actualLines[index] ?? '<missing>')}`)
     process.exit(1)
   }
 } else {
