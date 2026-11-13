@@ -141,7 +141,7 @@ WebView 不持有密钥明文，也不直接访问 SQLite。
 ## 目录结构
 
 ```text
-codescan/                 # CodeScan 工作区，与 ../website/ 同级
+codescan/                 # CodeScan 工作区
 ├── crates/engine/        # codescan-engine：规则编译、匹配、度量、污点、指纹、SARIF、基线
 │   ├── rules/            # 仅内置规则 YAML（按语言分文件）
 │   └── tests/            # 集成测试 + fixtures/rules/ 规则夹具
