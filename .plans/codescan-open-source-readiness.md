@@ -38,7 +38,7 @@ status: done
 - **依赖文本不完整**：已知无随包文本的 crate 走固定 SPDX 全文回退；未知许可证、无归属或所需全文缺失时 fail-closed，不联网猜测版权。
 - **生成物过大**：保留每个包的完整文本与归属，不做可能丢失归属的去重；不接受只列 SPDX 名称的降级。
 - **CI 实跑需推送**：本地验证后如尚未推送，真实 Actions 验收标为待远端执行，不声称已通过。
-- **私有仓库设置受限**：记录 API 原始状态，留待公开后配置，不升级仓库可见性绕过限制。
+- **公开后控制项**：仓库转为 public 后已补齐私密报告、secret scanning/push protection 与分支保护；非 provider 自定义模式和 validity checks 仍受 GitHub 功能可用性限制。
 
 ## 验证结论（2026-11-13）
 
@@ -51,6 +51,6 @@ status: done
 | 应用打包 | `task build:app`；`cmp` 源声明与 `.app/Contents/Resources/THIRD_PARTY_NOTICES.txt` | 通过；实际资源 3,123,486 字节 |
 | 完整门禁 | 根 `task check` | 通过，含 15 项 Vitest、Clippy、Rust 全工作区测试与 notices 检查 |
 | 文档 | 17 份 Markdown 本地链接检查；YAML/JSON 解析；`git diff --check` | 通过 |
-| GitHub 设置 | API 启用并读回 Discussions、Dependabot alerts/security fixes | 通过；private reporting/secret scanning/branch protection 受私有仓库限制 |
+| GitHub 设置 | 仓库公开后 API 启用并读回 Private Vulnerability Reporting、secret scanning、push protection、Dependabot alerts/security fixes；`main` 分支保护启用 | 通过；非 provider 自定义模式与 validity checks 当前不可用，记录为限制 |
 
-任务文档已归档为 `done`；剩余 GitHub 私有仓库限制与 `glib` 上游告警记录在 Task Spec。
+任务文档已归档为 `done`；剩余 GitHub 功能可用性限制与 `glib` 上游告警记录在 Task Spec。
