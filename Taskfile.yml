@@ -85,6 +85,14 @@ tasks:
 
   # ── 检查与测试 ────────────────────────────────────────────────────────
 
+  notices:
+    desc: 重新生成实际 macOS 分发依赖的第三方许可声明
+    cmd: pnpm run generate:notices
+
+  check:notices:
+    desc: 检查第三方许可声明是否与锁定依赖同步（只读）
+    cmd: pnpm run check:notices
+
   typecheck:
     desc: TypeScript 类型检查（strict）
     cmd: pnpm run typecheck
@@ -106,7 +114,7 @@ tasks:
     cmd: pnpm run check:rust
 
   check:
-    desc: 提交前完整门禁（typecheck + vitest + 构建 + clippy + cargo test）
+    desc: 提交前完整门禁（typecheck + vitest + 构建 + clippy + cargo test + 第三方声明漂移检查）
     cmd: pnpm run check
 
   # ── 扫描自身（dogfood）───────────────────────────────────────────────

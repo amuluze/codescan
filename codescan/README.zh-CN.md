@@ -160,7 +160,7 @@ codescan/                 # CodeScan 工作区，与 ../website/ 同级
 ```bash
 task install        # 从仓库根安装此工作区依赖
 task dev:app        # Tauri 桌面开发模式
-task check          # 完整门禁：typecheck + vitest + 构建 + clippy -D warnings + cargo test
+task check          # 完整门禁：typecheck + vitest + 构建 + clippy -D warnings + cargo test + 第三方声明
 ```
 
 | 任务 | 作用 |

@@ -160,7 +160,7 @@ codescan/                 # CodeScan workspace, sibling of ../website/
 ```bash
 task install        # install dependencies in this workspace from the repository root
 task dev:app        # Tauri desktop dev mode
-task check          # full gate: typecheck + vitest + build + clippy -D warnings + cargo test
+task check          # full gate: typecheck + vitest + build + clippy -D warnings + cargo test + notices
 ```
 
 | Task | Purpose |

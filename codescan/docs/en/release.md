@@ -12,7 +12,7 @@ bump version (package.json / apps/desktop/package.json / tauri.conf.json)
   → .github/workflows/release.yml (macos-15, arm64 only):
       conditional secret mapping (injected only when non-empty)
       → scripts/ci-macos-credentials.sh (.p12 → temporary keychain / .p8 → file)
-      → pnpm run build:dmg (generate-release-config + tauri sign-only build)
+      → pnpm run build:dmg (generate-notices + generate-release-config + tauri sign-only build)
       → xcrun notarytool notarize the DMG (3 retries) + stapler staple/validate
       → scripts/release-signing-check.sh (signature acceptance)
       → scripts/generate-latest-json.mjs + gh release create --draft + asset upload
@@ -20,6 +20,10 @@ bump version (package.json / apps/desktop/package.json / tauri.conf.json)
 ```
 
 Local release: run `task build:dmg` from the repository root (it auto-sources `~/.codescan/release-credentials.env`); artifacts land in `codescan/target/aarch64-apple-darwin/release/bundle/` (not under `src-tauri`).
+
+## Third-party notices
+
+Run `task notices` to regenerate `apps/desktop/src-tauri/THIRD_PARTY_NOTICES.txt` from Cargo's actual macOS aarch64 dependency graph and production JavaScript dependencies. `task check` uses `--check` to reject stale notices. Release builds regenerate the file automatically, and Tauri bundles it as `.app/Contents/Resources/THIRD_PARTY_NOTICES.txt`. After dependency or license changes, run `task notices` and commit the result. Generation fails if required license text or attribution is unavailable.
 
 ## Credential conventions
 

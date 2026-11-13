@@ -17,6 +17,8 @@
     "check": "pnpm --dir codescan run check",
     "build:app": "pnpm --dir codescan run build:app",
     "build:dmg": "pnpm --dir codescan run build:dmg",
+    "generate:notices": "pnpm --dir codescan run generate:notices",
+    "check:notices": "pnpm --dir codescan run check:notices",
     "generate:release-config": "pnpm --dir codescan run generate:release-config",
     "release:signing-check": "pnpm --dir codescan run release:signing-check",
     "release:latest-json": "pnpm --dir codescan run release:latest-json",

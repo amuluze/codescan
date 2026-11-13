@@ -12,7 +12,7 @@ bump 版本（package.json / apps/desktop/package.json / tauri.conf.json 三处�
   → .github/workflows/release.yml（macos-15，arm64 单目标）：
       Secrets 条件映射（非空才注入 GITHUB_ENV）
       → scripts/ci-macos-credentials.sh（.p12 → 临时钥匙串 / .p8 → 落盘）
-      → pnpm run build:dmg（generate-release-config + tauri sign-only 构建）
+      → pnpm run build:dmg（generate-notices + generate-release-config + tauri sign-only 构建）
       → xcrun notarytool 公证 DMG（3 次重试）+ stapler staple/validate
       → scripts/release-signing-check.sh 签名验收
       → scripts/generate-latest-json.mjs + gh release create --draft + 资产上传
@@ -21,6 +21,13 @@ bump 版本（package.json / apps/desktop/package.json / tauri.conf.json 三处�
 
 本地发布：在仓库根执行 `task build:dmg`（自动 source `~/.codescan/release-credentials.env`），
 产物在 CodeScan workspace 的 `codescan/target/aarch64-apple-darwin/release/bundle/`（不在 src-tauri 下）。
+
+## 第三方许可声明
+
+`task notices` 根据 Cargo 的 macOS aarch64 实际依赖图和生产 JS 依赖重新生成
+`apps/desktop/src-tauri/THIRD_PARTY_NOTICES.txt`；`task check` 会通过 `--check` 拒绝过期声明。
+发布构建自动重新生成，Tauri 将该文件打包到 `.app/Contents/Resources/THIRD_PARTY_NOTICES.txt`。
+依赖或许可证变化后必须运行 `task notices` 并提交声明变化；缺失许可全文或归属时生成器直接失败。
 
 ## 凭据约定
 

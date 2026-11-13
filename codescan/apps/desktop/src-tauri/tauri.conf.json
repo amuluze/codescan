@@ -32,6 +32,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": ["THIRD_PARTY_NOTICES.txt"],
     "category": "DeveloperTool",
     "shortDescription": "Local-first code scanning with a self-built AST engine",
     "icon": [

@@ -6,17 +6,27 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
+- GitHub Actions CI on pushes to `main` and pull requests, including third-party notice drift checks
+- Third-party license notices bundled into the desktop app
+
+### Changed
+
+- Repository layout: CodeScan's complete Rust/pnpm workspace now lives in `codescan/`, separate from the static `website/`; desktop pages use `src/views/`, and rule fixtures use `crates/engine/tests/fixtures/rules/`
+- Updated Rust and JavaScript dependencies, including tree-sitter 0.27 and rusqlite 0.41
+
+## [1.0.0] - 2026-11-12
+
+### Added
+
 - LLM source review on the Scan page: three-dimension coverage (security / business logic / code quality), language-round-robin file selection, paged continuation with cursor, per-batch sending with automatic split-on-truncation, per-item copy buttons
 - Provider test button in Settings: minimal probe request with readable errors, never leaks the API key
 - API Key moved into the Provider card for a single cohesive configuration surface
 - Copy buttons for batch triage, streaming triage, and triage suggestions
 - Delete scan history with two-step confirmation; findings and derived baselines cascade
-- GitHub Actions CI: macOS runner, pnpm frozen install, frontend typecheck/test/build, clippy `-D warnings`, cargo test
 - CodeScan logo and app icon (Tauri icon set regenerated)
 
 ### Changed
 
-- Repository layout: CodeScan's complete Rust/pnpm workspace now lives in `codescan/`, separate from the static `website/`; desktop pages use `src/views/`, and rule fixtures use `crates/engine/tests/fixtures/rules/`
 - Anthropic response parsing: skip thinking blocks, concatenate text blocks (fixes `content[0].text` failure on extended-thinking responses)
 - Review requests batch at 4 files / 32 KiB per request with automatic split on `max_tokens` truncation
 - Scan / Findings / Settings pages: unified input and select height (36px), consistent card layout, responsive detail pane

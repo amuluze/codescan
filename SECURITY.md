@@ -10,7 +10,7 @@ This policy covers the repository, the released desktop app, the CLI, and the pu
 
 Please do **not** open a public issue for a security problem.
 
-Report it privately via **GitHub Security Advisories**: *Security* → *Report a vulnerability* on the repository page. If that is unavailable to you, open a regular issue with the title `[security]` and no technical details, so a private channel can be arranged.
+Report it privately via **GitHub Security Advisories**: *Security* → *Report a vulnerability* on the repository page. If that is unavailable, email [314901758@qq.com](mailto:314901758@qq.com). Do not open a public issue containing vulnerability details.
 
 Please include:
 
