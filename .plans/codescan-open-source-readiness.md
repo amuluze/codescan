@@ -26,7 +26,7 @@ status: in-progress
 
 ## 关键实现决策
 
-- 包名/版本/许可表达式以 `cargo metadata --locked --filter-platform aarch64-apple-darwin` 和 `pnpm licenses ls --json --prod` 为事实来源；Cargo 从 workspace members 沿过滤后的 `resolve` 依赖图求可达集合，不直接使用未过滤的 `packages` 数组。按包名/版本稳定排序；不把本机绝对路径写入产物，生成过程不访问网络 API。
+- 包名/版本/许可表达式以 `cargo metadata --locked --filter-platform aarch64-apple-darwin` 和 `pnpm list --prod --depth Infinity` 为事实来源；Cargo 从 workspace members 沿过滤后的 `resolve` 依赖图求可达集合，不直接使用未过滤的 `packages` 数组；pnpm 只沿父包真实 `dependencies` 下钻，排除 dev 与可选 peer。按包名/版本稳定排序；不把本机绝对路径写入产物，生成过程不访问网络 API。
 - 优先保留各依赖包内原始 license/notice/copying 文本，不去重、不省略各包归属。crate 未随包提供文本时，使用生成器内固定的标准 SPDX 全文并列出 authors/repository；`OR` 表达式选择其中的 MIT 并在文中注明，`AND` 表达式必须包含全部文本。当前已知回退只需 MIT、BSD-3-Clause、MPL-2.0；无作者时使用「the `<package>` authors」并保留 upstream repository。无 authors 且无 upstream repository 时失败退出，并在错误信息中列出包名与许可表达式。未知表达式或所需标准全文缺失时失败。
 - 每个包条目统一包含名称、版本、许可表达式、authors/repository（存在时）及正文来源标记（package file 或 standard SPDX fallback）。
 - `--check` 只比较应生成内容，不写文件；缺失或漂移均非零退出。

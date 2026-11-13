@@ -85,25 +85,34 @@ function repositoryUrl(value) {
 }
 
 function npmPackages() {
-  const inventory = JSON.parse(run('pnpm', [
-    '--filter', '@codescan/desktop', 'licenses', 'list', '--json', '--prod',
+  const projects = JSON.parse(run('pnpm', [
+    '--filter', '@codescan/desktop', 'list', '--prod', '--depth', 'Infinity', '--json',
   ]))
   const packages = []
-  for (const [groupLicense, entries] of Object.entries(inventory)) {
-    for (const entry of entries) {
-      for (const packageDir of entry.paths) {
-        const manifest = JSON.parse(readFileSync(path.join(packageDir, 'package.json'), 'utf8'))
-        packages.push({
-          ecosystem: 'JavaScript',
-          name: manifest.name ?? entry.name,
-          version: manifest.version,
-          license: manifest.license ?? groupLicense,
-          authors: [...metadataNames(manifest.author), ...metadataNames(manifest.contributors)],
-          repository: repositoryUrl(manifest.repository) ?? entry.homepage,
-          files: licenseFiles(packageDir),
-        })
-      }
+  const seen = new Set()
+  const visit = (dependencies, parentManifest) => {
+    for (const [name, info] of Object.entries(dependencies ?? {})) {
+      // 旧版 pnpm 会把可选 peer 混入 --prod 树；只沿父包真实 dependencies 下钻。
+      if (parentManifest && !parentManifest.dependencies?.[name]) continue
+      if (!info.path) throw new Error(`Installed dependency path missing: ${name}`)
+      if (seen.has(info.path)) continue
+      seen.add(info.path)
+      const manifest = JSON.parse(readFileSync(path.join(info.path, 'package.json'), 'utf8'))
+      packages.push({
+        ecosystem: 'JavaScript',
+        name: manifest.name ?? name,
+        version: manifest.version,
+        license: manifest.license,
+        authors: [...metadataNames(manifest.author), ...metadataNames(manifest.contributors)],
+        repository: repositoryUrl(manifest.repository) ?? manifest.homepage,
+        files: licenseFiles(info.path),
+      })
+      visit(info.dependencies, manifest)
     }
+  }
+  for (const project of projects) {
+    const manifest = JSON.parse(readFileSync(path.join(project.path, 'package.json'), 'utf8'))
+    visit(project.dependencies, manifest)
   }
   return packages
 }
