@@ -9,6 +9,7 @@
   },
   "scripts": {
     "dev": "pnpm --filter @codescan/desktop dev",
+    "dev:app": "pnpm run generate:notices && pnpm --filter @codescan/desktop tauri dev",
     "build": "pnpm --filter @codescan/desktop build",
     "typecheck": "pnpm --filter @codescan/desktop typecheck",
     "test": "pnpm --filter @codescan/desktop test",
@@ -16,7 +17,7 @@
     "test:rust": "cargo test --workspace",
     "check:rust": "cargo clippy --workspace --all-targets -- -D warnings",
     "generate:notices": "node scripts/generate-third-party-notices.mjs",
-    "check:notices": "node scripts/generate-third-party-notices.mjs --check",
+    "check:notices": "node scripts/generate-third-party-notices.mjs",
     "check": "pnpm check:notices && pnpm typecheck && pnpm test && pnpm build && pnpm check:rust && pnpm test:rust",
     "build:app": "pnpm run generate:notices && pnpm --filter @codescan/desktop tauri build --target aarch64-apple-darwin --bundles app",
     "build:dmg": "pnpm run generate:notices && pnpm run generate:release-config && pnpm --filter @codescan/desktop tauri build --target aarch64-apple-darwin --config src-tauri/tauri.ci.conf.json",
@@ -24,7 +25,7 @@
     "release:signing-check": "bash scripts/release-signing-check.sh",
     "release:latest-json": "node scripts/generate-latest-json.mjs",
     "tauri": "pnpm --filter @codescan/desktop tauri",
-    "clean": "rm -rf apps/desktop/dist && cargo clean",
+    "clean": "rm -rf apps/desktop/dist && rm -f apps/desktop/src-tauri/THIRD_PARTY_NOTICES.txt && cargo clean",
     "scan": "cargo run -q -p codescan-cli -- scan .",
     "scan:sarif": "mkdir -p artifacts && cargo run -q -p codescan-cli -- scan . --format sarif --out artifacts/codescan.sarif && echo 'SARIF: artifacts/codescan.sarif'"
   }

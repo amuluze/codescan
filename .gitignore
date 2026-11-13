@@ -7,6 +7,8 @@ coverage/
 codescan/apps/desktop/src-tauri/gen/
 # 条件构建配置（由 codescan/scripts/generate-release-config.mjs 按 updater 凭据生成）
 codescan/apps/desktop/src-tauri/tauri.ci.conf.json
+# 第三方许可声明（构建时生成并打入 .app，不提交）
+codescan/apps/desktop/src-tauri/THIRD_PARTY_NOTICES.txt
 artifacts/
 
 # 调研报告（仅本地保留，不入库）
