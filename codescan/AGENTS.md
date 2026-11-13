@@ -7,7 +7,7 @@ CodeScan 工作区的本地工程约定。上位约束为仓库根 `../AGENTS.md
 - 本目录是独立 Rust/pnpm 工作区；Cargo 入口为 `Cargo.toml`，Node 入口为 `package.json` 与 `pnpm-workspace.yaml`。
 - `crates/engine/`：无 Tauri/UI 依赖的确定性引擎，全部能力可无头测试。
 - `crates/cli/`：无头 CLI；`apps/desktop/`：React UI 与 Tauri 命令层。
-- 不得依赖 `../website/`；官网只复制品牌与截图资产，不参与本工作区构建。
+- 不依赖仓库外站点源码或其构建产物。
 
 ## 代码约定
 

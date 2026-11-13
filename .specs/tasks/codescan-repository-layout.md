@@ -4,6 +4,8 @@ status: done
 
 # Task Spec：CodeScan 与官网分根及 CodeScan 目录分层整理
 
+> 2026-11-13 更新：官网源码已迁出公开仓，改由私有 `amuluze/codescan-pro` 维护；本规格中 `website/` 同级边界及 T6、T8 的官网相关验收成为历史记录，CodeScan 目录分层验收仍有效。
+
 task-id: `codescan-repository-layout`
 
 ## 目标

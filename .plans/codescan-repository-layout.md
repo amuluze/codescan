@@ -4,6 +4,8 @@ status: done
 
 # Plan：CodeScan 与官网分根及 CodeScan 目录分层整理
 
+> 2026-11-13 更新：官网源码已迁至私有 `amuluze/codescan-pro`，公开仓不再包含 `website/`；本文件中的官网目录/资产复制步骤仅作历史记录。
+
 对应 Task Spec：`.specs/tasks/codescan-repository-layout.md`；领域约束：`.specs/domain/scan-engine.md`。本文件只描述迁移路径，不定义额外验收。
 
 ## 目标布局

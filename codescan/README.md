@@ -141,7 +141,7 @@ The WebView never holds secrets and never touches SQLite directly.
 ## Repository layout
 
 ```text
-codescan/                 # CodeScan workspace, sibling of ../website/
+codescan/                 # CodeScan workspace
 ├── crates/engine/        # codescan-engine: rule compilation, matching, metrics, taint, fingerprints, SARIF, baselines
 │   ├── rules/            # built-in YAML rules only (per language)
 │   └── tests/            # integration tests + fixtures/rules/ rule fixtures
@@ -187,7 +187,6 @@ task check          # full gate: typecheck + vitest + build + clippy -D warnings
 | [.specs/tasks/](../.specs/tasks/) | Task specs with objectively verifiable acceptance criteria |
 | [AGENTS.md](AGENTS.md) · [Repository conventions](../AGENTS.md) | CodeScan workspace conventions and shared workflow |
 | [CHANGELOG.md](CHANGELOG.md) | Release notes (Keep a Changelog) |
-| [`website/`](../website/) | Official website source (static site, deployable to GitHub Pages) |
 
 ## Known limitations
 

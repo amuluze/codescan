@@ -34,9 +34,8 @@
 | 产品面 | 实现位置 | 用户 | 设计目标 |
 |---|---|---|---|
 | 桌面应用 | `apps/desktop`（Tauri 2 + React 19 + Rust） | 开发者 / 安全与质量负责人 | 精确、可核对：结果可复现、证据可定位、门禁差异可解释 |
-| 官方网站 | `../website/`（独立静态 HTML/CSS/JS，无构建步骤） | 访客 / 潜在用户 | 讲清「这是什么、怎么装、凭什么可信」；以 §3.1 母色为唯一品牌来源 |
 
-本文后续章节默认描述桌面应用；官网拥有独立的实现与维护约定，仅共享品牌来源。
+本文后续章节默认描述桌面应用。
 
 ### 2.1 桌面应用的产品面性质
 
@@ -56,7 +55,7 @@
 
 - 字标（`logo.svg`）只用于品牌位：README 首图、文档头图、网站顶栏；产品界面内（导航、页面标题、窗口标题栏）不重复绘制字标，避免与图标重复表达。
 - 产品名统一写作 **CodeScan**；打包标题沿用 `apps/desktop/src-tauri/tauri.conf.json` 的 `Codescan`，不为对齐大小写而改动品牌写法。
-- 官网如落地，只允许浅色底 + monochrome 字标（待补资产，见 §3.5 与 §11），不得直接用现 wordmark。
+- 官网已移出公开仓，官网视觉规则不由本文维护。
 
 ---
 
@@ -471,7 +470,7 @@ chip 尺寸：严重级 chip `padding 1px 8px` + 11.5px/600 ≈ 20px 高；计�
 | 5 | 输入框边界 | `global.css` 输入规则 | 描边改 `var(--border-strong)`，保证可辨识 |
 | 6 | 字体栈补齐 | `global.css` `:root` | 补 `"SF Pro Display"`（与 `logo.svg` 字标字体栈一致） |
 | 7 | 严重级文案统一 | `views/HistoryView.tsx` | 严重级/维度沿用 `labels.ts` 的中文文案，不直出枚举值 |
-| 8 | monochrome 字标 | `assets/brand/` | 新增单色变体，供浅色背景（官网）使用 |
+| 8 | monochrome 字标 | `assets/brand/` | 新增单色变体，供浅色背景使用 |
 | 9 | 打包图标一致性 | `apps/desktop/src-tauri/icons/*` | 由 `icon.svg` 栅格化，保持圆角与配色一致 |
 | 10 | 导航当前项语义 | `apps/desktop/src/App.tsx` | 当前标签补 `aria-current="page"`（或 `role="tablist"` + `aria-selected`），供辅助技术识别 |
 | 11 | 全局焦点样式 | `global.css` | 补 `:focus-visible` 统一规则（2px `--accent` + 2px offset）；现状只有输入类控件有 focus 光晕 |
