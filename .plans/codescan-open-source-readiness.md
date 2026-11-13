@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 ---
 
 # Plan：开源发布准备修复
@@ -44,12 +44,13 @@ status: in-progress
 
 | 验收 | 已执行证据 | 结果 |
 |---|---|---|
-| CI 配置 | Python YAML 解析 `.github/workflows/ci.yml`；JSON 解析 package/Tauri 配置 | 通过；真实 Actions 运行待推送 |
-| notices 完整性 | `pnpm run generate:notices`；重复生成后 `pnpm run check:notices` | 358 包；通过，无本机绝对路径 |
+| CI 配置 | Python YAML 解析 `.github/workflows/ci.yml`；JSON 解析 package/Tauri 配置；push 运行 | 通过；run 43392175560 全绿 |
+| 环境确定性 | CI 负测发现 CRLF 与 pnpm 11.9/11.28 可选 peer 差异；改为 LF 归一、真实 dependencies 下钻、pnpm 固定 11.28.11 | 通过；同一声明在本地与 CI 均生成 356 包 |
+| notices 完整性 | `pnpm run generate:notices`；重复生成后 `pnpm run check:notices` | 356 包；通过，无本机绝对路径 |
 | notices 漂移 | 临时改变标题后运行 `check:notices`，随后恢复 | 按预期非零退出；恢复后通过 |
 | 应用打包 | `task build:app`；`cmp` 源声明与 `.app/Contents/Resources/THIRD_PARTY_NOTICES.txt` | 通过；实际资源 3,123,486 字节 |
 | 完整门禁 | 根 `task check` | 通过，含 15 项 Vitest、Clippy、Rust 全工作区测试与 notices 检查 |
 | 文档 | 17 份 Markdown 本地链接检查；YAML/JSON 解析；`git diff --check` | 通过 |
 | GitHub 设置 | API 启用并读回 Discussions、Dependabot alerts/security fixes | 通过；private reporting/secret scanning/branch protection 受私有仓库限制 |
 
-实现审查后如有修订，以最终改动和实际命令结果为准。任务未推送，故 Spec/Plan 暂不置 `done`。
+任务文档已归档为 `done`；剩余 GitHub 私有仓库限制与 `glib` 上游告警记录在 Task Spec。

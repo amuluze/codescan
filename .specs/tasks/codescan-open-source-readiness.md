@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: done
 ---
 
 # Task Spec：开源发布准备修复
@@ -47,8 +47,10 @@ task-id: `codescan-open-source-readiness`
 ## 实施记录（2026-11-13）
 
 - 已新增 CI、第三方声明生成器/漂移检查、Tauri resource 和中英文发布文档；v1.0.0 变更记录已归档。
-- 生成器覆盖 358 个实际分发包；真实 `task build:app` 后，`.app/Contents/Resources/THIRD_PARTY_NOTICES.txt` 与生成文件逐字节一致。过期声明负测按预期失败，`task check` 全量通过。
+- 生成器覆盖 356 个实际分发包；真实 `task build:app` 后，`.app/Contents/Resources/THIRD_PARTY_NOTICES.txt` 与生成文件一致。过期声明负测按预期失败，`task check` 全量通过。
+- 首次远端 CI 暴露出生成器的两类环境依赖：CRLF 规范化与 pnpm 11.9/11.28 对可选 peer 的 `--prod` 语义差异。生成结果统一 LF；JS 清单改为沿 `pnpm list --prod` 中父包真实 `dependencies` 下钻；CI/Release 固定 pnpm `11.28.11`。
+- 远端 CI 运行 [43392175560](https://github.com/amuluze/codescan/actions/runs/43392175560) 在提交 `2efab4d` 上通过全部检查（5m30s）。
 - GitHub API 已启用 Discussions、Dependabot vulnerability alerts 和 automated security fixes；行为准则、安全策略与 Issue 安全联系均使用维护者公开邮箱作为可用私密渠道。
 - 私有仓库下 private vulnerability reporting 返回 404、secret scanning 返回 422、branch protection 返回 403；这些项目保留到仓库公开后配置，未改变可见性。
 - Dependabot 启用后发现 `glib 0.18.5` 中危告警（GHSA-wrw7-89jp-8q8g，修复版本 0.20.0）。该 crate 不在受支持 macOS 目标依赖图或发布声明中；告警保持打开，等待兼容上游修复，未静默关闭。
-- 尚未提交/推送，因此真实 GitHub Actions CI 运行与远端 Issue 联系入口仍为待验证项；任务保持 `in-progress`。
+- GitHub Actions CI 已提交并推送；真实 push 运行已通过，Issue 联系入口随同次推送生效。
