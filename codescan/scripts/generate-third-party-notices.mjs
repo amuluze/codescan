@@ -155,7 +155,8 @@ function render(pkg) {
 }
 
 const packages = [...cargoPackages(), ...npmPackages()]
-  .sort((a, b) => `${a.ecosystem}:${a.name}@${a.version}`.localeCompare(`${b.ecosystem}:${b.name}@${b.version}`, 'en'))
+  .map((pkg) => ({ ...pkg, sortKey: `${pkg.ecosystem}:${pkg.name}@${pkg.version}` }))
+  .sort((a, b) => (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0))
 const content = [
   'CodeScan Third-Party Notices',
   '============================',
