@@ -32,5 +32,5 @@ tempfile = "3"
 tokio = { version = "1", features = ["rt", "time"] }
 # updater 工件发布验收（tests/updater_signature.rs）：与 tauri-plugin-updater
 # 更新时同一 minisign 验证实现，对已构建工件验证 tauri.release.conf.json 公钥
-base64 = "0.22"
+base64 = "0.23"
 minisign-verify = "0.2"
