@@ -24,10 +24,11 @@ bump 版本（package.json / apps/desktop/package.json / tauri.conf.json 三处�
 
 ## 第三方许可声明
 
-`task notices` 根据 Cargo 的 macOS aarch64 实际依赖图和生产 JS 依赖重新生成
-`apps/desktop/src-tauri/THIRD_PARTY_NOTICES.txt`；`task check` 会通过 `--check` 拒绝过期声明。
-发布构建自动重新生成，Tauri 将该文件打包到 `.app/Contents/Resources/THIRD_PARTY_NOTICES.txt`。
-依赖或许可证变化后必须运行 `task notices` 并提交声明变化；缺失许可全文或归属时生成器直接失败。
+`task notices` 根据 Cargo 的 macOS aarch64 实际依赖图和生产 JS 依赖生成
+`apps/desktop/src-tauri/THIRD_PARTY_NOTICES.txt`。该文件是构建产物，已被 `.gitignore`
+排除，不提交；`task check` 和 `task dev:app`、`task build:app`、`task build:dmg`
+均会重新生成。Tauri 将其打包到 `.app/Contents/Resources/THIRD_PARTY_NOTICES.txt`。
+依赖或许可证变化无需提交生成物；缺失许可全文或归属时生成器直接失败。
 
 ## 凭据约定
 

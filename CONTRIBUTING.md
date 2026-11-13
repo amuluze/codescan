@@ -28,7 +28,7 @@ If your change alters domain behaviour (finding model, fingerprints, gating, det
 
 | Command | Purpose |
 |---|---|
-| `task check` | typecheck + vitest + build + clippy `-D warnings` + `cargo test --workspace` + third-party notice drift check |
+| `task check` | typecheck + vitest + build + clippy `-D warnings` + `cargo test --workspace` + third-party notice generation check |
 | `task test` | Frontend unit tests |
 | `task test:rust` | Engine, rule suites, command layer, CLI |
 | `task test:cli` | CLI black-box tests (exit codes, output formats, SARIF upload dry-run) |

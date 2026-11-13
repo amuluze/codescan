@@ -23,7 +23,7 @@ Local release: run `task build:dmg` from the repository root (it auto-sources `~
 
 ## Third-party notices
 
-Run `task notices` to regenerate `apps/desktop/src-tauri/THIRD_PARTY_NOTICES.txt` from Cargo's actual macOS aarch64 dependency graph and production JavaScript dependencies. `task check` uses `--check` to reject stale notices. Release builds regenerate the file automatically, and Tauri bundles it as `.app/Contents/Resources/THIRD_PARTY_NOTICES.txt`. After dependency or license changes, run `task notices` and commit the result. Generation fails if required license text or attribution is unavailable.
+Run `task notices` to generate `apps/desktop/src-tauri/THIRD_PARTY_NOTICES.txt` from Cargo's actual macOS aarch64 dependency graph and production JavaScript dependencies. The file is a gitignored build artifact and is not committed. `task check`, `task dev:app`, `task build:app`, and `task build:dmg` regenerate it. Tauri bundles it as `.app/Contents/Resources/THIRD_PARTY_NOTICES.txt`. Dependency or license changes require no generated-file commit; generation fails if required license text or attribution is unavailable.
 
 ## Credential conventions
 

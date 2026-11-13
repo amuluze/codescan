@@ -26,7 +26,7 @@ Run tasks from the repository root:
 ```bash
 task install   # install CodeScan dependencies
 task dev:app   # Tauri desktop development mode
-task check     # typecheck + Vitest + frontend build + Clippy + Rust tests + notices
+task check     # typecheck + Vitest + frontend build + Clippy + Rust tests + notices generation
 ```
 
 Other common entry points:

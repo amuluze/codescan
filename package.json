@@ -8,6 +8,7 @@
   "scripts": {
     "setup": "pnpm --dir codescan install",
     "dev": "pnpm --dir codescan run dev",
+    "dev:app": "pnpm --dir codescan run dev:app",
     "build": "pnpm --dir codescan run build",
     "typecheck": "pnpm --dir codescan run typecheck",
     "test": "pnpm --dir codescan run test",

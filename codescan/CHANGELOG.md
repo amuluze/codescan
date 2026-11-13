@@ -6,11 +6,11 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Added
 
-- GitHub Actions CI on pushes to `main` and pull requests, including third-party notice drift checks
-- Third-party license notices bundled into the desktop app
+- GitHub Actions CI on pushes to `main` and pull requests, including third-party notice generation checks
 
 ### Changed
 
+- Third-party license notices are generated during check, development, and release builds and bundled into the desktop app; the generated file is no longer tracked
 - Repository layout: CodeScan's complete Rust/pnpm workspace now lives in `codescan/`, separate from the static `website/`; desktop pages use `src/views/`, and rule fixtures use `crates/engine/tests/fixtures/rules/`
 - Updated Rust and JavaScript dependencies, including tree-sitter 0.27 and rusqlite 0.41
 

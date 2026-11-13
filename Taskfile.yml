@@ -29,7 +29,7 @@ tasks:
 
   dev:app:
     desc: Tauri 桌面开发模式（启用 SQLite / 文件对话框）
-    cmd: pnpm run tauri -- dev
+    cmd: pnpm run dev:app
 
   # ── 编译（仅 macOS Apple Silicon）────────────────────────────────────
 
@@ -86,11 +86,11 @@ tasks:
   # ── 检查与测试 ────────────────────────────────────────────────────────
 
   notices:
-    desc: 重新生成实际 macOS 分发依赖的第三方许可声明
+    desc: 生成实际 macOS 分发依赖的第三方许可声明（构建产物，不提交）
     cmd: pnpm run generate:notices
 
   check:notices:
-    desc: 检查第三方许可声明是否与锁定依赖同步（只读）
+    desc: 验证第三方许可声明生成器（生成但不比较已提交文件）
     cmd: pnpm run check:notices
 
   typecheck:
@@ -114,7 +114,7 @@ tasks:
     cmd: pnpm run check:rust
 
   check:
-    desc: 提交前完整门禁（typecheck + vitest + 构建 + clippy + cargo test + 第三方声明漂移检查）
+    desc: 提交前完整门禁（typecheck + vitest + 构建 + clippy + cargo test + 第三方声明生成检查）
     cmd: pnpm run check
 
   # ── 扫描自身（dogfood）───────────────────────────────────────────────

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// 生成实际 macOS 分发依赖的第三方许可声明。
+// 生成实际 macOS 分发依赖的第三方许可声明（构建产物，不提交）。
 // 包内 license/notice/copying/copyright 文件优先；缺失时仅使用固定 SPDX 模板。
-// 不记录时间或本机路径；--check 不写文件，缺失/漂移均失败。
+// 输出不记录时间或本机路径；构建与检查都会重新生成。
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
@@ -11,11 +11,6 @@ import { fileURLToPath } from 'node:url'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const templates = path.join(root, 'scripts/license-templates')
 const output = path.join(root, 'apps/desktop/src-tauri/THIRD_PARTY_NOTICES.txt')
-const check = process.argv.includes('--check')
-if (process.argv.slice(2).some((arg) => arg !== '--check')) {
-  console.error('Usage: node scripts/generate-third-party-notices.mjs [--check]')
-  process.exit(2)
-}
 
 function run(command, args) {
   return execFileSync(command, args, {
@@ -181,21 +176,5 @@ const content = [
   '',
 ].join('\n').replace(/\r\n?/g, '\n')
 
-if (check) {
-  if (!existsSync(output) || readFileSync(output, 'utf8') !== content) {
-    const actual = existsSync(output) ? readFileSync(output, 'utf8') : ''
-    const expectedLines = content.split('\n')
-    const actualLines = actual.split('\n')
-    const limit = Math.max(expectedLines.length, actualLines.length)
-    let index = 0
-    while (index < limit && expectedLines[index] === actualLines[index]) index++
-    console.error('THIRD_PARTY_NOTICES.txt is missing or stale; run pnpm run generate:notices')
-    console.error(`First difference at line ${index + 1}; generated lines=${expectedLines.length}, committed lines=${actualLines.length}`)
-    console.error(`Generated: ${JSON.stringify(expectedLines[index] ?? '<missing>')}`)
-    console.error(`Committed: ${JSON.stringify(actualLines[index] ?? '<missing>')}`)
-    process.exit(1)
-  }
-} else {
-  writeFileSync(output, content)
-}
-console.log(`${check ? 'Verified' : 'Generated'} ${packages.length} third-party package notices`)
+writeFileSync(output, content)
+console.log(`Generated ${packages.length} third-party package notices`)
