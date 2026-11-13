@@ -489,7 +489,12 @@ fn unreachable_findings(
         }
     });
     for block in blocks {
-        let children = named_children(block);
+        let mut children = named_children(block);
+        // tree-sitter-go 0.25 wraps block statements in a single statement_list.
+        // Flatten it so terminal statements and their successors stay in lexical order.
+        if children.len() == 1 && children[0].kind() == "statement_list" {
+            children = named_children(children[0]);
+        }
         let mut terminal_seen = false;
         for child in children {
             // 注释是 extra 节点，不占语句序位（否则「return 后注释」会顶替首个不可达语句）。
