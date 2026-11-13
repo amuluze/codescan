@@ -23,7 +23,7 @@ tauri = { version = "2", features = [] }
 # 按签名凭据注入）时 lib.rs 才注册 updater 插件，开发/无密钥构建保持未配置。
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 reqwest = { version = "0.13.4", features = ["json", "stream"] }
 futures-util = "0.3"
 
