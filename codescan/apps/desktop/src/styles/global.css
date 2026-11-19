@@ -1268,6 +1268,18 @@ button.danger-text:hover:not(:disabled) {
   color: var(--fg-strong);
 }
 
+/* 结果提示对话框：一次性操作反馈，窄于目录选择器。 */
+.notice-modal {
+  width: min(440px, 100%);
+}
+
+.notice-message {
+  margin: 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+}
+
 .picker-path {
   flex: 1;
   min-width: 0;
