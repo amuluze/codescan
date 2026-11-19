@@ -20,9 +20,10 @@ const PHASE_LABEL: Record<string, string> = {
 export function ScanView() {
   const { phase, workspace, progress, error, stats, setWorkspace, startScan, cancelScan } =
     useScanStore();
-  const { review, reviewError, reviewProgress, runReview, resetReview } = useLlmStore();
+  const { review, reviewRunning, reviewError, reviewProgress, runReview, resetReview } =
+    useLlmStore();
   const [reviewLimit, setReviewLimit] = useState(REVIEW_MAX_FILES);
-  const reviewResult = review && review !== "loading" ? review : null;
+  const reviewResult = review;
   const reviewComplete =
     reviewResult !== null && reviewResult.next_offset >= reviewResult.candidate_files;
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -156,7 +157,7 @@ export function ScanView() {
             <h3>LLM 源码审查（参考）</h3>
             <p className="card-sub">
               每次最多 {reviewLimit} 个可审查源码文件（合计 ≤128 KiB）发送到已配置 Provider，
-              覆盖安全、业务逻辑与代码质量三个维度；可分次「继续审查」直至覆盖全部候选。
+              覆盖安全、业务逻辑与代码质量三个维度；点击后自动分页连续审查，直至覆盖全部候选。
               源码被视为不可信数据；结果仅作参考，不写入发现、基线或门禁。
             </p>
           </div>
@@ -169,9 +170,9 @@ export function ScanView() {
               workspace &&
               void runReview(workspace, reviewLimit, reviewResult?.next_offset ?? 0)
             }
-            disabled={!workspace || review === "loading" || reviewComplete}
+            disabled={!workspace || reviewRunning || reviewComplete}
           >
-            {review === "loading"
+            {reviewRunning
               ? reviewProgress
                 ? `审查中 ${reviewProgress.done}/${reviewProgress.total} 批…`
                 : "审查中…"
@@ -181,8 +182,8 @@ export function ScanView() {
                   ? "继续审查"
                   : "开始审查"}
           </button>
-          {reviewResult && reviewResult.files_reviewed > 0 && (
-            <button className="ghost" onClick={() => resetReview()} disabled={review === "loading"}>
+          {(reviewRunning || (reviewResult && reviewResult.files_reviewed > 0)) && (
+            <button className="ghost" onClick={() => resetReview()}>
               重置进度
             </button>
           )}
@@ -192,13 +193,13 @@ export function ScanView() {
               aria-label="审查文件上限"
               value={reviewLimit}
               onChange={(e) => setReviewLimit(Number(e.target.value))}
-              disabled={review === "loading"}
+              disabled={reviewRunning}
             >
               <option value={12}>12</option>
               <option value={24}>24</option>
             </select>
           </label>
-          {review && review !== "loading" && (
+          {review && (
             <span className="muted review-summary">
               已审查 {review.files_reviewed} / {review.candidate_files} 个可审查文件 ·{" "}
               {review.suggestions.length} 条建议
@@ -208,8 +209,9 @@ export function ScanView() {
         </div>
         {reviewResult && !reviewComplete && (
           <p className="muted review-budget">
-            还有 {reviewResult.candidate_files - reviewResult.next_offset} 个候选未审查，
-            可点「继续审查」逐页覆盖；也可增大文件数上限减少次数。
+            {reviewRunning
+              ? `自动续审中，已覆盖 ${reviewResult.next_offset} / ${reviewResult.candidate_files}；可随时「重置进度」中止并清空。`
+              : `还有 ${reviewResult.candidate_files - reviewResult.next_offset} 个候选未审查，可点「继续审查」继续覆盖；也可增大文件数上限减少次数。`}
           </p>
         )}
         {reviewError && (
@@ -217,7 +219,7 @@ export function ScanView() {
             {reviewError}
           </p>
         )}
-        {review && review !== "loading" &&
+        {review &&
           (review.suggestions.length === 0 ? (
             <p className="muted review-empty">未发现问题（参考）；这不代表代码安全。</p>
           ) : (

@@ -192,7 +192,7 @@ task check          # full gate: typecheck + vitest + build + clippy -D warnings
 
 - Taint analysis is an approximation: it is not a proof of reachability, and cross-file propagation requires explicit imports.
 - The built-in business-logic rules are examples of the mechanism, not a generic business-rule library — project invariants must be written by you.
-- LLM workspace review is bounded by per-run file and byte budgets and is advisory; it reviews a subset per run and continues page by page.
+- LLM workspace review is bounded by per-run file and byte budgets and is advisory; it reviews a subset per run and pages automatically by cursor until all candidates are covered.
 
 ## Roadmap
 

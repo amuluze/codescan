@@ -133,6 +133,7 @@ beforeEach(() => {
     testResult: null,
     testError: null,
     review: null,
+    reviewRunning: false,
     reviewError: null,
     reviewProgress: null,
     triage: {},
@@ -623,7 +624,7 @@ describe("App 主链路", () => {
     );
   });
 
-  it("扫描页可发起 LLM 源码审查并展示建议", async () => {
+  it("扫描页可发起 LLM 源码审查并自动分页覆盖全部候选", async () => {
     useScanStore.setState({ workspace: "/tmp/ws" });
     const user = userEvent.setup();
     const writeText = vi.fn(async () => {});
@@ -636,17 +637,12 @@ describe("App 主链路", () => {
     const list = await screen.findByTestId("review-suggestions");
     expect(list.textContent).toContain("缺少订单归属校验");
     expect(list.textContent).toContain("src/a.ts:3");
-    expect(screen.getByText(/已审查 2 \/ 3 个可审查文件 · 1 条建议/)).toBeTruthy();
-    expect(screen.getByText(/过滤 1 条无效/)).toBeTruthy();
-    expect(screen.getByText(/还有 1 个候选未审查/)).toBeTruthy();
 
     // 每条建议可单独复制（含证据与置信度）。
     await user.click(screen.getByRole("button", { name: "复制审查结果第 1 条" }));
-    expect(writeText).toHaveBeenLastCalledWith(
-      expect.stringContaining("缺少订单归属校验"),
-    );
+    expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("缺少订单归属校验"));
     expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("src/a.ts:3"));
-    expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("置信度：中"));
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining("置信度：中"));
 
     expect(invokeMock).toHaveBeenCalledWith("llm_review_workspace", {
       root: "/tmp/ws",
@@ -655,8 +651,7 @@ describe("App 主链路", () => {
       requestId: expect.any(String),
     });
 
-    // 续审：携带游标，完成后按钮变为「已审查全部候选」。
-    await user.click(screen.getByRole("button", { name: "继续审查" }));
+    // 自动续审：无需手动点击，携带游标直至覆盖全部候选。
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith("llm_review_workspace", {
         root: "/tmp/ws",
@@ -667,5 +662,46 @@ describe("App 主链路", () => {
     );
     expect(await screen.findByRole("button", { name: "已审查全部候选" })).toBeDisabled();
     expect(screen.getByText(/已审查 3 \/ 3 个可审查文件/)).toBeTruthy();
+    // 两页返回同一条建议：跨页去重后只保留一条。
+    expect(screen.getByText(/1 条建议/)).toBeTruthy();
+    expect(screen.getByText(/过滤 2 条无效/)).toBeTruthy();
+  });
+
+  it("自动续审中途失败：保留已审查结果并可从游标恢复", async () => {
+    useScanStore.setState({ workspace: "/tmp/ws" });
+    const base = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (cmd: string, args?: InvokeArgs) => {
+      if (cmd === "llm_review_workspace" && ((args?.offset as number) ?? 0) > 0) {
+        throw new Error("网络错误");
+      }
+      return base?.(cmd, args);
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "开始审查" }));
+    // 首页结果保留，错误可见，可从游标恢复。
+    expect(await screen.findByText(/已审查 2 \/ 3 个可审查文件/)).toBeTruthy();
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("网络错误");
+    expect(screen.getByRole("button", { name: "继续审查" })).toBeEnabled();
+  });
+
+  it("审查中「重置进度」中止自动续审并清空结果", async () => {
+    useScanStore.setState({ workspace: "/tmp/ws" });
+    const base = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation((cmd: string, args?: InvokeArgs) => {
+      if (cmd === "llm_review_workspace") {
+        return new Promise(() => {}); // 首页挂起，模拟长时间请求
+      }
+      return base?.(cmd, args);
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "开始审查" }));
+    expect(screen.getByRole("button", { name: "审查中…" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "重置进度" }));
+    expect(screen.getByRole("button", { name: "开始审查" })).toBeEnabled();
+    // 中止后不再发起下一页请求。
+    expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "llm_review_workspace")).toHaveLength(1);
   });
 });
