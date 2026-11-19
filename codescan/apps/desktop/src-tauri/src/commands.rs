@@ -535,6 +535,7 @@ pub fn collect_review_files(
             path: rel.clone(),
             content,
             lines,
+            start_line: 1,
         });
     }
 
