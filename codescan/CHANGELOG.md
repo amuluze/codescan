@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.0] - 2026-11-19
 
 ### Added
 
@@ -14,6 +14,7 @@ All notable changes to this project are documented in this file. The format is b
 - Repository layout: CodeScan's complete Rust/pnpm workspace lives in `codescan/`; desktop pages use `src/views/`, and rule fixtures use `crates/engine/tests/fixtures/rules/`. Official website source is maintained outside this repository.
 - Updated Rust and JavaScript dependencies, including tree-sitter 0.27 and rusqlite 0.41
 - Updated `sha2` to 0.11.1 with explicit lowercase-hex encoding; existing content hashes and fingerprints remain byte-identical
+- LLM source review now pages automatically: after the first run it keeps requesting the next cursor page until all candidates are covered; failures keep reviewed results and resume from the cursor, and Reset aborts the run
 
 ## [1.0.0] - 2026-11-12
 

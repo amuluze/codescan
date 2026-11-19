@@ -12,7 +12,7 @@ import {
   type TriageResult,
 } from "../platform";
 
-/** 源码审查请求序号：切换工作区后使在途请求的结果失效。 */
+/** 源码审查请求序号：切换工作区或重置进度后使在途请求与续审循环失效。 */
 let reviewSeq = 0;
 
 /** 跨页合并建议并按 (path,line,title) 去重。 */
@@ -35,7 +35,9 @@ type LlmState = {
   testResult: ProviderTestResult | null;
   testError: string | null;
   /** LLM 源码审查：仅展示层，不进入发现/基线。 */
-  review: ReviewResult | "loading" | null;
+  review: ReviewResult | null;
+  /** 自动分页续审进行中；「重置进度」可中止并清空。 */
+  reviewRunning: boolean;
   reviewError: string | null;
   /** 分批审查进度（批次维度）。 */
   reviewProgress: { done: number; total: number } | null;
@@ -75,6 +77,7 @@ export const useLlmStore = create<LlmState>((set, get) => ({
   testResult: null,
   testError: null,
   review: null,
+  reviewRunning: false,
   reviewError: null,
   reviewProgress: null,
   triage: {},
@@ -124,50 +127,66 @@ export const useLlmStore = create<LlmState>((set, get) => ({
   async runReview(root, maxFiles, offset = 0) {
     const seq = ++reviewSeq;
     const current = get().review;
-    const previous = offset > 0 && current && current !== "loading" ? current : null;
-    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    set({ review: "loading", reviewError: null, reviewProgress: null });
-    let unlisten: (() => void) | null = null;
+    let accumulated: ReviewResult | null = offset > 0 && current ? current : null;
+    let cursor = offset;
+    set({ reviewRunning: true, reviewError: null, reviewProgress: null });
     try {
-      unlisten = await platform.listen("llm://review_progress", (payload) => {
-        if (
-          typeof payload !== "object" ||
-          payload === null ||
-          !("requestId" in payload) ||
-          payload.requestId !== requestId ||
-          !("done" in payload) ||
-          !("total" in payload) ||
-          typeof payload.done !== "number" ||
-          typeof payload.total !== "number"
-        ) {
+      while (true) {
+        if (seq !== reviewSeq) return; // 已重置或切换工作区
+        const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const unlisten = await platform.listen("llm://review_progress", (payload) => {
+          if (
+            typeof payload !== "object" ||
+            payload === null ||
+            !("requestId" in payload) ||
+            payload.requestId !== requestId ||
+            !("done" in payload) ||
+            !("total" in payload) ||
+            typeof payload.done !== "number" ||
+            typeof payload.total !== "number"
+          ) {
+            return;
+          }
+          if (seq !== reviewSeq) return;
+          set({ reviewProgress: { done: payload.done, total: payload.total } });
+        });
+        let result: ReviewResult;
+        try {
+          result = await api.llmReviewWorkspace(root, maxFiles, cursor, requestId);
+        } finally {
+          unlisten();
+        }
+        if (seq !== reviewSeq) return; // 工作区已切换，丢弃过期结果
+        accumulated = accumulated
+          ? {
+              ...result,
+              files_reviewed: accumulated.files_reviewed + result.files_reviewed,
+              total_bytes: accumulated.total_bytes + result.total_bytes,
+              dropped: accumulated.dropped + result.dropped,
+              suggestions: mergeSuggestions(accumulated.suggestions, result.suggestions),
+            }
+          : result;
+        set({ review: accumulated, reviewProgress: null });
+        // 覆盖全部候选时停止；游标未推进属后端异常，防御性停止避免死循环。
+        if (result.next_offset >= result.candidate_files || result.next_offset <= cursor) {
           return;
         }
-        if (seq !== reviewSeq) return;
-        set({ reviewProgress: { done: payload.done, total: payload.total } });
-      });
-      const result = await api.llmReviewWorkspace(root, maxFiles, offset, requestId);
-      if (seq !== reviewSeq) return; // 工作区已切换，丢弃过期结果
-      const merged = previous
-        ? {
-            ...result,
-            files_reviewed: previous.files_reviewed + result.files_reviewed,
-            total_bytes: previous.total_bytes + result.total_bytes,
-            dropped: previous.dropped + result.dropped,
-            suggestions: mergeSuggestions(previous.suggestions, result.suggestions),
-          }
-        : result;
-      set({ review: merged, reviewProgress: null });
+        cursor = result.next_offset;
+      }
     } catch (e) {
       if (seq !== reviewSeq) return;
-      set({ review: null, reviewError: String(e), reviewProgress: null });
+      // 保留已累计结果，供「继续审查」从游标恢复。
+      set({ reviewError: String(e) });
     } finally {
-      unlisten?.();
+      if (seq === reviewSeq) {
+        set({ reviewRunning: false, reviewProgress: null });
+      }
     }
   },
 
   resetReview() {
     reviewSeq += 1;
-    set({ review: null, reviewError: null, reviewProgress: null });
+    set({ review: null, reviewRunning: false, reviewError: null, reviewProgress: null });
   },
 
   async runTriage(scanId, fingerprint) {
