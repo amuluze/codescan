@@ -1,7 +1,16 @@
+import { readFileSync } from "node:fs";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
+/** 与 tauri.conf.json 版本同源，构建期注入 __APP_VERSION__（顶部展示）。 */
+const tauriVersion = JSON.parse(
+  readFileSync("src-tauri/tauri.conf.json", "utf8"),
+).version as string;
+
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(tauriVersion),
+  },
   plugins: [react()],
   clearScreen: false,
   server: {

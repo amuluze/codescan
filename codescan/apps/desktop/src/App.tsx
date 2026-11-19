@@ -30,6 +30,9 @@ export function App() {
             {t.label}
           </button>
         ))}
+        <span className="app-version" data-testid="app-version">
+          v{__APP_VERSION__}
+        </span>
       </nav>
       {tab === "scan" && <ScanView />}
       {tab === "findings" && <FindingsView />}

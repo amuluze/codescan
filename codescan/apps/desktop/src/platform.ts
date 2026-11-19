@@ -169,6 +169,9 @@ export const api = {
   baselineInfo: () => platform.invoke<BaselineInfo | null>("baseline_info"),
   exportSarif: (scanId: number, dest: string) =>
     platform.invoke<void>("export_sarif", { scanId, dest }),
+  /** 展示层报告导出（审查建议 / 发现视图）：Markdown+JSON 双文件写入选定目录。 */
+  exportReport: (destDir: string, base: string, markdown: string, json: string) =>
+    platform.invoke<void>("export_report", { destDir, base, markdown, json }),
   listDirectory: (path?: string) =>
     platform.invoke<DirListing>("list_directory", { path: path ?? null }),
   getProviderConfig: () => platform.invoke<ProviderInfo>("get_provider_config"),

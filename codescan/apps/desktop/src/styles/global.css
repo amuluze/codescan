@@ -84,6 +84,16 @@ body {
   border-bottom-color: var(--accent);
 }
 
+/* 顶部导航右侧的应用版本展示。 */
+.app-version {
+  margin-left: auto;
+  align-self: center;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  user-select: text;
+}
+
 /* ---------- 基础控件 ---------- */
 
 button {
@@ -295,6 +305,13 @@ pre {
   word-break: break-all;
 }
 
+/* 审查错误：常规断行，避免逐字断行破坏中英文混排。 */
+.review-error {
+  word-break: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+
 .review-card .card-head {
   align-items: flex-start;
 }
@@ -324,8 +341,6 @@ pre {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  max-height: 320px;
-  overflow-y: auto;
 }
 
 .review-list li {
@@ -920,6 +935,12 @@ pre {
 @media (max-width: 720px) {
   .form-grid {
     grid-template-columns: 1fr;
+  }
+
+  /* 窄屏空间不足以纵向铺开，限制卡片高度并在卡片内滚动。 */
+  .review-card {
+    max-height: 72vh;
+    overflow-y: auto;
   }
 }
 

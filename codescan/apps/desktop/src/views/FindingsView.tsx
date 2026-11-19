@@ -2,7 +2,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { filteredFindings, useScanStore } from "../stores/scanStore";
 import { useLlmStore } from "../stores/llmStore";
+import { api } from "../platform";
+import { DirectoryPicker } from "../components/DirectoryPicker";
 import { CopyButton } from "../components/CopyButton";
+import { findingsToJson, findingsToMarkdown } from "../findingsExport";
 import type { Finding } from "../types";
 import { DIMENSION_LABEL, SEVERITY_LABEL } from "../labels";
 
@@ -37,6 +40,25 @@ export function FindingsView() {
   } = useLlmStore();
   const scanId = state.lastScanId;
   const [saveFixture, setSaveFixture] = useState(false);
+  const [exportPickerOpen, setExportPickerOpen] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  /** 导出当前筛选/排序下的发现（Markdown + JSON），目录由 DirectoryPicker 选定。 */
+  const exportFindingsTo = async (dest: string) => {
+    setExportPickerOpen(false);
+    setExportError(null);
+    if (!scanId) return;
+    try {
+      await api.exportReport(
+        dest,
+        `codescan-findings-${scanId}`,
+        findingsToMarkdown(shown),
+        findingsToJson(shown),
+      );
+    } catch (e) {
+      setExportError(`导出失败：${String(e)}`);
+    }
+  };
   const triageValue = selected ? triage[selected.fingerprint] : null;
   const streamValue = selected ? (triageStreams[selected.fingerprint] ?? "") : "";
 
@@ -121,6 +143,14 @@ export function FindingsView() {
         <div className="toolbar-spacer" />
         <span className="toolbar-count muted">显示 {shown.length} 条</span>
         <button
+          className="ghost"
+          data-testid="findings-export"
+          disabled={!scanId || shown.length === 0}
+          onClick={() => setExportPickerOpen(true)}
+        >
+          导出
+        </button>
+        <button
           disabled={!scanId || batch === "loading" || shown.length === 0}
           onClick={() =>
             scanId &&
@@ -133,6 +163,20 @@ export function FindingsView() {
           批量分诊
         </button>
       </div>
+
+      {exportError && (
+        <p role="alert" className="run-error review-error">
+          {exportError}
+        </p>
+      )}
+      {exportPickerOpen && (
+        <DirectoryPicker
+          title="选择发现导出目录"
+          confirmLabel="导出到此目录"
+          onSelect={(dest) => void exportFindingsTo(dest)}
+          onClose={() => setExportPickerOpen(false)}
+        />
+      )}
 
       {batchError && <p role="alert">{batchError}</p>}
       {batch === "loading" && <p className="muted">批量分诊中…</p>}
