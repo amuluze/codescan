@@ -1,11 +1,12 @@
 /** 扫描页：工作区选择 → 触发/取消 → 阶段与进度 → 结果统计。 */
 import { useEffect, useState } from "react";
-import { api } from "../platform";
 import { useScanStore } from "../stores/scanStore";
 import { useLlmStore } from "../stores/llmStore";
 import { CONFIDENCE_LABEL, DIMENSION_LABEL, SEVERITY_LABEL } from "../labels";
 import { CopyButton } from "../components/CopyButton";
 import { DirectoryPicker } from "../components/DirectoryPicker";
+import { NoticeDialog } from "../components/NoticeDialog";
+import { useReportExport } from "../useReportExport";
 import {
   EMPTY_REVIEW_FILTER,
   filterSuggestions,
@@ -34,7 +35,7 @@ export function ScanView() {
   const [reviewLimit, setReviewLimit] = useState(REVIEW_MAX_FILES);
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>(EMPTY_REVIEW_FILTER);
   const [exportPickerOpen, setExportPickerOpen] = useState(false);
-  const [exportError, setExportError] = useState<string | null>(null);
+  const { exporting, notice, run: runExport, dismiss } = useReportExport();
   const reviewResult = review;
   const reviewComplete =
     reviewResult !== null && reviewResult.next_offset >= reviewResult.candidate_files;
@@ -42,20 +43,14 @@ export function ScanView() {
   const shownSuggestions = filterSuggestions(suggestions, reviewFilter);
 
   /** 导出当前筛选下的建议（Markdown + JSON 双文件），目录由 DirectoryPicker 选定。 */
-  const exportReviewTo = async (dest: string) => {
+  const exportReviewTo = (dest: string) => {
     setExportPickerOpen(false);
-    setExportError(null);
-    try {
-      await api.exportReport(
-        dest,
-        "codescan-review",
-        suggestionsToMarkdown(shownSuggestions),
-        suggestionsToJson(shownSuggestions),
-      );
-    } catch (e) {
-      // 导出失败仅展示，不影响审查状态；导出物不进入发现/基线/门禁。
-      setExportError(`导出失败：${String(e)}`);
-    }
+    void runExport(
+      dest,
+      "codescan-review",
+      suggestionsToMarkdown(shownSuggestions),
+      suggestionsToJson(shownSuggestions),
+    );
   };
   const [pickerOpen, setPickerOpen] = useState(false);
 
@@ -314,20 +309,16 @@ export function ScanView() {
             <button
               className="ghost"
               data-testid="review-export"
+              disabled={exporting}
               onClick={() => setExportPickerOpen(true)}
             >
-              导出
+              {exporting ? "导出中…" : "导出"}
             </button>
           </div>
         )}
         {reviewError && (
           <p role="alert" className="run-error review-error">
             {reviewError}
-          </p>
-        )}
-        {exportError && (
-          <p role="alert" className="run-error review-error">
-            {exportError}
           </p>
         )}
         {review &&
@@ -392,8 +383,16 @@ export function ScanView() {
         <DirectoryPicker
           title="选择审查结果导出目录"
           confirmLabel="导出到此目录"
-          onSelect={(dest) => void exportReviewTo(dest)}
+          onSelect={(dest) => exportReviewTo(dest)}
           onClose={() => setExportPickerOpen(false)}
+        />
+      )}
+      {notice && (
+        <NoticeDialog
+          tone={notice.tone}
+          title={notice.title}
+          message={notice.message}
+          onClose={dismiss}
         />
       )}
     </section>

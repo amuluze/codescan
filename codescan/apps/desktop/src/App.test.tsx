@@ -754,6 +754,12 @@ describe("App 主链路", () => {
         }),
       ),
     );
+    // 完成提示以对话框呈现，含落盘文件名与目录；可关闭。
+    expect(await screen.findByText("导出完成")).toBeTruthy();
+    expect(screen.getByTestId("notice-message").textContent).toContain("codescan-review.md");
+    expect(screen.getByTestId("notice-message").textContent).toContain("/tmp/ws");
+    await user.click(screen.getByTestId("notice-dismiss"));
+    expect(screen.queryByText("导出完成")).toBeNull();
   });
 
   it("发现页可按当前筛选导出发现为 Markdown 与 JSON", async () => {
@@ -788,5 +794,56 @@ describe("App 主链路", () => {
     // 导出跟随当前筛选：被过滤掉的 fp-2 不得出现在内容里。
     const call = invokeMock.mock.calls.find(([cmd]) => cmd === "export_report");
     expect(String(call?.[1]?.json)).not.toContain("fp-2");
+    expect(await screen.findByText("导出完成")).toBeTruthy();
+    expect(screen.getByTestId("notice-message").textContent).toContain("codescan-findings-7.md");
+    await user.click(screen.getByTestId("notice-dismiss"));
+  });
+
+  it("导出失败时以对话框展示可读错误", async () => {
+    useScanStore.setState({ workspace: "/tmp/ws" });
+    const base = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (cmd: string, args?: InvokeArgs) => {
+      if (cmd === "export_report") throw new Error("目录不可写");
+      return base?.(cmd, args);
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "开始审查" }));
+    await screen.findByTestId("review-suggestions");
+    await user.click(screen.getByTestId("review-export"));
+    const confirm = screen.getByRole("button", { name: "导出到此目录" });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    await user.click(confirm);
+
+    expect(await screen.findByText("导出失败")).toBeTruthy();
+    expect(screen.getByTestId("notice-message").textContent).toContain("目录不可写");
+    await user.click(screen.getByTestId("notice-dismiss"));
+    expect(screen.queryByText("导出失败")).toBeNull();
+  });
+
+  it("导出进行中按钮显示进度并禁用", async () => {
+    useScanStore.setState({ workspace: "/tmp/ws" });
+    const base = invokeMock.getMockImplementation();
+    const gate = Promise.withResolvers<void>();
+    invokeMock.mockImplementation((cmd: string, args?: InvokeArgs) => {
+      if (cmd === "export_report") return gate.promise;
+      return base?.(cmd, args);
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "开始审查" }));
+    await screen.findByTestId("review-suggestions");
+    await user.click(screen.getByTestId("review-export"));
+    const confirm = screen.getByRole("button", { name: "导出到此目录" });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    await user.click(confirm);
+
+    const button = screen.getByTestId("review-export");
+    expect(button).toBeDisabled();
+    expect(button.textContent).toContain("导出中…");
+    await act(async () => {
+      gate.resolve();
+    });
+    expect(await screen.findByText("导出完成")).toBeTruthy();
   });
 });
