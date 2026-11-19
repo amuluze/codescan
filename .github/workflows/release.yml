@@ -31,6 +31,9 @@ env:
 
 jobs:
   build:
+    # 仅公开仓发布：私有仓（codescan-pro）推送 tag 不构建、不创建 Release。
+    # 该文件经 sync-public.sh 同步到公开仓，公开侧条件恒真、行为不变。
+    if: github.repository == 'amuluze/codescan'
     name: build aarch64-apple-darwin（签名 + 公证 + updater）
     # GitHub 已下线 macos-14 镜像（标签解析到不支持的 runner 池，job 秒退）；
     # macos-15 实测为 arm64 主机，与原 macos-14 同架构（axiom 同款迁移）。
