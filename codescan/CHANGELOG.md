@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.1] - 2026-11-19
+
+### Fixed
+
+- LLM source review no longer fails outright when a single large file exhausts the thinking budget: the file is split by line ranges and retried, suggestions keep absolute file line numbers, and duplicate suggestions across fragments are deduplicated
+
 ## [1.3.0] - 2026-11-19
 
 ### Changed

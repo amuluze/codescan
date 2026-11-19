@@ -672,8 +672,10 @@ pub const REVIEW_BATCH_BYTES: usize = 32 * 1024;
 pub struct ReviewFile {
     pub path: String,
     pub content: String,
-    /// 文件行数（解析建议时校验行号上界）。
+    /// 片段行数（解析建议时校验行号范围）。
     pub lines: usize,
+    /// 片段首行在文件中的 1-based 绝对行号（整文件为 1，按行切分后递增）。
+    pub start_line: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -719,13 +721,16 @@ title（不超过 60 字）、detail（不超过 300 字，说明证据与影响
 }
 
 pub fn review_user_prompt(files: &[ReviewFile]) -> String {
-    let mut out = String::from("请审查以下源码片段，并按系统提示输出 JSON 数组。\n");
+    let mut out = String::from(
+        "请审查以下源码片段，并按系统提示输出 JSON 数组。\
+行号前缀是该文件中的绝对行号；line 字段直接返回该行号。\n",
+    );
     for file in files {
         let path = serde_json::to_string(&file.path).unwrap_or_else(|_| "\"\"".into());
         out.push_str(&format!("\n<file path={path}>\n"));
-        // 行号前缀便于模型引用；内容按行输出。
+        // 行号前缀便于模型引用；内容按行输出，编号保持文件绝对行号。
         for (index, line) in file.content.lines().enumerate() {
-            out.push_str(&format!("{}: {}\n", index + 1, line));
+            out.push_str(&format!("{}: {}\n", file.start_line + index, line));
         }
         out.push_str("</file>\n");
     }
@@ -752,8 +757,16 @@ pub fn parse_review(
         .as_array()
         .ok_or_else(|| "响应不是 JSON 数组".to_string())?;
 
-    let allowed: std::collections::HashMap<&str, usize> =
-        files.iter().map(|f| (f.path.as_str(), f.lines.max(1))).collect();
+    // 同一路径可能按行切成多个片段：行号须落在本次发送的任一绝对行号区间内。
+    let mut allowed: std::collections::HashMap<&str, Vec<(usize, usize)>> =
+        std::collections::HashMap::new();
+    for f in files {
+        let start = f.start_line.max(1);
+        allowed
+            .entry(f.path.as_str())
+            .or_default()
+            .push((start, start + f.lines.max(1) - 1));
+    }
     let mut dropped = 0u32;
     let mut seen = std::collections::HashSet::new();
     let mut suggestions = Vec::new();
@@ -767,11 +780,12 @@ pub fn parse_review(
         let confidence = raw.confidence.trim().to_ascii_lowercase();
         let title = truncate(raw.title.trim(), 200);
         let detail = truncate(raw.detail.trim(), 800);
-        let Some(max_line) = allowed.get(raw.path.as_str()) else {
+        let Some(ranges) = allowed.get(raw.path.as_str()) else {
             dropped += 1;
             continue;
         };
-        if raw.line == 0 || raw.line as usize > *max_line {
+        let line = raw.line as usize;
+        if line == 0 || !ranges.iter().any(|(start, end)| (*start..=*end).contains(&line)) {
             dropped += 1;
             continue;
         }
@@ -897,7 +911,7 @@ pub async fn probe(config: &ProviderConfig, api_key: &str) -> Result<(), String>
 }
 
 /// 将审查文件切成批次：每批最多 REVIEW_BATCH_FILES 个且 ≤ REVIEW_BATCH_BYTES。
-/// 单个大文件独占一批（不再切分内容）。
+/// 单个大文件独占一批；若单批仍触发 thinking 截断，由 `split_review_file` 按行二分。
 pub fn chunk_review(files: &[ReviewFile]) -> Vec<Vec<ReviewFile>> {
     let mut chunks: Vec<Vec<ReviewFile>> = Vec::new();
     let mut current: Vec<ReviewFile> = Vec::new();
@@ -917,6 +931,26 @@ pub fn chunk_review(files: &[ReviewFile]) -> Vec<Vec<ReviewFile>> {
         chunks.push(current);
     }
     chunks
+}
+
+/// 单文件按行二分：行号保持文件绝对行号（`start_line` 递增），供批次级降批之后继续降输入。
+fn split_review_file(file: &ReviewFile) -> Option<(ReviewFile, ReviewFile)> {
+    let lines: Vec<&str> = file.content.lines().collect();
+    if lines.len() < 2 {
+        return None;
+    }
+    let mid = lines.len() / 2;
+    let make = |slice: &[&str], start_line: usize| ReviewFile {
+        path: file.path.clone(),
+        content: slice.join("\n"),
+        lines: slice.len(),
+        start_line,
+    };
+    let (left_lines, right_lines) = lines.split_at(mid);
+    Some((
+        make(left_lines, file.start_line),
+        make(right_lines, file.start_line + mid),
+    ))
 }
 
 /// thinking 阶段被输出预算截断的错误特征（可据此降批重试）。
@@ -955,9 +989,28 @@ pub async fn review_batched(
                 queue.push_front(left.to_vec());
                 on_progress(done, done + queue.len());
             }
+            Err(err) if is_truncation_error(&err) => {
+                // 单文件仍超预算：按行二分，行号保持文件绝对行号。
+                match split_review_file(&batch[0]) {
+                    Some((left, right)) => {
+                        queue.push_front(vec![right]);
+                        queue.push_front(vec![left]);
+                        on_progress(done, done + queue.len());
+                    }
+                    None => {
+                        return Err(format!(
+                            "{err}（文件 {} 已切分至单行仍失败）",
+                            batch[0].path
+                        ));
+                    }
+                }
+            }
             Err(err) => return Err(err),
         }
     }
+    // 跨批/跨片段去重：同一 (path, line, title) 只保留首次出现。
+    let mut seen = std::collections::HashSet::new();
+    suggestions.retain(|s| seen.insert((s.path.clone(), s.line, s.title.clone())));
     suggestions.sort_by(|a, b| (&a.path, a.line, &a.title).cmp(&(&b.path, b.line, &b.title)));
     Ok((suggestions, dropped))
 }
@@ -1102,11 +1155,13 @@ mod tests {
                 path: "src/a.py".into(),
                 content: "eval(x)\nprint(1)\n".into(),
                 lines: 2,
+                start_line: 1,
             },
             ReviewFile {
                 path: "src/b.ts".into(),
                 content: "const a = 1;\n".into(),
                 lines: 1,
+                start_line: 1,
             },
         ]
     }
@@ -1150,6 +1205,7 @@ mod tests {
             path: name.into(),
             content: "x".repeat(size),
             lines: 1,
+            start_line: 1,
         };
         let files = vec![
             file("a", 10),
@@ -1226,11 +1282,13 @@ mod tests {
                 path: "src/a.py".into(),
                 content: "a = 1\n".into(),
                 lines: 1,
+                start_line: 1,
             },
             ReviewFile {
                 path: "src/b.py".into(),
                 content: "b = 2\n".into(),
                 lines: 1,
+                start_line: 1,
             },
         ];
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1249,6 +1307,150 @@ mod tests {
             progress.last().copied(),
             Some((2, 2)),
             "进度应反映拆分后的批次总数"
+        );
+        server.join().unwrap();
+    }
+
+    /// 单文件按行二分：行数对半、start_line 连续、内容不重叠；单行拒绝切分。
+    #[test]
+    fn split_single_file_keeps_absolute_lines() {
+        let file = ReviewFile {
+            path: "src/big.rs".into(),
+            content: (1..=8)
+                .map(|n| format!("line{n}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            lines: 8,
+            start_line: 1,
+        };
+        let (left, right) = split_review_file(&file).expect("8 行可切分");
+        assert_eq!((left.start_line, left.lines), (1, 4));
+        assert_eq!((right.start_line, right.lines), (5, 4));
+        assert_eq!(left.content.lines().next(), Some("line1"));
+        assert_eq!(right.content.lines().next(), Some("line5"));
+
+        // 片段继续切分时行号仍连续。
+        let (left2, right2) = split_review_file(&right).expect("4 行可切分");
+        assert_eq!((left2.start_line, left2.lines), (5, 2));
+        assert_eq!((right2.start_line, right2.lines), (7, 2));
+
+        assert!(split_review_file(&ReviewFile {
+            path: "x".into(),
+            content: "a".into(),
+            lines: 1,
+            start_line: 1,
+        })
+        .is_none());
+    }
+
+    /// 提示词按文件绝对行号编号（片段从 start_line 开始）。
+    #[test]
+    fn review_prompt_numbers_lines_absolutely() {
+        let prompt = review_user_prompt(&[ReviewFile {
+            path: "src/a.rs".into(),
+            content: "a\nb\n".into(),
+            lines: 2,
+            start_line: 41,
+        }]);
+        assert!(prompt.contains("41: a"), "{prompt}");
+        assert!(prompt.contains("42: b"), "{prompt}");
+    }
+
+    /// 解析按本次发送的片段区间校验行号：区间外丢弃，区间内保留绝对行号。
+    #[test]
+    fn review_parser_accepts_only_sent_chunk_lines() {
+        let chunk = ReviewFile {
+            path: "src/big.rs".into(),
+            content: "x\ny\n".into(),
+            lines: 2,
+            start_line: 10,
+        };
+        let reply = r#"[
+ {"path":"src/big.rs","line":9,"severity":"warning","category":"quality","title":"越界前","detail":"","confidence":"low"},
+ {"path":"src/big.rs","line":10,"severity":"warning","category":"quality","title":"片段首行","detail":"","confidence":"low"},
+ {"path":"src/big.rs","line":11,"severity":"warning","category":"quality","title":"片段末行","detail":"","confidence":"low"},
+ {"path":"src/big.rs","line":12,"severity":"warning","category":"quality","title":"越界后","detail":"","confidence":"low"}
+]"#;
+        let (suggestions, dropped) = parse_review(reply, &[chunk]).unwrap();
+        assert_eq!(dropped, 2);
+        assert_eq!(suggestions.len(), 2);
+        assert_eq!(suggestions[0].line, 10);
+        assert_eq!(suggestions[1].line, 11);
+    }
+
+    /// 单文件仍触发 thinking 截断时按行二分重试，建议行号保持文件绝对行号。
+    #[test]
+    fn review_batched_splits_truncated_single_file() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 64 * 1024];
+                let _ = stream.read(&mut buf);
+                let body = if index == 0 {
+                    serde_json::json!({
+                        "stop_reason": "max_tokens",
+                        "content": [{ "type": "thinking", "thinking": "too long" }]
+                    })
+                } else {
+                    // 第 2、3 次请求分别是原文件的前半/后半片段。
+                    let line = if index == 1 { 2 } else { 4 };
+                    let suggestions = serde_json::json!([{
+                        "path": "src/big.rs",
+                        "line": line,
+                        "severity": "warning",
+                        "category": "quality",
+                        "title": format!("片段{index}"),
+                        "detail": "d",
+                        "confidence": "medium"
+                    }]);
+                    serde_json::json!({
+                        "content": [{ "type": "text", "text": suggestions.to_string() }]
+                    })
+                }
+                .to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+
+        let config = ProviderConfig {
+            kind: ProviderKind::Anthropic,
+            base_url: format!("http://{addr}/api"),
+            model: "m".into(),
+        };
+        let files = vec![ReviewFile {
+            path: "src/big.rs".into(),
+            content: "l1\nl2\nl3\nl4".into(),
+            lines: 4,
+            start_line: 1,
+        }];
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut progress = Vec::new();
+        let (suggestions, dropped) = runtime
+            .block_on(review_batched(&config, "sk-test", &files, |done, total| {
+                progress.push((done, total));
+            }))
+            .unwrap();
+        assert_eq!(dropped, 0);
+        assert_eq!(suggestions.len(), 2, "前后片段各返回一条建议");
+        let lines: Vec<u32> = suggestions.iter().map(|s| s.line).collect();
+        assert_eq!(lines, vec![2, 4], "行号保持文件绝对行号");
+        assert_eq!(
+            progress.last().copied(),
+            Some((2, 2)),
+            "进度应反映切分后的片段总数"
         );
         server.join().unwrap();
     }
@@ -1301,6 +1503,7 @@ mod tests {
             path: "src/a.py".into(),
             content: "eval(x)\n".into(),
             lines: 1,
+            start_line: 1,
         }];
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
