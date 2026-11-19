@@ -177,7 +177,8 @@ fn delete_scan_cascades_findings_and_baseline() {
 // ---------- v3：LLM 辅助层（Domain §3a） ----------
 
 use codescan_lib::commands::{
-    collect_review_files, prepare_batch_llm_call, prepare_llm_call, prepare_provider_probe,
+    collect_review_files, export_report, prepare_batch_llm_call, prepare_llm_call,
+    prepare_provider_probe,
 };
 use codescan_lib::llm;
 
@@ -715,4 +716,37 @@ fn review_selection_pages_cover_all_candidates() {
     }
     seen.sort();
     assert_eq!(seen.len(), 6, "续审应覆盖全部候选");
+}
+
+/// 展示层导出：Markdown 与 JSON 写入用户选定目录；非法目录/文件名必须报错。
+#[test]
+fn export_report_writes_both_formats_and_rejects_bad_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().to_string_lossy().into_owned();
+    export_report(
+        dest.clone(),
+        "codescan-findings-7".into(),
+        "# md\n- a".into(),
+        "[{\"path\":\"src/a.ts\"}]".into(),
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("codescan-findings-7.md")).unwrap(),
+        "# md\n- a"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("codescan-findings-7.json")).unwrap(),
+        "[{\"path\":\"src/a.ts\"}]"
+    );
+
+    let missing = dir.path().join("no-such-dir").to_string_lossy().into_owned();
+    let err = export_report(missing, "x".into(), "x".into(), "y".into()).unwrap_err();
+    assert!(err.contains("不存在"), "{err}");
+    let err = export_report("  ".into(), "x".into(), "x".into(), "y".into()).unwrap_err();
+    assert!(err.contains("不能为空"), "{err}");
+    // 文件名防路径穿越：只允许字母数字/'-'/'_'。
+    for bad in ["../evil", "a/b", "", "名字"] {
+        let err = export_report(dest.clone(), bad.into(), "x".into(), "y".into()).unwrap_err();
+        assert!(err.contains("导出文件名"), "{bad}: {err}");
+    }
 }

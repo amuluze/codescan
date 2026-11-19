@@ -177,10 +177,22 @@ pub fn parse_anthropic_response(body: &str) -> Result<String, String> {
             return Err(format!("响应缺少 content 数组：{}", truncate(body, 300)));
         }
         // 思考型模型可能先耗尽 max_tokens，导致只有 thinking 块。
+        // 错误只给可操作建议与模型回复的 thinking 摘要，不倾倒原始 JSON。
         if value["stop_reason"].as_str() == Some("max_tokens") {
+            let thinking = value["content"]
+                .as_array()
+                .and_then(|blocks| {
+                    blocks
+                        .iter()
+                        .filter_map(|b| b["thinking"].as_str())
+                        .collect::<Vec<_>>()
+                        .first()
+                        .copied()
+                    })
+                .unwrap_or_default();
             return Err(format!(
-                "响应在 thinking 阶段被 max_tokens 截断，未产出正文；请减少输入规模或换用非思考模型：{}",
-                truncate(body, 200)
+                "响应在 thinking 阶段被 max_tokens 截断，未产出正文；请减少输入规模或换用非思考模型。模型思考摘要：{}",
+                truncate(thinking, 160)
             ));
         }
         return Err(format!("响应没有 text 内容块：{}", truncate(body, 300)));
@@ -1328,6 +1340,18 @@ mod tests {
         let err = parse_anthropic_response(truncated).unwrap_err();
         assert!(err.contains("截断"), "{err}");
         assert!(err.contains("减少输入规模"), "{err}");
+        // 摘要取 thinking 内容而非原始 JSON，且不含未解析的键名。
+        assert!(err.contains("模型思考摘要：..."), "{err}");
+        assert!(!err.contains("\"type\""), "{err}");
+
+        // 思考内容过长时截断到 160 字符加省略号。
+        let long = "思".repeat(400);
+        let long_reply = format!(
+            r#"{{"stop_reason":"max_tokens","content":[{{"type":"thinking","thinking":"{long}"}}]}}"#
+        );
+        let err = parse_anthropic_response(&long_reply).unwrap_err();
+        assert!(err.contains('…'), "{err}");
+        assert!(err.chars().count() < 220, "{}", err.chars().count());
     }
 
     #[test]

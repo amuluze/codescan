@@ -1,10 +1,19 @@
 /** 扫描页：工作区选择 → 触发/取消 → 阶段与进度 → 结果统计。 */
 import { useEffect, useState } from "react";
+import { api } from "../platform";
 import { useScanStore } from "../stores/scanStore";
 import { useLlmStore } from "../stores/llmStore";
 import { CONFIDENCE_LABEL, DIMENSION_LABEL, SEVERITY_LABEL } from "../labels";
 import { CopyButton } from "../components/CopyButton";
 import { DirectoryPicker } from "../components/DirectoryPicker";
+import {
+  EMPTY_REVIEW_FILTER,
+  filterSuggestions,
+  hasReviewFilter,
+  suggestionsToJson,
+  suggestionsToMarkdown,
+  type ReviewFilter,
+} from "../reviewExport";
 
 /** 与后端 llm::REVIEW_MAX_FILES 一致（仅用于文案与选项上限）。 */
 const REVIEW_MAX_FILES = 24;
@@ -23,9 +32,31 @@ export function ScanView() {
   const { review, reviewRunning, reviewError, reviewProgress, runReview, resetReview } =
     useLlmStore();
   const [reviewLimit, setReviewLimit] = useState(REVIEW_MAX_FILES);
+  const [reviewFilter, setReviewFilter] = useState<ReviewFilter>(EMPTY_REVIEW_FILTER);
+  const [exportPickerOpen, setExportPickerOpen] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   const reviewResult = review;
   const reviewComplete =
     reviewResult !== null && reviewResult.next_offset >= reviewResult.candidate_files;
+  const suggestions = reviewResult?.suggestions ?? [];
+  const shownSuggestions = filterSuggestions(suggestions, reviewFilter);
+
+  /** 导出当前筛选下的建议（Markdown + JSON 双文件），目录由 DirectoryPicker 选定。 */
+  const exportReviewTo = async (dest: string) => {
+    setExportPickerOpen(false);
+    setExportError(null);
+    try {
+      await api.exportReport(
+        dest,
+        "codescan-review",
+        suggestionsToMarkdown(shownSuggestions),
+        suggestionsToJson(shownSuggestions),
+      );
+    } catch (e) {
+      // 导出失败仅展示，不影响审查状态；导出物不进入发现/基线/门禁。
+      setExportError(`导出失败：${String(e)}`);
+    }
+  };
   const [pickerOpen, setPickerOpen] = useState(false);
 
   useEffect(() => {
@@ -214,17 +245,101 @@ export function ScanView() {
               : `还有 ${reviewResult.candidate_files - reviewResult.next_offset} 个候选未审查，可点「继续审查」继续覆盖；也可增大文件数上限减少次数。`}
           </p>
         )}
+        {suggestions.length > 0 && (
+          <div className="toolbar review-filter" data-testid="review-filter">
+            <select
+              aria-label="审查严重级过滤"
+              value={reviewFilter.severity}
+              onChange={(e) =>
+                setReviewFilter((f) => ({
+                  ...f,
+                  severity: e.target.value as ReviewFilter["severity"],
+                }))
+              }
+            >
+              <option value="all">全部严重级</option>
+              <option value="error">错误</option>
+              <option value="warning">警告</option>
+              <option value="info">提示</option>
+            </select>
+            <select
+              aria-label="审查维度过滤"
+              value={reviewFilter.category}
+              onChange={(e) =>
+                setReviewFilter((f) => ({
+                  ...f,
+                  category: e.target.value as ReviewFilter["category"],
+                }))
+              }
+            >
+              <option value="all">全部维度</option>
+              <option value="security">安全</option>
+              <option value="business-logic">业务逻辑</option>
+              <option value="quality">质量</option>
+            </select>
+            <select
+              aria-label="审查置信度过滤"
+              value={reviewFilter.confidence}
+              onChange={(e) =>
+                setReviewFilter((f) => ({
+                  ...f,
+                  confidence: e.target.value as ReviewFilter["confidence"],
+                }))
+              }
+            >
+              <option value="all">全部置信度</option>
+              <option value="high">高</option>
+              <option value="medium">中</option>
+              <option value="low">低</option>
+            </select>
+            <input
+              aria-label="审查搜索"
+              className="search-input"
+              placeholder="搜索路径 / 标题 / 说明"
+              value={reviewFilter.query}
+              onChange={(e) => setReviewFilter((f) => ({ ...f, query: e.target.value }))}
+            />
+            {hasReviewFilter(reviewFilter) && (
+              <button
+                className="ghost"
+                onClick={() => setReviewFilter(EMPTY_REVIEW_FILTER)}
+              >
+                清除过滤
+              </button>
+            )}
+            <div className="toolbar-spacer" />
+            <span className="toolbar-count muted" data-testid="review-filter-count">
+              显示 {shownSuggestions.length} / {suggestions.length} 条
+            </span>
+            <button
+              className="ghost"
+              data-testid="review-export"
+              onClick={() => setExportPickerOpen(true)}
+            >
+              导出
+            </button>
+          </div>
+        )}
         {reviewError && (
-          <p role="alert" className="run-error">
+          <p role="alert" className="run-error review-error">
             {reviewError}
           </p>
         )}
+        {exportError && (
+          <p role="alert" className="run-error review-error">
+            {exportError}
+          </p>
+        )}
         {review &&
-          (review.suggestions.length === 0 ? (
+          (suggestions.length === 0 ? (
             <p className="muted review-empty">未发现问题（参考）；这不代表代码安全。</p>
+          ) : shownSuggestions.length === 0 ? (
+            <p className="muted review-empty">
+              当前筛选下无匹配建议；可「清除过滤」查看全部 {suggestions.length} 条。
+            </p>
           ) : (
             <ul className="review-list" data-testid="review-suggestions">
-              {review.suggestions.map((s, index) => (
+              {shownSuggestions.map((s) => (
                 <li key={`${s.path}:${s.line}:${s.title}`}>
                   <div className="review-head">
                     <span className={`sev-chip sev-${s.severity}`}>
@@ -236,7 +351,7 @@ export function ScanView() {
                     </span>
                     <span className="review-head-actions">
                       <CopyButton
-                        label={`复制审查结果第 ${index + 1} 条`}
+                        label={`复制审查结果：${s.path}:${s.line}`}
                         text={[
                           `${SEVERITY_LABEL[s.severity]}｜${DIMENSION_LABEL[s.category]}｜${s.path}:${s.line}`,
                           s.title,
@@ -271,6 +386,14 @@ export function ScanView() {
             setPickerOpen(false);
           }}
           onClose={() => setPickerOpen(false)}
+        />
+      )}
+      {exportPickerOpen && (
+        <DirectoryPicker
+          title="选择审查结果导出目录"
+          confirmLabel="导出到此目录"
+          onSelect={(dest) => void exportReviewTo(dest)}
+          onClose={() => setExportPickerOpen(false)}
         />
       )}
     </section>

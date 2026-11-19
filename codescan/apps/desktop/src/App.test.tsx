@@ -36,6 +36,8 @@ vi.mock("./platform", () => {
     baselineInfo: () => platform.invoke("baseline_info"),
     exportSarif: (scanId: number, dest: string) =>
       platform.invoke("export_sarif", { scanId, dest }),
+    exportReport: (destDir: string, base: string, markdown: string, json: string) =>
+      platform.invoke("export_report", { destDir, base, markdown, json }),
     listDirectory: (path?: string) =>
       platform.invoke("list_directory", { path: path ?? null }),
     getProviderConfig: () => platform.invoke("get_provider_config"),
@@ -268,6 +270,8 @@ beforeEach(() => {
           failures: ["漏报：规则 custom/no-eval-param 未命中期望行 4"],
           saved_paths: ["/tmp/.codescan/rules/tests/custom_no-eval-param/a.ts"],
         };
+      case "export_report":
+        return null;
       default:
         return null;
     }
@@ -275,6 +279,11 @@ beforeEach(() => {
 });
 
 describe("App 主链路", () => {
+  it("顶部导航右侧展示应用版本（语义化版本号）", () => {
+    render(<App />);
+    expect(screen.getByTestId("app-version").textContent).toMatch(/^v\d+\.\d+\.\d+$/);
+  });
+
   it("四个 tab 可切换，规则页列出规则并支持启停", async () => {
     const user = userEvent.setup();
     render(<App />);
@@ -638,8 +647,8 @@ describe("App 主链路", () => {
     expect(list.textContent).toContain("缺少订单归属校验");
     expect(list.textContent).toContain("src/a.ts:3");
 
-    // 每条建议可单独复制（含证据与置信度）。
-    await user.click(screen.getByRole("button", { name: "复制审查结果第 1 条" }));
+    // 每条建议可单独复制（含证据与置信度）；列表可筛选，按钮以路径定位而非序号。
+    await user.click(screen.getByRole("button", { name: "复制审查结果：src/a.ts:3" }));
     expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("缺少订单归属校验"));
     expect(writeText).toHaveBeenLastCalledWith(expect.stringContaining("src/a.ts:3"));
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining("置信度：中"));
@@ -703,5 +712,81 @@ describe("App 主链路", () => {
     expect(screen.getByRole("button", { name: "开始审查" })).toBeEnabled();
     // 中止后不再发起下一页请求。
     expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "llm_review_workspace")).toHaveLength(1);
+  });
+
+  it("审查建议可按维度筛选并显示计数，可清除过滤", async () => {
+    useScanStore.setState({ workspace: "/tmp/ws" });
+    const user = userEvent.setup();
+    render(<App />);
+    // 自动审查产生建议后验证筛选行为。
+    await user.click(screen.getByRole("button", { name: "开始审查" }));
+    await screen.findByTestId("review-suggestions");
+    expect(screen.getByTestId("review-filter-count").textContent).toContain("1 / 1");
+    // mock 建议是 business-logic：按「质量」筛选应无匹配。
+    await user.click(screen.getByRole("combobox", { name: "审查维度过滤" }));
+    await user.selectOptions(screen.getByRole("combobox", { name: "审查维度过滤" }), "quality");
+    expect(screen.getByTestId("review-filter-count").textContent).toContain("0 / 1");
+    expect(screen.getByText(/当前筛选下无匹配建议/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "清除过滤" }));
+    expect(screen.getByTestId("review-filter-count").textContent).toContain("1 / 1");
+  });
+
+  it("审查建议可导出为 Markdown 与 JSON 文件", async () => {
+    useScanStore.setState({ workspace: "/tmp/ws" });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "开始审查" }));
+    await screen.findByTestId("review-suggestions");
+    await user.click(screen.getByTestId("review-export"));
+    expect(screen.getByText("选择审查结果导出目录")).toBeTruthy();
+    // 目录列表加载完成后确认按钮才可用；确认目录后调用 export_report。
+    const confirm = screen.getByRole("button", { name: "导出到此目录" });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    await user.click(confirm);
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "export_report",
+        expect.objectContaining({
+          destDir: "/tmp/ws",
+          base: "codescan-review",
+          markdown: expect.stringContaining("LLM 源码审查建议"),
+          json: expect.stringContaining("缺少订单归属校验"),
+        }),
+      ),
+    );
+  });
+
+  it("发现页可按当前筛选导出发现为 Markdown 与 JSON", async () => {
+    const user = userEvent.setup();
+    useScanStore.setState({
+      lastScanId: 7,
+      findings,
+      filter: { dimension: "all", severity: "all", query: "src/a.ts" },
+      selected: null,
+    });
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "发现" }));
+    await screen.findByTestId("finding-list");
+    expect(screen.getByText(/显示 1 条/)).toBeTruthy();
+
+    await user.click(screen.getByTestId("findings-export"));
+    const confirm = screen.getByRole("button", { name: "导出到此目录" });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    await user.click(confirm);
+
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "export_report",
+        expect.objectContaining({
+          destDir: "/tmp/ws",
+          base: "codescan-findings-7",
+          markdown: expect.stringContaining("fp-1"),
+          json: expect.stringContaining('"fingerprint": "fp-1"'),
+        }),
+      ),
+    );
+    // 导出跟随当前筛选：被过滤掉的 fp-2 不得出现在内容里。
+    const call = invokeMock.mock.calls.find(([cmd]) => cmd === "export_report");
+    expect(String(call?.[1]?.json)).not.toContain("fp-2");
   });
 });

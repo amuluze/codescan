@@ -42,6 +42,7 @@ pub fn run() {
             commands::gate_diff,
             commands::baseline_info,
             commands::export_sarif,
+            commands::export_report,
             commands::set_provider_config,
             commands::get_provider_config,
             commands::set_api_key,

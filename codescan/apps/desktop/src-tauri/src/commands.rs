@@ -287,6 +287,34 @@ pub fn export_sarif(state: State<'_, AppState>, scan_id: i64, dest: String) -> R
     std::fs::write(dest, content).map_err(|e| e.to_string())
 }
 
+/// 展示层报告导出：Markdown 与 JSON 双文件写入用户选定目录。
+/// `base` 只允许 ASCII 字母数字与 `-`、`_`，防止路径穿越；导出物不进入发现/基线/门禁写入路径。
+#[tauri::command]
+pub fn export_report(
+    dest_dir: String,
+    base: String,
+    markdown: String,
+    json: String,
+) -> Result<(), String> {
+    if dest_dir.trim().is_empty() {
+        return Err("导出目录不能为空".into());
+    }
+    let dir = PathBuf::from(&dest_dir);
+    if !dir.is_dir() {
+        return Err(format!("导出目录不存在：{dest_dir}"));
+    }
+    let valid_base = !base.is_empty()
+        && base.len() <= 64
+        && base
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !valid_base {
+        return Err("导出文件名只允许字母、数字、'-' 与 '_'".into());
+    }
+    std::fs::write(dir.join(format!("{base}.md")), markdown).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(format!("{base}.json")), json).map_err(|e| e.to_string())
+}
+
 // ---------- v3：LLM 辅助层（Domain §3a） ----------
 
 use crate::llm;
