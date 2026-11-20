@@ -28,8 +28,17 @@ const PHASE_LABEL: Record<string, string> = {
 };
 
 export function ScanView() {
-  const { phase, workspace, progress, error, stats, setWorkspace, startScan, cancelScan } =
-    useScanStore();
+  const {
+    phase,
+    workspace,
+    recentRoots,
+    progress,
+    error,
+    stats,
+    setWorkspace,
+    startScan,
+    cancelScan,
+  } = useScanStore();
   const { review, reviewRunning, reviewError, reviewProgress, runReview, resetReview } =
     useLlmStore();
   const [reviewLimit, setReviewLimit] = useState(REVIEW_MAX_FILES);
@@ -56,6 +65,7 @@ export function ScanView() {
 
   useEffect(() => {
     void useScanStore.getState().initListeners();
+    void useScanStore.getState().loadRecentRoots();
   }, []);
 
   const scanning = phase === "scanning";
@@ -88,6 +98,25 @@ export function ScanView() {
       <section className="card workspace-card">
         <div className="workspace-row">
           <button onClick={() => setPickerOpen(true)}>选择工作区</button>
+          {recentRoots.length > 0 && (
+            <select
+              className="workspace-recent"
+              data-testid="recent-workspace"
+              aria-label="从历史选择工作区"
+              value=""
+              onChange={(e) => {
+                const root = e.target.value;
+                if (root) setWorkspace(root);
+              }}
+            >
+              <option value="">历史工作区…</option>
+              {recentRoots.map((root) => (
+                <option key={root} value={root}>
+                  {root}
+                </option>
+              ))}
+            </select>
+          )}
           <span
             className={`workspace-path ${workspace ? "" : "muted"}`}
             data-testid="workspace-path"
@@ -109,7 +138,11 @@ export function ScanView() {
           </div>
         </div>
         {!workspace && (
-          <p className="card-sub">尚未选择工作区。点击「选择工作区」浏览本地目录后开始。</p>
+          <p className="card-sub">
+            {recentRoots.length > 0
+              ? "尚未选择工作区。从历史快速选择，或点击「选择工作区」浏览本地目录。"
+              : "尚未选择工作区。点击「选择工作区」浏览本地目录后开始。"}
+          </p>
         )}
       </section>
 

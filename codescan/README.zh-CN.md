@@ -45,7 +45,7 @@ CodeScan 走确定性路线，并把这些边界写进代码：
 | 桌面应用 | 扫描 / 发现 / 规则 / 历史 / 设置，本地 SQLite 与本地数据根 |
 | CLI | `codescan scan` 用于本地检查与 CI 门禁，`codescan github-upload` 上传 SARIF |
 | LLM 辅助（自带 Key） | 分诊、流式分诊、批量分诊、工作区源码审查、候选规则生成——仅供参考 |
-| 隐私 | 扫描只读、无遥测、密钥存于 Rust 独占的 secrets 表 |
+| 隐私 | 扫描只读、无遥测（唯一出站请求是 GitHub Releases 更新检查）、密钥存于 Rust 独占的 secrets 表 |
 
 ## 规则覆盖
 
@@ -70,6 +70,8 @@ CodeScan 走确定性路线，并把这些边界写进代码：
 1. 从 [Releases](https://github.com/amuluze/codescan/releases) 下载最新 `.dmg`（macOS arm64）。
 2. 挂载后把 **CodeScan** 拖入 Applications。未签名/ad-hoc 构建会被 Gatekeeper 隔离，首次启动需右键 → *打开*。
 3. 应用内：**扫描** → *选择工作区* → *开始扫描* → 在 **发现** 页查看结果。
+
+应用会在启动时和每 6 小时检查一次 GitHub Releases 是否有新版本；发现新版时顶栏版本号前出现升级提示图标，点击进入 **设置** 页安装。除该更新检查外，应用不联网。
 
 ### 从源码构建
 

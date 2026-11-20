@@ -84,14 +84,46 @@ body {
   border-bottom-color: var(--accent);
 }
 
-/* 顶部导航右侧的应用版本展示。 */
-.app-version {
+/* 顶部导航右侧：升级提示图标 + 应用版本展示。 */
+.app-meta {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.app-version {
   align-self: center;
   color: var(--muted);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   user-select: text;
+}
+
+/* 发现新版本时的升级提示：图标在版本号之前，点击进入设置页更新。
+   选择器需压过 `.tabs button` 的通用导航按钮样式。 */
+.tabs button.update-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.tabs button.update-badge:hover {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.tabs button.update-badge:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* ---------- 基础控件 ---------- */
@@ -198,6 +230,12 @@ pre {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 历史工作区快捷下拉：限宽防长路径撑行；完整路径由左侧等宽 span 呈现。 */
+.workspace-recent {
+  max-width: 260px;
+  min-width: 120px;
 }
 
 .workspace-actions {

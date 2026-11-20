@@ -59,6 +59,9 @@ App Store Connect API Key 同 axiom 机器约定存放）。
   `scripts/generate-latest-json.mjs` 生成（signature 取 .sig 全文）。
 - 插件常驻编译；仅当配置存在 `plugins.updater`（`generate-release-config.mjs`
   按凭据注入）时 `lib.rs` 才注册 updater 插件——开发/无密钥构建保持未配置。
+- 客户端检查时机：应用启动即静默检查一次，之后每 6 小时复查；发现新版本时顶栏
+  版本号前出现升级提示图标，点击进入设置页的「应用更新」卡安装。检查失败（未注册
+  插件、端点不可达）静默忽略，不打扰用户；设置页手动「检查更新」仍展示可读错误。
 - 签名验收：`tauri signer verify -k ~/.tauri/codescan-v1.key <tar.gz> <tar.gz.sig>`。
 
 ## 验收命令

@@ -6,6 +6,8 @@ import { App } from "./App";
 import { updater } from "./platform";
 import { useLlmStore } from "./stores/llmStore";
 import { useScanStore } from "./stores/scanStore";
+import { useUpdateStore } from "./stores/updateStore";
+import { UPDATE_CHECK_INTERVAL_MS } from "./useUpdateCheck";
 import type { Finding } from "./types";
 
 type InvokeArgs = Record<string, unknown> | undefined;
@@ -118,9 +120,17 @@ beforeEach(() => {
   invokeMock.mockReset();
   vi.mocked(updater.check).mockReset().mockResolvedValue(null);
   vi.mocked(updater.installAndRelaunch).mockReset().mockResolvedValue(undefined);
+  useUpdateStore.setState({
+    available: null,
+    checking: false,
+    installing: false,
+    message: null,
+    error: null,
+  });
   useScanStore.setState({
     phase: "idle",
     workspace: null,
+    recentRoots: [],
     progress: null,
     error: null,
     lastScanId: null,
@@ -304,7 +314,14 @@ describe("App 主链路", () => {
 
   it("点击选择工作区必定打开选择器；列表失败时在模态内呈现错误", async () => {
     const user = userEvent.setup();
-    invokeMock.mockRejectedValueOnce(new Error("目录不可读"));
+    const base = invokeMock.getMockImplementation() as (
+      cmd: string,
+      args?: InvokeArgs,
+    ) => Promise<unknown>;
+    invokeMock.mockImplementation(async (cmd: string, args?: InvokeArgs) => {
+      if (cmd === "list_directory") throw new Error("目录不可读");
+      return base(cmd, args);
+    });
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "选择工作区" }));
@@ -330,6 +347,67 @@ describe("App 主链路", () => {
     await waitFor(() => {
       expect(screen.getByTestId("workspace-path")).toHaveTextContent("/tmp/ws");
     });
+  });
+
+  it("扫描页从历史快速选择工作区：去重、最新在前，选中即可扫描", async () => {
+    const user = userEvent.setup();
+    const base = invokeMock.getMockImplementation() as (
+      cmd: string,
+      args?: InvokeArgs,
+    ) => Promise<unknown>;
+    const scan = (root: string, id: number, startedAtMs: number) => ({
+      id,
+      root,
+      engine_version: "0.1.0",
+      started_at_ms: startedAtMs,
+      duration_ms: 5,
+      findings: 1,
+      files_scanned: 2,
+    });
+    invokeMock.mockImplementation(async (cmd: string, args?: InvokeArgs) => {
+      if (cmd === "list_scans") {
+        return [
+          scan("/tmp/old", 1, 100),
+          scan("/tmp/new", 2, 300),
+          scan("/tmp/old", 3, 200),
+        ];
+      }
+      return base(cmd, args);
+    });
+    render(<App />);
+
+    const select = (await screen.findByTestId("recent-workspace")) as HTMLSelectElement;
+    // 占位项在前；历史按最近扫描去重排序。
+    expect(Array.from(select.options).map((o) => o.value)).toEqual([
+      "",
+      "/tmp/new",
+      "/tmp/old",
+    ]);
+
+    await user.selectOptions(select, "/tmp/new");
+    expect(screen.getByTestId("workspace-path")).toHaveTextContent("/tmp/new");
+    await user.click(screen.getByRole("button", { name: "开始扫描" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("start_scan", { root: "/tmp/new" });
+    });
+  });
+
+  it("无扫描历史时不显示快捷选择，提示保持目录浏览", async () => {
+    const base = invokeMock.getMockImplementation() as (
+      cmd: string,
+      args?: InvokeArgs,
+    ) => Promise<unknown>;
+    invokeMock.mockImplementation(async (cmd: string, args?: InvokeArgs) => {
+      if (cmd === "list_scans") return [];
+      return base(cmd, args);
+    });
+    render(<App />);
+
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("list_scans");
+    });
+    expect(screen.queryByTestId("recent-workspace")).toBeNull();
+    expect(screen.getByText("尚未选择工作区。点击「选择工作区」浏览本地目录后开始。")).toBeInTheDocument();
   });
 
   it("设置页加载并保存 Provider 配置，密钥状态可见", async () => {
@@ -554,7 +632,8 @@ describe("App 主链路", () => {
 
   it("设置页检查更新：有更新可安装，失败时错误可见（开发模式降级）", async () => {
     const user = userEvent.setup();
-    vi.mocked(updater.check).mockResolvedValueOnce({
+    // 应用启动即后台检查一次，手动检查同样命中该结果。
+    vi.mocked(updater.check).mockResolvedValue({
       version: "0.2.0",
       notes: "修复与改进",
     });
@@ -568,10 +647,54 @@ describe("App 主链路", () => {
     await waitFor(() => expect(updater.installAndRelaunch).toHaveBeenCalled());
 
     // 检查失败（开发模式无已发布 release 属预期）：错误展示，不阻断页面。
-    vi.mocked(updater.check).mockRejectedValueOnce(new Error("更新端点不可达"));
+    vi.mocked(updater.check).mockRejectedValue(new Error("更新端点不可达"));
     await user.click(screen.getByTestId("update-check"));
     const err = await screen.findByTestId("update-error");
     expect(err).toHaveTextContent("更新端点不可达");
+  });
+
+  it("后台检查发现新版本时，顶栏版本号前显示升级提示并跳转设置页", async () => {
+    const user = userEvent.setup();
+    vi.mocked(updater.check).mockResolvedValue({
+      version: "9.9.9",
+      notes: "全新版本",
+    });
+    render(<App />);
+
+    const badge = await screen.findByTestId("update-badge");
+    expect(badge).toHaveAttribute("aria-label", expect.stringContaining("9.9.9"));
+    // 图标位于版本号之前。
+    const version = screen.getByTestId("app-version");
+    expect(
+      badge.compareDocumentPosition(version) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    await user.click(badge);
+    expect(await screen.findByTestId("update-install")).toHaveTextContent(
+      "下载并安装 v9.9.9",
+    );
+  });
+
+  it("后台检查失败时不打扰用户：无升级提示、无错误提示", async () => {
+    vi.mocked(updater.check).mockRejectedValue(new Error("更新端点不可达"));
+    render(<App />);
+    await waitFor(() => expect(updater.check).toHaveBeenCalled());
+    expect(screen.queryByTestId("update-badge")).toBeNull();
+    expect(screen.queryByTestId("update-error")).toBeNull();
+  });
+
+  it("更新按固定间隔复查", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<App />);
+      await vi.waitFor(() => expect(updater.check).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(UPDATE_CHECK_INTERVAL_MS);
+      });
+      expect(updater.check).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("批量分诊、流式分诊与 LLM 分诊输出支持一键复制", async () => {

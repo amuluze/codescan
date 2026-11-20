@@ -1,7 +1,7 @@
 /** 设置页：LLM Provider（兼容 OpenAI / Anthropic）、API Key（只写）与应用更新。 */
 import { useEffect, useState } from "react";
 import { useLlmStore } from "../stores/llmStore";
-import { updater, type UpdateInfo } from "../platform";
+import { useUpdateStore } from "../stores/updateStore";
 
 export function SettingsView() {
   const {
@@ -15,16 +15,20 @@ export function SettingsView() {
     testError,
     testConnection,
   } = useLlmStore();
+  const {
+    available: updateInfo,
+    checking: updateChecking,
+    installing: updateInstalling,
+    message: updateMessage,
+    error: updateError,
+    check: checkUpdate,
+    install: installUpdate,
+  } = useUpdateStore();
   const [kind, setKind] = useState<string>("openai");
   const [baseUrl, setBaseUrl] = useState("");
   const [model, setModel] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [message, setMessage] = useState<string | null>(null);
-  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
-  const [updateChecking, setUpdateChecking] = useState(false);
-  const [updateInstalling, setUpdateInstalling] = useState(false);
-  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
-  const [updateError, setUpdateError] = useState<string | null>(null);
 
   useEffect(() => {
     loadProvider()
@@ -58,39 +62,6 @@ export function SettingsView() {
       setMessage("API Key 已保存（仅存本地 SQLite secrets 表）");
     } catch (e) {
       setMessage(String(e));
-    }
-  };
-
-  const checkUpdate = async () => {
-    setUpdateMessage(null);
-    setUpdateError(null);
-    setUpdateInfo(null);
-    setUpdateChecking(true);
-    try {
-      const info = await updater.check();
-      if (info) {
-        setUpdateInfo(info);
-      } else {
-        setUpdateMessage("已是最新版本");
-      }
-    } catch (e) {
-      setUpdateError(String(e));
-    } finally {
-      setUpdateChecking(false);
-    }
-  };
-
-  const installUpdate = async () => {
-    setUpdateError(null);
-    setUpdateInstalling(true);
-    try {
-      await updater.installAndRelaunch();
-      // 成功路径应用会重启；若未重启则提示手动操作。
-      setUpdateMessage("更新已安装，请重启应用完成升级");
-    } catch (e) {
-      setUpdateError(String(e));
-    } finally {
-      setUpdateInstalling(false);
     }
   };
 
@@ -199,7 +170,7 @@ export function SettingsView() {
           <header className="card-head">
             <div>
               <h3>应用更新</h3>
-              <p className="card-sub">经 GitHub Releases 检查新版本；更新包经 minisign 签名校验后替换安装并重启。</p>
+              <p className="card-sub">经 GitHub Releases 检查新版本（应用启动时与每 6 小时自动检查）；更新包经 minisign 签名校验后替换安装并重启。</p>
             </div>
           </header>
           <div className="key-row">
