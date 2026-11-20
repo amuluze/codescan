@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-11-20
+
+### Added
+
+- The app now checks for updates on startup and every 6 hours; when a newer release is found, an upgrade icon appears before the version number in the header and clicking it opens the Settings page to download and install the update
+- The Scan page offers a quick-select of recently scanned workspaces beside the workspace picker: entries are deduplicated, ordered most recent first, capped at 8, and refresh after each scan
+
 ## [1.3.1] - 2026-11-19
 
 ### Fixed

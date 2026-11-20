@@ -117,6 +117,8 @@ export type UpdateInfo = { version: string; notes: string };
 
 /** 检查到的更新对象须跨调用保留（downloadAndInstall 依赖同一实例）。 */
 let pendingUpdate: Update | null = null;
+/** 安装进行中：期间不释放 pendingUpdate（下载依赖其持有的 Rust 侧资源）。 */
+let installing = false;
 
 /**
  * 自更新：端点为 GitHub Releases 的 latest.json（draft 发布后生效），更新包
@@ -127,16 +129,28 @@ export const updater = {
   /** 检查更新；无更新返回 null，失败向上抛错由 UI 展示。 */
   async check(): Promise<UpdateInfo | null> {
     const update = await updaterCheck();
-    if (!update) return null;
+    const previous = pendingUpdate;
     pendingUpdate = update;
+    // 每次检查都会在 Rust 侧新建 update 资源；被替换的旧实例必须显式释放，
+    // 否则定期检查会持续堆积（安装进行中除外：下载依赖该资源）。
+    if (previous && previous !== update && !installing) {
+      void previous.close().catch(() => {});
+    }
+    if (!update) return null;
     return { version: update.version, notes: update.body ?? "" };
   },
 
   /** 下载并安装已检查到的更新，随后重启应用。 */
   async installAndRelaunch(): Promise<void> {
-    if (!pendingUpdate) throw new Error("没有待安装的更新（请先检查更新）");
-    await pendingUpdate.downloadAndInstall();
-    await relaunch();
+    const update = pendingUpdate;
+    if (!update) throw new Error("没有待安装的更新（请先检查更新）");
+    installing = true;
+    try {
+      await update.downloadAndInstall();
+      await relaunch();
+    } finally {
+      installing = false;
+    }
   },
 };
 

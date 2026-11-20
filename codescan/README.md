@@ -45,7 +45,7 @@ CodeScan takes the deterministic path and makes it explicit:
 | Desktop app | Scan, findings, rules, history, settings — local SQLite, local data root |
 | CLI | `codescan scan` for local checks and CI gating, `codescan github-upload` for SARIF upload |
 | LLM assist (BYO key) | Triage, streaming triage, batch triage, workspace source review, candidate rule generation — advisory only |
-| Privacy | Scanning is read-only; no telemetry; API keys live in a Rust-owned secrets table |
+| Privacy | Scanning is read-only; no telemetry (the only outbound request is the GitHub Releases update check); API keys live in a Rust-owned secrets table |
 
 ## Rule coverage
 
@@ -70,6 +70,8 @@ Rules live in [`crates/engine/rules/`](crates/engine/rules/) as YAML. Adding you
 1. Download the latest `.dmg` from [Releases](https://github.com/amuluze/codescan/releases) (macOS arm64).
 2. Mount and drag **CodeScan** to Applications. Unsigned/ad-hoc builds are quarantined by Gatekeeper — use right-click → *Open* on first launch.
 3. In the app: **Scan** → *选择工作区* (pick a workspace) → *开始扫描* → review results under **发现 / Findings**.
+
+The app checks GitHub Releases for a newer version on startup and every 6 hours; when one is found, an upgrade icon appears before the version number in the header and clicking it opens **Settings** to install it. Apart from that update check, the app does not go online.
 
 ### Build from source
 
