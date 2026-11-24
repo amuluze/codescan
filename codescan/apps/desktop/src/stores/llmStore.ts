@@ -160,6 +160,7 @@ export const useLlmStore = create<LlmState>((set, get) => ({
         accumulated = accumulated
           ? {
               ...result,
+              // skipped_large 是工作区级常量（每页重复计算），取最新页值，不累计。
               files_reviewed: accumulated.files_reviewed + result.files_reviewed,
               total_bytes: accumulated.total_bytes + result.total_bytes,
               dropped: accumulated.dropped + result.dropped,

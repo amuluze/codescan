@@ -454,25 +454,32 @@ pub struct ReviewSelection {
     pub candidates: usize,
     /// 下一个未消费的候选序号；等于 candidates 表示已到末尾。
     pub next_offset: usize,
+    /// 因超大（>64 KiB）或压缩形态未纳入审查的源码文件数；工作区级常量，每页重复计算。
+    pub skipped_large: usize,
 }
 
 /// 按语言轮转生成确定性候选顺序（组内保持调用方传入的相对路径顺序）。
-fn review_candidate_order(files: &[(PathBuf, String)]) -> Vec<(PathBuf, String)> {
+/// 返回 (候选顺序, 因超大被排除的源码文件数)：先判语言再判大小，
+/// 使超大计数只覆盖确实可识别为源码的文件。
+fn review_candidate_order(files: &[(PathBuf, String)]) -> (Vec<(PathBuf, String)>, usize) {
     use std::collections::BTreeMap;
 
     let mut groups: BTreeMap<String, Vec<(PathBuf, String)>> = BTreeMap::new();
+    let mut skipped_large = 0usize;
     for (abs, rel) in files {
-        let Ok(metadata) = std::fs::metadata(abs) else {
-            continue;
-        };
-        if metadata.len() > llm::REVIEW_FILE_MAX_BYTES {
-            continue;
-        }
         let Some(language) =
             codescan_engine::language::Language::detect(std::path::Path::new(rel))
         else {
             continue;
         };
+        let Ok(metadata) = std::fs::metadata(abs) else {
+            continue;
+        };
+        if metadata.len() > llm::REVIEW_FILE_MAX_BYTES {
+            // 超大源码文件不参与审查，但计数暴露覆盖盲区（UI 摘要展示）。
+            skipped_large += 1;
+            continue;
+        }
         groups
             .entry(language.as_str().to_string())
             .or_default()
@@ -495,11 +502,13 @@ fn review_candidate_order(files: &[(PathBuf, String)]) -> Vec<(PathBuf, String)>
             break;
         }
     }
-    order
+    (order, skipped_large)
 }
 
 /// 从工作区文件中取一页可审查源码：
 /// - 跳过超限、不可读与二进制文件（不计入页内，但消费游标）；
+/// - 压缩/生成形态（行数 < 4 且 > 16 KiB）读入后静默跳过（消费游标，与二进制同口径）：
+///   按行二分对它们无效，预过滤避免 thinking 截断后整页中止；
 /// - 按语言轮转顺序分页，`offset` 为候选序号；
 /// - 遵守文件数与总字节上限；预算不足时保留该候选给下一页。
 pub fn collect_review_files(
@@ -508,7 +517,7 @@ pub fn collect_review_files(
     max_bytes: usize,
     offset: usize,
 ) -> ReviewSelection {
-    let order = review_candidate_order(files);
+    let (order, skipped_large) = review_candidate_order(files);
     let candidates = order.len();
     let mut index = offset.min(candidates);
     let mut files_out = Vec::new();
@@ -530,6 +539,10 @@ pub fn collect_review_files(
         }
         let content = String::from_utf8_lossy(&bytes).into_owned();
         let lines = content.lines().count().max(1);
+        if lines < 4 && bytes.len() > llm::REVIEW_MINIFIED_MIN_BYTES {
+            // 压缩/生成形态：按行二分到单行仍会超预算，跳过（消费游标）。
+            continue;
+        }
         total_bytes += bytes.len();
         files_out.push(llm::ReviewFile {
             path: rel.clone(),
@@ -544,6 +557,7 @@ pub fn collect_review_files(
         total_bytes,
         candidates,
         next_offset: index,
+        skipped_large,
     }
 }
 
@@ -603,6 +617,7 @@ pub async fn llm_review_workspace(
         next_offset: selection.next_offset,
         total_bytes: selection.total_bytes,
         model: config.model,
+        skipped_large: selection.skipped_large as u32,
         dropped,
         suggestions,
     })

@@ -269,6 +269,8 @@ export function ScanView() {
           {review && (
             <span className="muted review-summary">
               已审查 {review.files_reviewed} / {review.candidate_files} 个可审查文件
+              {review.skipped_large > 0 &&
+                ` · 另有 ${review.skipped_large} 个超大文件（>64 KiB）未纳入审查`}
               {review.dropped > 0 && ` · 过滤 ${review.dropped} 条无效`}
             </span>
           )}

@@ -220,6 +220,7 @@ beforeEach(() => {
         return {
           files_reviewed: offset === 0 ? 2 : 1,
           candidate_files: 3,
+          skipped_large: 1,
           next_offset: offset === 0 ? 2 : 3,
           total_bytes: 2048,
           model: "test-model",
@@ -797,6 +798,8 @@ describe("App 主链路", () => {
     // 两页返回同一条建议：跨页去重后只保留一条。
     // 统计卡片与列表一致：跨页去重后只计 1 条（警告级）。
     expect(screen.getByTestId("review-stats").textContent).toBe("1建议0错误1警告0提示");
+    // 超大文件的排除在摘要中可见（覆盖盲区信号）。
+    expect(screen.getByText(/另有 1 个超大文件/)).toBeTruthy();
     expect(screen.getByText(/过滤 2 条无效/)).toBeTruthy();
   });
 

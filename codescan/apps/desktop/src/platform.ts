@@ -71,6 +71,8 @@ export type ReviewSuggestion = {
 export type ReviewResult = {
   files_reviewed: number;
   candidate_files: number;
+  /** 因超大（>64 KiB）未纳入审查的源码文件数；工作区级常量，续审不累计。 */
+  skipped_large: number;
   next_offset: number;
   total_bytes: number;
   model: string;

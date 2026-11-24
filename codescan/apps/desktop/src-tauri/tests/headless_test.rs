@@ -628,6 +628,12 @@ fn review_file_collection_respects_limits_and_skips_unreviewable() {
     std::fs::write(root.join("src/c.txt"), "plain\n").unwrap();
     std::fs::write(root.join("src/d.ts"), "const a = 1;\n").unwrap();
     std::fs::write(root.join("src/big.py"), "x".repeat(70 * 1024)).unwrap();
+    // 压缩/生成形态：行数极少且体积大，按行二分无效，应预过滤而非触发整页中止。
+    std::fs::write(
+        root.join("src/minified.ts"),
+        format!("var a=1;{}\nvar b=2;\n", "x".repeat(20 * 1024)),
+    )
+    .unwrap();
 
     let listed = vec![
         (root.join("src/a.py"), "src/a.py".to_string()),
@@ -635,12 +641,20 @@ fn review_file_collection_respects_limits_and_skips_unreviewable() {
         (root.join("src/big.py"), "src/big.py".to_string()),
         (root.join("src/c.txt"), "src/c.txt".to_string()),
         (root.join("src/d.ts"), "src/d.ts".to_string()),
+        (root.join("src/minified.ts"), "src/minified.ts".to_string()),
     ];
     let selection = collect_review_files(&listed, 12, 64 * 1024, 0);
     let paths: Vec<&str> = selection.files.iter().map(|f| f.path.as_str()).collect();
     assert_eq!(paths, vec!["src/a.py", "src/d.ts"]);
-    assert_eq!(selection.candidates, 2, "仅语言可识别的非超限文件进入候选");
-    assert_eq!(selection.next_offset, 2);
+    assert_eq!(
+        selection.candidates, 3,
+        "minified.ts 是候选（语言可识别且未超限），但读入后被预过滤"
+    );
+    assert_eq!(selection.next_offset, 3, "三类跳过均消费游标");
+    assert_eq!(
+        selection.skipped_large, 1,
+        "超大（>64 KiB）的源码文件计数暴露盲区，非源码不计数"
+    );
     assert_eq!(
         selection.total_bytes,
         selection.files.iter().map(|f| f.content.len()).sum::<usize>()
@@ -651,11 +665,12 @@ fn review_file_collection_respects_limits_and_skips_unreviewable() {
     assert_eq!(selection.files.len(), 1);
     assert_eq!(selection.files[0].path, "src/a.py");
     assert_eq!(selection.next_offset, 1);
+    assert_eq!(selection.skipped_large, 1, "超大计数与页无关");
 
     // 总字节预算不足：保留候选给下一页。
     let selection = collect_review_files(&listed, 12, 5, 0);
     assert!(selection.files.is_empty(), "所有候选超出总预算");
-    assert_eq!(selection.candidates, 2);
+    assert_eq!(selection.candidates, 3);
     assert_eq!(selection.next_offset, 0);
 }
 
