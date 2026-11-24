@@ -40,6 +40,14 @@ Click "生成候选规则"; the model produces a `custom/`-prefixed rule YAML. R
 
 "运行回归验证" runs `llm_candidate_regression(scan_id, fingerprint, candidate_yaml, save_fixture)` against a **temporary corpus** — no LLM call, no network. It copies the seed file, inserts a `// ruleid:` / `# ruleid:` annotation above the finding line, scans the temp directory with only the candidate rule, and reports missed / over-matched lines. The result is display-only and never changes findings, baselines, or gate results.
 
+### 6. Workspace source review (reference)
+
+Click "开始审查" on the Scan page; the command `llm_review_workspace(root, max_files, offset)` sends candidate source files to the configured provider in batches (at most 24 files, ≤128 KiB per run) and pages automatically by cursor until all candidates are covered; "重置进度" aborts and clears.
+
+- Each suggestion carries `path / line / severity / category / title / detail / confidence`; duplicates across pages are deduplicated by (path, line, title); unparsable or over-budget entries are counted as `dropped` and shown in the inline summary.
+- Since v1.5.0 the review card shows a result stats grid: suggestion total plus error / warning / info counts, mirroring the deterministic scan result stats; the inline summary keeps only coverage (files reviewed) and dropped counts. Display-only — never written to findings, baselines, or gates.
+- Results can be filtered by severity / dimension / confidence / keyword, and exported as Markdown + JSON.
+
 ## Discipline and boundaries
 
 - LLM output never enters the gate; only saved deterministic rules affect scans and baselines.
