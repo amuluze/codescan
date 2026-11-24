@@ -42,23 +42,44 @@ vi.mock("./platform", () => {
       platform.invoke("export_report", { destDir, base, markdown, json }),
     listDirectory: (path?: string) =>
       platform.invoke("list_directory", { path: path ?? null }),
-    getProviderConfig: () => platform.invoke("get_provider_config"),
-    setProviderConfig: (kind: string, baseUrl: string, model: string) =>
-      platform.invoke("set_provider_config", { kind, baseUrl, model }),
-    setApiKey: (key: string) => platform.invoke("set_api_key", { key }),
-    clearApiKey: () => platform.invoke("clear_api_key"),
-    testProviderConnection: () => platform.invoke("test_provider_connection"),
+    listProviders: () => platform.invoke("list_providers"),
+    upsertProviderProfile: (profile: {
+      id: string | null;
+      name: string;
+      kind: string;
+      baseUrl: string;
+      model: string;
+    }) =>
+      platform.invoke("upsert_provider_profile", {
+        id: profile.id,
+        name: profile.name,
+        kind: profile.kind,
+        baseUrl: profile.baseUrl,
+        model: profile.model,
+      }),
+    deleteProviderProfile: (id: string) =>
+      platform.invoke("delete_provider_profile", { id }),
+    setActiveProvider: (id: string) =>
+      platform.invoke("set_active_provider", { id }),
+    setProviderApiKey: (id: string, key: string) =>
+      platform.invoke("set_provider_api_key", { id, key }),
+    clearProviderApiKey: (id: string) =>
+      platform.invoke("clear_provider_api_key", { id }),
+    testProviderConnection: (id?: string) =>
+      platform.invoke("test_provider_connection", { profileId: id ?? null }),
     llmReviewWorkspace: (
       root: string,
       maxFiles?: number,
       offset?: number,
       requestId?: string,
+      providerId?: string | null,
     ) =>
       platform.invoke("llm_review_workspace", {
         root,
         maxFiles: maxFiles ?? null,
         offset: offset ?? 0,
         requestId: requestId ?? null,
+        providerId: providerId ?? null,
       }),
     llmTriage: (scanId: number, fingerprint: string) =>
       platform.invoke("llm_triage", { scanId, fingerprint }),
@@ -140,11 +161,12 @@ beforeEach(() => {
     selected: null,
   });
   useLlmStore.setState({
-    provider: null,
+    providers: null,
     testing: false,
     testResult: null,
     testError: null,
     review: null,
+    reviewProviderId: null,
     reviewRunning: false,
     reviewError: null,
     reviewProgress: null,
@@ -206,13 +228,35 @@ beforeEach(() => {
           entries: [{ name: "workspace-sub", path: "/tmp/ws/sub" }],
         };
       }
-      case "get_provider_config":
+      case "list_providers":
         return {
-          kind: "openai",
-          base_url: "https://api.openai.com/v1",
-          model: "test-model",
-          has_key: true,
+          profiles: [
+            {
+              id: "p1",
+              name: "OpenAI 主力",
+              kind: "openai",
+              base_url: "https://api.openai.com/v1",
+              model: "test-model",
+              has_key: true,
+            },
+            {
+              id: "p2",
+              name: "智谱 GLM",
+              kind: "anthropic",
+              base_url: "https://open.bigmodel.cn/api/anthropic",
+              model: "glm-test",
+              has_key: false,
+            },
+          ],
+          active: "p1",
         };
+      case "upsert_provider_profile":
+        return ((args?.id as string | undefined) ?? "p-new").trim() || "p-new";
+      case "delete_provider_profile":
+      case "set_active_provider":
+      case "set_provider_api_key":
+      case "clear_provider_api_key":
+        return null;
       case "test_provider_connection":
         return { kind: "openai", model: "test-model", latency_ms: 87 };
       case "llm_review_workspace": {
@@ -411,28 +455,54 @@ describe("App 主链路", () => {
     expect(screen.getByText("尚未选择工作区。点击「选择工作区」浏览本地目录后开始。")).toBeInTheDocument();
   });
 
-  it("设置页加载并保存 Provider 配置，密钥状态可见", async () => {
+  it("设置页展示多个 Provider Profile，可编辑保存与新建，密钥状态可见", async () => {
     const user = userEvent.setup();
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "设置" }));
-    await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("get_provider_config");
-    });
-    expect(screen.getByTestId("key-status")).toHaveTextContent("已配置");
-    const model = screen.getByLabelText("Model") as HTMLInputElement;
-    await waitFor(() => expect(model.value).toBe("test-model"));
+    const table = await screen.findByTestId("provider-table");
+    expect(invokeMock).toHaveBeenCalledWith("list_providers");
+    expect(table.textContent).toContain("OpenAI 主力");
+    expect(table.textContent).toContain("智谱 GLM");
+    expect(table.textContent).toContain("glm-test");
+    // 密钥状态按 Profile 独立展示。
+    expect(table.textContent).toContain("未配置");
 
+    // 编辑活动 Profile：修改模型保存。
+    await user.click(screen.getAllByRole("button", { name: "编辑" })[0]);
+    const model = screen.getByLabelText("Model") as HTMLInputElement;
+    expect(model.value).toBe("test-model");
+    expect(screen.getByTestId("key-status")).toHaveTextContent("已配置");
     await user.clear(model);
     await user.type(model, "new-model");
-    await user.click(screen.getByRole("button", { name: "保存 Provider 配置" }));
+    await user.click(screen.getByTestId("profile-save"));
     await waitFor(() => {
-      expect(invokeMock).toHaveBeenCalledWith("set_provider_config", {
+      expect(invokeMock).toHaveBeenCalledWith("upsert_provider_profile", {
+        id: "p1",
+        name: "OpenAI 主力",
         kind: "openai",
         baseUrl: "https://api.openai.com/v1",
         model: "new-model",
       });
     });
+
+    // 新建 Profile：保存后落库 id 并提示配置 Key。
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    await user.click(screen.getByTestId("profile-new"));
+    await user.type(screen.getByLabelText("Profile 名称"), "备用");
+    await user.type(screen.getByLabelText("Model"), "backup-model");
+    await user.click(screen.getByTestId("profile-save"));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("upsert_provider_profile", {
+        id: null,
+        name: "备用",
+        kind: "openai",
+        baseUrl: "",
+        model: "backup-model",
+      });
+    });
+    // 新建保存后进入已落库编辑态，可继续配置 Key。
+    expect(screen.getByTestId("key-status")).toHaveTextContent("未配置");
   });
 
   it("分诊面板标注非确定性参考，候选规则可保存", async () => {
@@ -609,24 +679,29 @@ describe("App 主链路", () => {
     expect(flows.textContent).toContain("第 2 行");
   });
 
-  it("设置页测试连接成功时展示模型与延迟", async () => {
+  it("设置页按 Profile 测试连接成功时展示模型与延迟", async () => {
     const user = userEvent.setup();
     render(<App />);
     await user.click(screen.getByRole("button", { name: "设置" }));
-    await user.click(await screen.findByRole("button", { name: "测试连接" }));
+    const buttons = await screen.findAllByRole("button", { name: "测试" });
+    await user.click(buttons[0]);
     const ok = await screen.findByTestId("provider-test-ok");
     expect(ok).toHaveTextContent("连接成功");
     expect(ok).toHaveTextContent("test-model");
     expect(ok).toHaveTextContent("87 ms");
+    expect(invokeMock).toHaveBeenCalledWith("test_provider_connection", {
+      profileId: "p1",
+    });
   });
 
   it("设置页测试连接失败时展示可读错误", async () => {
     const user = userEvent.setup();
     render(<App />);
     await user.click(screen.getByRole("button", { name: "设置" }));
-    await screen.findByTestId("key-status");
+    await screen.findByTestId("provider-table");
     invokeMock.mockRejectedValueOnce(new Error("Provider 返回 401：Unauthorized"));
-    await user.click(screen.getByRole("button", { name: "测试连接" }));
+    const buttons = await screen.findAllByRole("button", { name: "测试" });
+    await user.click(buttons[0]);
     const err = await screen.findByTestId("provider-test-error");
     expect(err).toHaveTextContent("401");
   });
@@ -782,6 +857,7 @@ describe("App 主链路", () => {
       maxFiles: 24,
       offset: 0,
       requestId: expect.any(String),
+      providerId: null,
     });
 
     // 自动续审：无需手动点击，携带游标直至覆盖全部候选。
@@ -791,6 +867,7 @@ describe("App 主链路", () => {
         maxFiles: 24,
         offset: 2,
         requestId: expect.any(String),
+        providerId: null,
       }),
     );
     expect(await screen.findByRole("button", { name: "已审查全部候选" })).toBeDisabled();
@@ -801,6 +878,28 @@ describe("App 主链路", () => {
     // 超大文件的排除在摘要中可见（覆盖盲区信号）。
     expect(screen.getByText(/另有 1 个超大文件/)).toBeTruthy();
     expect(screen.getByText(/过滤 2 条无效/)).toBeTruthy();
+  });
+
+  it("审查卡可切换模型 Profile，选择随请求下发", async () => {
+    useScanStore.setState({ workspace: "/tmp/ws" });
+    const user = userEvent.setup();
+    render(<App />);
+    const select = await screen.findByTestId("review-provider");
+    // 缺省选中活动 Profile（p1）。
+    expect((select as HTMLSelectElement).value).toBe("p1");
+    expect(select.textContent).toContain("智谱 GLM");
+
+    await user.selectOptions(select, "p2");
+    await user.click(screen.getByRole("button", { name: "开始审查" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("llm_review_workspace", {
+        root: "/tmp/ws",
+        maxFiles: 24,
+        offset: 0,
+        requestId: expect.any(String),
+        providerId: "p2",
+      });
+    });
   });
 
   it("自动续审中途失败：保留已审查结果并可从游标恢复", async () => {

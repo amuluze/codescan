@@ -1,4 +1,4 @@
-/** LLM 辅助层状态：Provider 配置、分诊结果、候选规则（均不入门禁）。 */
+/** LLM 辅助层状态：Provider Profile、分诊结果、候选规则（均不入门禁）。 */
 import { create } from "zustand";
 import {
   api,
@@ -6,8 +6,8 @@ import {
   type BatchTriageEntry,
   type CandidateRegression,
   type CandidateRule,
-  type ProviderInfo,
   type ProviderTestResult,
+  type ProvidersInfo,
   type ReviewResult,
   type TriageResult,
 } from "../platform";
@@ -30,12 +30,15 @@ function mergeSuggestions(
 }
 
 type LlmState = {
-  provider: ProviderInfo | null;
+  /** Provider Profile 列表与活动 Profile（Domain §3a.2）。 */
+  providers: ProvidersInfo | null;
   testing: boolean;
   testResult: ProviderTestResult | null;
   testError: string | null;
   /** LLM 源码审查：仅展示层，不进入发现/基线。 */
   review: ReviewResult | null;
+  /** 审查调用显式选择的 Profile；null = 活动 Profile。 */
+  reviewProviderId: string | null;
   /** 自动分页续审进行中；「重置进度」可中止并清空。 */
   reviewRunning: boolean;
   reviewError: string | null;
@@ -51,12 +54,28 @@ type LlmState = {
   batch: BatchTriageEntry[] | "loading" | null;
   batchError: string | null;
   errors: Record<string, string | null>;
-  loadProvider: () => Promise<void>;
-  saveProvider: (kind: string, baseUrl: string, model: string) => Promise<void>;
-  saveApiKey: (key: string) => Promise<void>;
-  clearApiKey: () => Promise<void>;
-  testConnection: () => Promise<void>;
-  runReview: (root: string, maxFiles?: number, offset?: number) => Promise<void>;
+  loadProviders: () => Promise<void>;
+  /** 新建（id 为 null）或更新 Profile；返回落库 id。 */
+  saveProfile: (profile: {
+    id: string | null;
+    name: string;
+    kind: string;
+    baseUrl: string;
+    model: string;
+  }) => Promise<string>;
+  deleteProfile: (id: string) => Promise<void>;
+  setActiveProfile: (id: string) => Promise<void>;
+  setProfileKey: (id: string, key: string) => Promise<void>;
+  clearProfileKey: (id: string) => Promise<void>;
+  /** 测试指定（或活动）Profile 连通性。 */
+  testConnection: (id?: string) => Promise<void>;
+  setReviewProvider: (id: string | null) => void;
+  runReview: (
+    root: string,
+    maxFiles?: number,
+    offset?: number,
+    providerId?: string | null,
+  ) => Promise<void>;
   resetReview: () => void;
   runTriage: (scanId: number, fingerprint: string) => Promise<void>;
   runTriageStream: (scanId: number, fingerprint: string) => Promise<void>;
@@ -72,11 +91,12 @@ type LlmState = {
 };
 
 export const useLlmStore = create<LlmState>((set, get) => ({
-  provider: null,
+  providers: null,
   testing: false,
   testResult: null,
   testError: null,
   review: null,
+  reviewProviderId: null,
   reviewRunning: false,
   reviewError: null,
   reviewProgress: null,
@@ -89,33 +109,46 @@ export const useLlmStore = create<LlmState>((set, get) => ({
   batchError: null,
   errors: {},
 
-  async loadProvider() {
-    const provider = await api.getProviderConfig();
-    set({ provider });
+  async loadProviders() {
+    const providers = await api.listProviders();
+    set({ providers });
   },
 
-  async saveProvider(kind, baseUrl, model) {
-    await api.setProviderConfig(kind, baseUrl, model);
-    await get().loadProvider();
+  async saveProfile(profile) {
+    const id = await api.upsertProviderProfile(profile);
+    await get().loadProviders();
+    set({ testResult: null, testError: null });
+    return id;
+  },
+
+  async deleteProfile(id) {
+    await api.deleteProviderProfile(id);
+    // 删除当前审查选择时回落活动 Profile。
+    if (get().reviewProviderId === id) set({ reviewProviderId: null });
+    await get().loadProviders();
+  },
+
+  async setActiveProfile(id) {
+    await api.setActiveProvider(id);
+    await get().loadProviders();
+  },
+
+  async setProfileKey(id, key) {
+    await api.setProviderApiKey(id, key);
+    await get().loadProviders();
     set({ testResult: null, testError: null });
   },
 
-  async saveApiKey(key) {
-    await api.setApiKey(key);
-    await get().loadProvider();
+  async clearProfileKey(id) {
+    await api.clearProviderApiKey(id);
+    await get().loadProviders();
     set({ testResult: null, testError: null });
   },
 
-  async clearApiKey() {
-    await api.clearApiKey();
-    await get().loadProvider();
-    set({ testResult: null, testError: null });
-  },
-
-  async testConnection() {
+  async testConnection(id) {
     set({ testing: true, testResult: null, testError: null });
     try {
-      const result = await api.testProviderConnection();
+      const result = await api.testProviderConnection(id);
       set({ testResult: result });
     } catch (e) {
       set({ testError: String(e) });
@@ -124,7 +157,12 @@ export const useLlmStore = create<LlmState>((set, get) => ({
     }
   },
 
-  async runReview(root, maxFiles, offset = 0) {
+  setReviewProvider(id) {
+    set({ reviewProviderId: id });
+  },
+
+
+  async runReview(root, maxFiles, offset = 0, providerId: string | null = null) {
     const seq = ++reviewSeq;
     const current = get().review;
     let accumulated: ReviewResult | null = offset > 0 && current ? current : null;
@@ -152,7 +190,7 @@ export const useLlmStore = create<LlmState>((set, get) => ({
         });
         let result: ReviewResult;
         try {
-          result = await api.llmReviewWorkspace(root, maxFiles, cursor, requestId);
+          result = await api.llmReviewWorkspace(root, maxFiles, cursor, requestId, providerId);
         } finally {
           unlisten();
         }

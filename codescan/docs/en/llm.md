@@ -6,10 +6,11 @@ The [Chinese version of this document](../llm.md) is the original; this file mir
 
 ## Configuration
 
-In Settings, fill in provider kind, base URL, model, and API key:
+Settings stores **multiple provider profiles** (name / kind / base URL / model), each with its own API key; exactly one "default" profile is the fallback for all LLM calls, and the legacy single configuration migrates on first read (Domain 3a.2):
 
-- The API key is written only to the `secrets` table in `~/.codescan/codescan.db` (Rust-exclusive read/write); the command layer exposes only "configured / not configured" and has no plaintext read-back path.
-- Requests go only to the base URL you configure: OpenAI uses `{base}/chat/completions` (Bearer), Anthropic uses `{base}/v1/messages` (`x-api-key` + `anthropic-version`).
+- API keys are stored per profile in the `secrets` table of `~/.codescan/codescan.db` (key `llm:api_key:<id>`, Rust-exclusive read/write); the command layer exposes only "configured / not configured" and has no plaintext read-back path.
+- Requests go only to the selected profile's base URL: OpenAI uses `{base}/chat/completions` (Bearer), Anthropic uses `{base}/v1/messages` (`x-api-key` + `anthropic-version`).
+- Source review can pick a different profile explicitly via the "模型" dropdown on the Scan page; triage and other calls always use the default profile.
 - Timeouts: 60s non-streaming, 120s streaming; error messages never contain the key.
 - Transport errors show the full underlying cause chain (DNS / TCP / TLS / proxy / timeout) plus a short troubleshooting hint; requests honor `HTTPS_PROXY` / `ALL_PROXY` environment variables.
 
@@ -43,7 +44,7 @@ Click "生成候选规则"; the model produces a `custom/`-prefixed rule YAML. R
 
 ### 6. Workspace source review (reference)
 
-Click "开始审查" on the Scan page; the command `llm_review_workspace(root, max_files, offset)` sends candidate source files to the configured provider in batches (at most 24 files, ≤128 KiB per run) and pages automatically by cursor until all candidates are covered; "重置进度" aborts and clears.
+Click "开始审查" on the Scan page; the command `llm_review_workspace(root, max_files, offset, provider_id)` sends candidate source files to the selected provider profile in batches (at most 24 files, ≤128 KiB per run) and pages automatically by cursor until all candidates are covered; "重置进度" aborts and clears. The "模型" dropdown in the review card switches profiles; the default is the active profile from Settings.
 
 - Each suggestion carries `path / line / severity / category / title / detail / confidence`; duplicates across pages are deduplicated by (path, line, title); unparsable or over-budget entries are counted as `dropped` and shown in the inline summary.
 - Since v1.5.0 the review card shows a result stats grid: suggestion total plus error / warning / info counts, mirroring the deterministic scan result stats; the inline summary keeps only coverage (files reviewed) and dropped counts. Display-only — never written to findings, baselines, or gates.

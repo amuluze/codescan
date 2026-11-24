@@ -12,6 +12,12 @@ use std::collections::HashSet;
 
 pub const SECRET_API_KEY: &str = "llm:api_key";
 pub const META_PROVIDER: &str = "llm:provider";
+/// v1.6 起：Profile 列表与活动 Profile；密钥按 `llm:api_key:<id>` 逐 Profile 存储。
+pub const META_PROVIDER_PROFILES: &str = "llm:provider_profiles";
+pub const META_ACTIVE_PROVIDER: &str = "llm:active_provider";
+pub const SECRET_API_KEY_PREFIX: &str = "llm:api_key:";
+/// 旧版单一配置迁移后的 Profile id。
+pub const LEGACY_PROFILE_ID: &str = "default";
 /// 批量分诊单次上限（任务 Spec §2）。
 pub const BATCH_TRIAGE_LIMIT: usize = 20;
 
@@ -57,6 +63,50 @@ impl ProviderConfig {
     pub fn from_json(json: &str) -> Result<ProviderConfig, String> {
         serde_json::from_str(json).map_err(|e| format!("Provider 配置解析失败：{e}"))
     }
+}
+
+/// 审查/分诊等 LLM 调用使用的 Provider 档案；密钥独立存储（Domain §3a.2）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderProfile {
+    pub id: String,
+    /// 展示名（设置页与模型切换下拉使用）。
+    pub name: String,
+    pub kind: ProviderKind,
+    pub base_url: String,
+    pub model: String,
+}
+
+impl ProviderProfile {
+    pub fn config(&self) -> ProviderConfig {
+        ProviderConfig {
+            kind: self.kind,
+            base_url: self.base_url.clone(),
+            model: self.model.clone(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.id.trim().is_empty() {
+            return Err("Profile id 不能为空".into());
+        }
+        if self.name.trim().is_empty() {
+            return Err("Profile 名称不能为空".into());
+        }
+        self.config().validate()
+    }
+
+    pub fn secret_id(id: &str) -> String {
+        format!("{SECRET_API_KEY_PREFIX}{id}")
+    }
+}
+
+/// Profile 列表持久化为单个 meta JSON（数量小、整体读写）。
+pub fn profiles_to_json(profiles: &[ProviderProfile]) -> String {
+    serde_json::to_string(profiles).unwrap_or_else(|_| "[]".into())
+}
+
+pub fn profiles_from_json(json: &str) -> Result<Vec<ProviderProfile>, String> {
+    serde_json::from_str(json).map_err(|e| format!("Provider Profile 列表解析失败：{e}"))
 }
 
 /// 分诊结果：展示层参考，不参与门禁（Domain §5.3）。

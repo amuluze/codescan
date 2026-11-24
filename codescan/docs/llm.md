@@ -4,10 +4,11 @@ Provider 形态复刻 axiom：OpenAI-compatible 与 Anthropic-compatible 两类�
 
 ## 配置
 
-设置页填写 Provider kind、Base URL、Model 与 API Key：
+设置页可保存**多个 Provider Profile**（名称 / kind / Base URL / Model），每个 Profile 独立绑定 API Key；恰有一个「默认」Profile 作为所有 LLM 调用的缺省选择，旧版单一配置首次读取时自动迁移（Domain §3a.2）：
 
-- API Key 仅写入 `~/.codescan/codescan.db` 的 `secrets` 表（Rust 独占读写）；命令面只暴露「已配置/未配置」，不存在明文回读接口。
-- 请求只发往你配置的 Base URL；OpenAI 走 `{base}/chat/completions`（Bearer），Anthropic 走 `{base}/v1/messages`（`x-api-key` + `anthropic-version`）。
+- API Key 按 Profile 写入 `~/.codescan/codescan.db` 的 `secrets` 表（键 `llm:api_key:<id>`，Rust 独占读写）；命令面只暴露「已配置/未配置」，不存在明文回读接口。
+- 请求只发往所选 Profile 的 Base URL；OpenAI 走 `{base}/chat/completions`（Bearer），Anthropic 走 `{base}/v1/messages`（`x-api-key` + `anthropic-version`）。
+- 源码审查可在扫描页的「模型」下拉中显式指定其他 Profile；分诊等其余调用始终使用默认 Profile。
 - 超时：非流式 60s，流式 120s；错误信息不含密钥。
 - 传输层错误展示完整根因链（DNS / TCP / TLS / 代理 / 超时）并附一条排查提示；请求遵循 `HTTPS_PROXY` / `ALL_PROXY` 环境变量。
 
@@ -64,7 +65,7 @@ UI 只接收与当前 `requestId` 匹配的增量并实时渲染，命令结束�
 
 ### 6. 工作区源码审查（参考）
 
-扫描页点击「开始审查」，命令 `llm_review_workspace(root, max_files, offset)` 把候选源码文件分批发往已配置 Provider（每次最多 24 个文件、合计 ≤128 KiB），自动按游标分页续审直至覆盖全部候选；「重置进度」可中止并清空。
+扫描页点击「开始审查」，命令 `llm_review_workspace(root, max_files, offset, provider_id)` 把候选源码文件分批发往所选 Provider Profile（每次最多 24 个文件、合计 ≤128 KiB），自动按游标分页续审直至覆盖全部候选；「重置进度」可中止并清空。审查卡内「模型」下拉可切换 Profile，缺省为设置页的默认 Profile。
 
 - 建议条目携带 `path / line / severity / category / title / detail / confidence`，跨页按 (path, line, title) 去重；无法解析或超出预算的条目按 `dropped` 计数并在行内摘要展示。
 - v1.5.0 起审查卡显示**结果统计卡片**：建议总数与「错误 / 警告 / 提示」分级计数，与扫描结果统计卡片同构；行内摘要只保留覆盖（已审查文件数）与过滤计数。数字仅展示层，不进入发现、基线或门禁。

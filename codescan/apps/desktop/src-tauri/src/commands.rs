@@ -320,87 +320,292 @@ pub fn export_report(
 use crate::llm;
 
 #[derive(Serialize)]
-pub struct ProviderInfo {
+pub struct ProfileInfo {
+    pub id: String,
+    pub name: String,
     pub kind: String,
     pub base_url: String,
     pub model: String,
     pub has_key: bool,
 }
 
-fn read_provider_config(store: &Store) -> llm::ProviderConfig {
-    store
-        .get_meta(llm::META_PROVIDER)
+#[derive(Serialize)]
+pub struct ProvidersInfo {
+    pub profiles: Vec<ProfileInfo>,
+    /// 活动 Profile id（分诊与审查的默认值）；无 Profile 时为 null。
+    pub active: Option<String>,
+}
+
+fn profile_kind_str(kind: llm::ProviderKind) -> &'static str {
+    match kind {
+        llm::ProviderKind::OpenAi => "openai",
+        llm::ProviderKind::Anthropic => "anthropic",
+    }
+}
+
+fn parse_kind(kind: &str) -> Result<llm::ProviderKind, String> {
+    match kind {
+        "openai" => Ok(llm::ProviderKind::OpenAi),
+        "anthropic" => Ok(llm::ProviderKind::Anthropic),
+        other => Err(format!("不支持的 provider kind：{other}")),
+    }
+}
+
+/// 旧版单一 Provider 配置在首次读取时迁移为 `default` Profile（含密钥迁移，Domain §3a.2）。
+/// 迁移条件：Profile 列表不存在且旧配置存在；迁移失败不影响读取（返回空列表）。
+fn migrate_legacy_provider(store: &Store) {
+    if store
+        .get_meta(llm::META_PROVIDER_PROFILES)
         .ok()
         .flatten()
-        .and_then(|json| llm::ProviderConfig::from_json(&json).ok())
+        .is_some()
+    {
+        return;
+    }
+    let Some(json) = store.get_meta(llm::META_PROVIDER).ok().flatten() else {
+        return;
+    };
+    let Ok(config) = llm::ProviderConfig::from_json(&json) else {
+        return;
+    };
+    if config.validate().is_err() {
+        // 旧配置本身不完整：不迁移，由读取方按「无 Profile」报可读错误。
+        return;
+    }
+    let profile = llm::ProviderProfile {
+        id: llm::LEGACY_PROFILE_ID.into(),
+        name: "默认".into(),
+        kind: config.kind,
+        base_url: config.base_url,
+        model: config.model,
+    };
+    if store
+        .set_meta(
+            llm::META_PROVIDER_PROFILES,
+            &llm::profiles_to_json(std::slice::from_ref(&profile)),
+        )
+        .is_err()
+    {
+        return;
+    }
+    let _ = store.set_meta(
+        llm::META_ACTIVE_PROVIDER,
+        &serde_json::to_string(llm::LEGACY_PROFILE_ID).unwrap_or_else(|_| "\"default\"".into()),
+    );
+    if let Ok(Some(key)) = store.get_secret(llm::SECRET_API_KEY) {
+        let _ = store.set_secret(&llm::ProviderProfile::secret_id(llm::LEGACY_PROFILE_ID), &key);
+        let _ = store.delete_secret(llm::SECRET_API_KEY);
+    }
+}
+
+fn read_profiles(store: &Store) -> Vec<llm::ProviderProfile> {
+    migrate_legacy_provider(store);
+    store
+        .get_meta(llm::META_PROVIDER_PROFILES)
+        .ok()
+        .flatten()
+        .and_then(|json| llm::profiles_from_json(&json).ok())
         .unwrap_or_default()
 }
 
+fn read_active_id(store: &Store) -> Option<String> {
+    store
+        .get_meta(llm::META_ACTIVE_PROVIDER)
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<String>(&json).ok())
+}
+
+/// 解析调用使用的 Profile：显式 id 优先，否则活动 Profile（缺失时回落首个）。
+fn resolve_profile<'a>(
+    store: &Store,
+    profiles: &'a [llm::ProviderProfile],
+    profile_id: Option<&str>,
+) -> Result<&'a llm::ProviderProfile, String> {
+    if let Some(id) = profile_id {
+        return profiles
+            .iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| format!("Provider Profile 不存在：{id}"));
+    }
+    match read_active_id(store) {
+        Some(id) => profiles
+            .iter()
+            .find(|p| p.id == id)
+            .ok_or_else(|| format!("活动 Provider Profile 不存在：{id}")),
+        None => profiles
+            .first()
+            .ok_or_else(|| "未配置任何 Provider Profile".to_string()),
+    }
+}
+
+/// 读回指定（或活动）Profile 与其 Key（无头测试覆盖错误路径）。
+pub fn prepare_provider_probe(
+    store: &Store,
+    profile_id: Option<&str>,
+) -> Result<(llm::ProviderConfig, String), String> {
+    let profiles = read_profiles(store);
+    let profile = resolve_profile(store, &profiles, profile_id)?;
+    let config = profile.config();
+    config.validate()?;
+    let key = store
+        .get_secret(&llm::ProviderProfile::secret_id(&profile.id))
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("未配置 API Key（Profile：{}）", profile.name))?;
+    Ok((config, key))
+}
+
 #[tauri::command]
-pub fn set_provider_config(
+pub fn list_providers(state: State<'_, AppState>) -> Result<ProvidersInfo, String> {
+    let store = state.store.lock().unwrap();
+    let profiles = read_profiles(&store);
+    let mut infos = Vec::with_capacity(profiles.len());
+    for profile in &profiles {
+        let has_key = store
+            .has_secret(&llm::ProviderProfile::secret_id(&profile.id))
+            .unwrap_or(false);
+        infos.push(ProfileInfo {
+            id: profile.id.clone(),
+            name: profile.name.clone(),
+            kind: profile_kind_str(profile.kind).into(),
+            base_url: profile.base_url.clone(),
+            model: profile.model.clone(),
+            has_key,
+        });
+    }
+    let active = read_active_id(&store).filter(|id| profiles.iter().any(|p| &p.id == id));
+    Ok(ProvidersInfo {
+        profiles: infos,
+        active,
+    })
+}
+
+/// 新建（id 为空）或更新一个 Provider Profile；首个 Profile 自动成为活动 Profile。
+#[tauri::command]
+pub fn upsert_provider_profile(
     state: State<'_, AppState>,
+    id: Option<String>,
+    name: String,
     kind: String,
     base_url: String,
     model: String,
-) -> Result<(), String> {
-    let kind = match kind.as_str() {
-        "openai" => llm::ProviderKind::OpenAi,
-        "anthropic" => llm::ProviderKind::Anthropic,
-        other => return Err(format!("不支持的 provider kind：{other}")),
+) -> Result<String, String> {
+    let kind = parse_kind(&kind)?;
+    let store = state.store.lock().unwrap();
+    let mut profiles = read_profiles(&store);
+    let existing_id = id.filter(|value| !value.trim().is_empty());
+    let id = match &existing_id {
+        Some(id) => {
+            if !profiles.iter().any(|p| p.id == *id) {
+                return Err(format!("Provider Profile 不存在：{id}"));
+            }
+            id.clone()
+        }
+        None => format!(
+            "p{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ),
     };
-    let config = llm::ProviderConfig {
+    let profile = llm::ProviderProfile {
+        id: id.clone(),
+        name: name.trim().to_string(),
         kind,
         base_url: base_url.trim().to_string(),
         model: model.trim().to_string(),
     };
-    config.validate()?;
-    state
-        .store
-        .lock()
-        .unwrap()
-        .set_meta(llm::META_PROVIDER, &config.to_json())
+    profile.validate()?;
+    let was_first = profiles.is_empty();
+    match profiles.iter_mut().find(|p| p.id == id) {
+        Some(slot) => *slot = profile,
+        None => profiles.push(profile),
+    }
+    store
+        .set_meta(
+            llm::META_PROVIDER_PROFILES,
+            &llm::profiles_to_json(&profiles),
+        )
+        .map_err(|e| e.to_string())?;
+    if was_first || read_active_id(&store).is_none() {
+        store
+            .set_meta(llm::META_ACTIVE_PROVIDER, &serde_json::to_string(&id).unwrap())
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(id)
+}
+
+/// 删除 Profile 及其密钥；被删的是活动 Profile 时，活动改为剩余首个（无剩余则清空）。
+#[tauri::command]
+pub fn delete_provider_profile(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let store = state.store.lock().unwrap();
+    let mut profiles = read_profiles(&store);
+    let before = profiles.len();
+    profiles.retain(|p| p.id != id);
+    if profiles.len() == before {
+        return Err(format!("Provider Profile 不存在：{id}"));
+    }
+    store
+        .set_meta(
+            llm::META_PROVIDER_PROFILES,
+            &llm::profiles_to_json(&profiles),
+        )
+        .map_err(|e| e.to_string())?;
+    let _ = store.delete_secret(&llm::ProviderProfile::secret_id(&id));
+    if read_active_id(&store).as_deref() == Some(id.as_str()) {
+        let next = profiles
+            .first()
+            .map(|p| serde_json::to_string(&p.id).unwrap())
+            .unwrap_or_else(|| "null".into());
+        store
+            .set_meta(llm::META_ACTIVE_PROVIDER, &next)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn set_active_provider(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let store = state.store.lock().unwrap();
+    let profiles = read_profiles(&store);
+    if !profiles.iter().any(|p| p.id == id) {
+        return Err(format!("Provider Profile 不存在：{id}"));
+    }
+    store
+        .set_meta(llm::META_ACTIVE_PROVIDER, &serde_json::to_string(&id).unwrap())
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn get_provider_config(state: State<'_, AppState>) -> Result<ProviderInfo, String> {
-    let store = state.store.lock().unwrap();
-    let config = read_provider_config(&store);
-    let has_key = store
-        .has_secret(llm::SECRET_API_KEY)
-        .map_err(|e| e.to_string())?;
-    Ok(ProviderInfo {
-        kind: match config.kind {
-            llm::ProviderKind::OpenAi => "openai".into(),
-            llm::ProviderKind::Anthropic => "anthropic".into(),
-        },
-        base_url: config.base_url,
-        model: config.model,
-        has_key,
-    })
-}
-
-#[tauri::command]
-pub fn set_api_key(state: State<'_, AppState>, key: String) -> Result<(), String> {
+pub fn set_provider_api_key(
+    state: State<'_, AppState>,
+    id: String,
+    key: String,
+) -> Result<(), String> {
     let key = key.trim();
     if key.is_empty() {
         return Err("API Key 不能为空".into());
     }
-    state
-        .store
-        .lock()
-        .unwrap()
-        .set_secret(llm::SECRET_API_KEY, key)
+    let store = state.store.lock().unwrap();
+    let profiles = read_profiles(&store);
+    if !profiles.iter().any(|p| p.id == id) {
+        return Err(format!("Provider Profile 不存在：{id}"));
+    }
+    store
+        .set_secret(&llm::ProviderProfile::secret_id(&id), key)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn clear_api_key(state: State<'_, AppState>) -> Result<(), String> {
-    state
-        .store
-        .lock()
-        .unwrap()
-        .delete_secret(llm::SECRET_API_KEY)
+pub fn clear_provider_api_key(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let store = state.store.lock().unwrap();
+    let profiles = read_profiles(&store);
+    if !profiles.iter().any(|p| p.id == id) {
+        return Err(format!("Provider Profile 不存在：{id}"));
+    }
+    store
+        .delete_secret(&llm::ProviderProfile::secret_id(&id))
         .map_err(|e| e.to_string())
 }
 
@@ -411,36 +616,21 @@ pub struct ProviderTestResult {
     pub latency_ms: u64,
 }
 
-/// 读懂当前已保存的 Provider 配置与 Key（无头测试覆盖错误路径）。
-pub fn prepare_provider_probe(
-    store: &Store,
-) -> Result<(llm::ProviderConfig, String), String> {
-    let config = read_provider_config(store);
-    config.validate()?;
-    let key = store
-        .get_secret(llm::SECRET_API_KEY)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "未配置 API Key".to_string())?;
-    Ok((config, key))
-}
-
-/// 用最小请求验证 Base URL、模型名与 API Key 是否可用；不写入任何状态。
+/// 用最小请求验证指定（或活动）Profile 的 Base URL、模型名与 API Key；不写入任何状态。
 #[tauri::command]
 pub async fn test_provider_connection(
     state: State<'_, AppState>,
+    profile_id: Option<String>,
 ) -> Result<ProviderTestResult, String> {
     let (config, key) = {
         // 不跨 await 持有数据库锁。
         let store = state.store.lock().unwrap();
-        prepare_provider_probe(&store)?
+        prepare_provider_probe(&store, profile_id.as_deref())?
     };
     let started = std::time::Instant::now();
     llm::probe(&config, &key).await?;
     Ok(ProviderTestResult {
-        kind: match config.kind {
-            llm::ProviderKind::OpenAi => "openai".into(),
-            llm::ProviderKind::Anthropic => "anthropic".into(),
-        },
+        kind: profile_kind_str(config.kind).into(),
         model: config.model,
         latency_ms: started.elapsed().as_millis() as u64,
     })
@@ -570,6 +760,7 @@ pub async fn llm_review_workspace(
     max_files: Option<usize>,
     offset: Option<usize>,
     request_id: Option<String>,
+    provider_id: Option<String>,
 ) -> Result<llm::ReviewResult, String> {
     let root_path = PathBuf::from(&root);
     if !root_path.is_dir() {
@@ -577,7 +768,8 @@ pub async fn llm_review_workspace(
     }
     let (config, key) = {
         let store = state.store.lock().unwrap();
-        prepare_provider_probe(&store)?
+        // 审查可显式指定 Profile；缺省用活动 Profile（Domain §3a.2）。
+        prepare_provider_probe(&store, provider_id.as_deref())?
     };
     let listed = state.manager.list_workspace_files(&root_path);
     let max_files = max_files
@@ -631,12 +823,14 @@ pub fn prepare_llm_call(
     scan_id: i64,
     fingerprint: &str,
 ) -> Result<(llm::ProviderConfig, String, llm::FindingContext), String> {
-    let config = read_provider_config(store);
+    let profiles = read_profiles(store);
+    let profile = resolve_profile(store, &profiles, None)?;
+    let config = profile.config();
     config.validate()?;
     let key = store
-        .get_secret(llm::SECRET_API_KEY)
+        .get_secret(&llm::ProviderProfile::secret_id(&profile.id))
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| "未配置 API Key".to_string())?;
+        .ok_or_else(|| format!("未配置 API Key（Profile：{}）", profile.name))?;
     let findings = store.get_findings(scan_id).map_err(|e| e.to_string())?;
     let finding = findings
         .iter()
@@ -746,12 +940,14 @@ pub fn prepare_batch_llm_call(
             fingerprints.len()
         ));
     }
-    let config = read_provider_config(store);
+    let profiles = read_profiles(store);
+    let profile = resolve_profile(store, &profiles, None)?;
+    let config = profile.config();
     config.validate()?;
     let key = store
-        .get_secret(llm::SECRET_API_KEY)
+        .get_secret(&llm::ProviderProfile::secret_id(&profile.id))
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| "未配置 API Key".to_string())?;
+        .ok_or_else(|| format!("未配置 API Key（Profile：{}）", profile.name))?;
     let findings = store.get_findings(scan_id).map_err(|e| e.to_string())?;
     let selected_fps = llm::select_batch_fingerprints(
         &findings,

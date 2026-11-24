@@ -39,8 +39,18 @@ export function ScanView() {
     startScan,
     cancelScan,
   } = useScanStore();
-  const { review, reviewRunning, reviewError, reviewProgress, runReview, resetReview } =
-    useLlmStore();
+  const {
+    review,
+    reviewRunning,
+    reviewError,
+    reviewProgress,
+    runReview,
+    resetReview,
+    providers,
+    loadProviders,
+    reviewProviderId,
+    setReviewProvider,
+  } = useLlmStore();
   const [reviewLimit, setReviewLimit] = useState(REVIEW_MAX_FILES);
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>(EMPTY_REVIEW_FILTER);
   const [exportPickerOpen, setExportPickerOpen] = useState(false);
@@ -74,6 +84,7 @@ export function ScanView() {
   useEffect(() => {
     void useScanStore.getState().initListeners();
     void useScanStore.getState().loadRecentRoots();
+    void loadProviders();
   }, []);
 
   const scanning = phase === "scanning";
@@ -235,7 +246,12 @@ export function ScanView() {
             className="primary"
             onClick={() =>
               workspace &&
-              void runReview(workspace, reviewLimit, reviewResult?.next_offset ?? 0)
+              void runReview(
+                workspace,
+                reviewLimit,
+                reviewResult?.next_offset ?? 0,
+                reviewProviderId ?? null,
+              )
             }
             disabled={!workspace || reviewRunning || reviewComplete}
           >
@@ -266,6 +282,24 @@ export function ScanView() {
               <option value={24}>24</option>
             </select>
           </label>
+          {providers && providers.profiles.length > 0 && (
+            <label className="inline-check muted">
+              模型
+              <select
+                aria-label="审查模型"
+                data-testid="review-provider"
+                value={reviewProviderId ?? providers.active ?? ""}
+                onChange={(e) => setReviewProvider(e.target.value || null)}
+                disabled={reviewRunning}
+              >
+                {providers.profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name} · {p.model}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           {review && (
             <span className="muted review-summary">
               已审查 {review.files_reviewed} / {review.candidate_files} 个可审查文件

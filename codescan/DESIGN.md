@@ -184,11 +184,11 @@
 
 | 视图 | 组件 | 页面结构 | 覆盖的界面 |
 |---|---|---|---|
-| 扫描 | `ScanView` | 标题区 → 工作区路径行（选择工作区 + 历史快捷下拉）→ 扫描卡（状态 + 进度 + 统计网格）→ 扫描结果卡 → LLM 源码审查卡（参考：操作行 + 审查统计网格 + 筛选 + 建议列表） | 选择工作区、历史工作区快捷选择（去重、最新在前，最多 8 条）、启动/取消扫描、进度与统计、LLM 审查入口（自动分页、结果统计、筛选、导出） |
+| 扫描 | `ScanView` | 标题区 → 工作区路径行（选择工作区 + 历史快捷下拉）→ 扫描卡（状态 + 进度 + 统计网格）→ 扫描结果卡 → LLM 源码审查卡（参考：操作行 + 模型切换下拉 + 审查统计网格 + 筛选 + 建议列表） | 选择工作区、历史工作区快捷选择（去重、最新在前，最多 8 条）、启动/取消扫描、进度与统计、LLM 审查入口（自动分页、按 Profile 切换模型、结果统计、筛选、导出） |
 | 发现 | `FindingsView` | 标题区 → 工具栏（筛选 / 搜索 / 计数 / 导出 / 批量分诊）→ 汇总条 → 左列表 ↔ 右详情 → 批量分诊卡（参考） | 发现浏览、筛选、证据与污点链详情、筛选结果导出（Markdown/JSON）、LLM 分诊 |
 | 规则 | `RulesView` | 加载态文案 → 自定义规则加载错误 → 规则表（启用 / id / 语言 / 维度 / 严重级 / 说明） | 内置与自定义规则目录、启停、编译错误展示 |
 | 历史 | `HistoryView` | 扫描记录表（查看 / 设为基线 / 门禁差异 / 导出 SARIF / 删除）→ 门禁差异区 → 选中扫描的发现详情 | 扫描回溯、基线设置、门禁差异、SARIF 导出、删除 |
-| 设置 | `SettingsView` | 标题区 → 模型 Provider 卡 → 应用更新卡 → 安全边界说明卡 | LLM Provider 配置（密钥只显示状态）、更新检查与安装、安全边界说明 |
+| 设置 | `SettingsView` | 标题区 → 模型 Provider 卡（Profile 表格 + 编辑表单 + 每 Profile 密钥块）→ 应用更新卡 → 安全边界说明卡 | 多 Provider Profile 配置（新建/编辑/删除/设为默认/按 Profile 测试连接；密钥只显示状态）、更新检查与安装、安全边界说明 |
 
 **弹层**（应用内实现，不使用系统原生对话框）
 
@@ -268,11 +268,11 @@
 | 组件 | 落点 | 职责 |
 |---|---|---|
 | `App` | `apps/desktop/src/App.tsx` | 窗口骨架与视图切换 |
-| `ScanView` | `views/ScanView.tsx` | 工作区选择、扫描控制、进度与统计、LLM 审查及其结果统计 |
+| `ScanView` | `views/ScanView.tsx` | 工作区选择、扫描控制、进度与统计、LLM 审查（按 Profile 切换模型）及其结果统计 |
 | `FindingsView` | `views/FindingsView.tsx` | 发现列表 / 详情 / 筛选 / 批量分诊 |
 | `RulesView` | `views/RulesView.tsx` | 规则目录与启停 |
 | `HistoryView` | `views/HistoryView.tsx` | 扫描回溯、基线、门禁差异、SARIF 导出 |
-| `SettingsView` | `views/SettingsView.tsx` | Provider、更新、安全边界说明 |
+| `SettingsView` | `views/SettingsView.tsx` | 多 Provider Profile（列表 / 编辑 / 密钥 / 测试 / 默认切换）、更新、安全边界说明 |
 | `DirectoryPicker` | `components/DirectoryPicker.tsx` | 工作区路径选择：应用内 Modal（Rust 列目录 + 可编辑路径），替代系统原生目录对话框 |
 | `CopyButton` | `components/CopyButton.tsx` | 复制按钮：`idle / copied / failed` 三态，1.6s 回落；**不负责脱敏**，调用方必须传入可公开文本 |
 | `scanStore` / `historyStore` / `rulesStore` / `llmStore` | `stores/*.ts` | 视图状态机与数据事实 |
