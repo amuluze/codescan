@@ -300,41 +300,45 @@ export function ScanView() {
               </select>
             </label>
           )}
-          {review && (
-            <span className="muted review-summary">
-              已审查 {review.files_reviewed} / {review.candidate_files} 个可审查文件
-              {review.skipped_large > 0 &&
-                ` · 另有 ${review.skipped_large} 个超大文件（>64 KiB）未纳入审查`}
-              {review.dropped > 0 && ` · 过滤 ${review.dropped} 条无效`}
-            </span>
-          )}
         </div>
+        {(review || (reviewResult && !reviewComplete)) && (
+          <div className="review-status">
+            {review && (
+              <p className="muted review-summary">
+                已审查 {review.files_reviewed} / {review.candidate_files} 个可审查文件
+                {review.skipped_large > 0 &&
+                  ` · 另有 ${review.skipped_large} 个超大文件（>64 KiB）未纳入审查`}
+                {review.dropped > 0 && ` · 过滤 ${review.dropped} 条无效`}
+              </p>
+            )}
+            {reviewResult && !reviewComplete && (
+              <p className="muted review-budget">
+                {reviewRunning
+                  ? `自动续审中，已覆盖 ${reviewResult.next_offset} / ${reviewResult.candidate_files}；可随时「重置进度」中止并清空。`
+                  : `还有 ${reviewResult.candidate_files - reviewResult.next_offset} 个候选未审查，可点「继续审查」继续覆盖；也可增大文件数上限减少次数。`}
+              </p>
+            )}
+          </div>
+        )}
         {review && (
           <div className="stats-grid" data-testid="review-stats">
-            <div className="stat">
+            <div className="stat stat-suggestions">
               <strong>{suggestions.length}</strong>
               <span>建议</span>
             </div>
-            <div className="stat">
+            <div className="stat stat-error">
               <strong>{severityCounts.error}</strong>
               <span>{SEVERITY_LABEL.error}</span>
             </div>
-            <div className="stat">
+            <div className="stat stat-warning">
               <strong>{severityCounts.warning}</strong>
               <span>{SEVERITY_LABEL.warning}</span>
             </div>
-            <div className="stat">
+            <div className="stat stat-info">
               <strong>{severityCounts.info}</strong>
               <span>{SEVERITY_LABEL.info}</span>
             </div>
           </div>
-        )}
-        {reviewResult && !reviewComplete && (
-          <p className="muted review-budget">
-            {reviewRunning
-              ? `自动续审中，已覆盖 ${reviewResult.next_offset} / ${reviewResult.candidate_files}；可随时「重置进度」中止并清空。`
-              : `还有 ${reviewResult.candidate_files - reviewResult.next_offset} 个候选未审查，可点「继续审查」继续覆盖；也可增大文件数上限减少次数。`}
-          </p>
         )}
         {suggestions.length > 0 && (
           <div className="toolbar review-filter" data-testid="review-filter">
@@ -433,7 +437,7 @@ export function ScanView() {
                       {SEVERITY_LABEL[s.severity]}
                     </span>
                     <span className="dim-badge">{DIMENSION_LABEL[s.category]}</span>
-                    <span className="path">
+                    <span className="path" title={`${s.path}:${s.line}`}>
                       {s.path}:{s.line}
                     </span>
                     <span className="review-head-actions">

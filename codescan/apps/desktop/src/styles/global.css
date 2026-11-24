@@ -350,18 +350,30 @@ pre {
   line-height: 1.5;
 }
 
+.review-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
 .review-card .card-head {
   align-items: flex-start;
+  margin-bottom: 0;
 }
 
+/* 控制行只放操作控件：按钮与文件数、模型下拉框之间留出可呼吸的间距。 */
 .review-actions {
-  gap: 12px;
+  gap: 10px 14px;
 }
 
-.review-summary {
-  font-size: 12px;
+/* 覆盖进度摘要单独成行，避免长文案与模型下拉框争抢同一条宽度。 */
+.review-status {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
+.review-summary,
 .review-budget {
   margin: 0;
   font-size: 12px;
@@ -400,6 +412,11 @@ pre {
 }
 
 .review-head .path {
+  flex: 1 1 180px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: ui-monospace, Menlo, monospace;
   font-size: 11.5px;
   color: var(--muted);
@@ -407,6 +424,7 @@ pre {
 
 .review-head-actions {
   margin-left: auto;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -414,6 +432,8 @@ pre {
 
 .confidence-chip {
   padding: 0 8px;
+  line-height: 20px;
+  white-space: nowrap;
   border: 1px solid var(--border);
   border-radius: 999px;
   color: var(--muted);
@@ -459,6 +479,47 @@ pre {
 .stat span {
   color: var(--muted);
   font-size: 12px;
+}
+
+/* 审查统计：左侧色条与标签颜色对应严重级，便于横向扫读；数字保持高对比。 */
+.review-card .stat {
+  border-left: 2px solid var(--border-strong);
+}
+
+.review-card .stat strong {
+  font-size: 21px;
+}
+
+.review-card .stat.stat-suggestions {
+  border-left-color: var(--accent);
+}
+
+.review-card .stat.stat-suggestions span {
+  color: var(--accent);
+}
+
+.review-card .stat.stat-error {
+  border-left-color: var(--error);
+}
+
+.review-card .stat.stat-error span {
+  color: var(--error);
+}
+
+.review-card .stat.stat-warning {
+  border-left-color: var(--warning);
+}
+
+.review-card .stat.stat-warning span {
+  color: var(--warning);
+}
+
+.review-card .stat.stat-info {
+  border-left-color: var(--info);
+}
+
+.review-card .stat.stat-info span {
+  color: var(--info);
 }
 
 @media (max-width: 720px) {

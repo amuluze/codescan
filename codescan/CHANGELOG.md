@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The format is b
 
 
 
+## [1.5.3] - 2026-11-24
+
+### Changed
+
+- Scan page review card layout: controls, coverage summary, severity stats, filters, and the suggestion list now use consistent spacing; the coverage summary moves to its own line instead of competing with the model dropdown for width; stat cards are tinted by severity; long suggestion paths truncate with a full-path tooltip
+
 ## [1.5.2] - 2026-11-24
 
 ### Added
