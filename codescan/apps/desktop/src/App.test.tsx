@@ -795,7 +795,8 @@ describe("App 主链路", () => {
     expect(await screen.findByRole("button", { name: "已审查全部候选" })).toBeDisabled();
     expect(screen.getByText(/已审查 3 \/ 3 个可审查文件/)).toBeTruthy();
     // 两页返回同一条建议：跨页去重后只保留一条。
-    expect(screen.getByText(/1 条建议/)).toBeTruthy();
+    // 统计卡片与列表一致：跨页去重后只计 1 条（警告级）。
+    expect(screen.getByTestId("review-stats").textContent).toBe("1建议0错误1警告0提示");
     expect(screen.getByText(/过滤 2 条无效/)).toBeTruthy();
   });
 
