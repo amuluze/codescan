@@ -24,7 +24,7 @@ export function useReportExport() {
       setNotice({
         tone: "success",
         title: "导出完成",
-        message: `已写入 ${base}.md 与 ${base}.json\n目录：${dest}`,
+        message: `已写入 2 个文件：\n${base}.md\n${base}.json\n目录：${dest}`,
       });
     } catch (e) {
       setNotice({ tone: "error", title: "导出失败", message: String(e) });

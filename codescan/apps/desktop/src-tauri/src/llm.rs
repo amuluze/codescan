@@ -667,6 +667,9 @@ pub const REVIEW_MAX_TOKENS: u32 = 8192;
 /// 单次请求的文件数与字节上限：分批发送，避免思考阶段耗尽输出预算。
 pub const REVIEW_BATCH_FILES: usize = 4;
 pub const REVIEW_BATCH_BYTES: usize = 32 * 1024;
+/// 压缩/生成形态文件的体积下限：行数 < 4 且超过该值的文件无法有效按行二分
+/// （单行无法再切、thinking 预算必然耗尽），选择阶段跳过并计数，避免整页中止。
+pub const REVIEW_MINIFIED_MIN_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReviewFile {
@@ -697,6 +700,8 @@ pub struct ReviewResult {
     pub files_reviewed: usize,
     /// 通过过滤的候选文件数（用于展示覆盖率）。
     pub candidate_files: usize,
+    /// 因超大（>64 KiB）或压缩形态未纳入审查的源码文件数；展示层覆盖盲区信号。
+    pub skipped_large: u32,
     /// 下一页起始候选序号；等于 candidate_files 表示已到末尾。
     pub next_offset: usize,
     pub total_bytes: usize,
@@ -818,6 +823,50 @@ pub fn parse_review(
     Ok((suggestions, dropped))
 }
 
+/// reqwest 顶层 Display（如 `error sending request for url (...)`）不含根因，
+/// DNS / TCP / TLS / 代理 / 超时都藏在 source 链里；逐层拼接给出完整因果。
+/// 错误链不含请求头，不会带入 API Key（Domain §3a.1）。
+fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts = vec![err.to_string()];
+    let mut src = err.source();
+    while let Some(s) = src {
+        let text = s.to_string();
+        if !text.trim().is_empty() && !parts.contains(&text) {
+            parts.push(text);
+        }
+        src = s.source();
+    }
+    parts.join("；")
+}
+
+/// 按根因关键词补一条可执行的排查提示；未命中返回空串。
+/// 对应 DESIGN §6.2 错误态要求：可读原因 + 可执行下一步。
+fn transport_hint(chain: &str) -> &'static str {
+    let c = chain.to_ascii_lowercase();
+    if c.contains("timed out") || c.contains("timeout") {
+        "请求超时，可稍后重试"
+    } else if c.contains("proxy") {
+        "代理连接失败：请求遵循 HTTPS_PROXY/ALL_PROXY 环境变量，请确认代理可用或取消设置"
+    } else if c.contains("dns") || c.contains("lookup") || c.contains("resolution") {
+        "域名解析失败，请检查网络与 DNS"
+    } else if c.contains("refused") || c.contains("connect") || c.contains("unreachable") {
+        "无法建立连接，请检查网络或本地代理是否在运行"
+    } else if c.contains("certificate") || c.contains("tls") {
+        "TLS 握手失败，请检查系统时间与证书"
+    } else {
+        ""
+    }
+}
+
+/// 传输层错误的统一展示：完整因果链 + 可选排查提示。
+fn request_error(e: &reqwest::Error) -> String {
+    let chain = error_chain(e);
+    match transport_hint(&chain) {
+        "" => chain,
+        hint => format!("{chain}；{hint}"),
+    }
+}
+
 // ---------- 网络调用（唯一非纯函数入口） ----------
 
 /// 调用 Provider 完成一次补全。错误信息不得包含 API Key。
@@ -843,12 +892,12 @@ pub async fn complete(
             .header("anthropic-version", "2023-06-01")
             .json(&anthropic_body(&config.model, system, user)),
     };
-    let response = request.send().await.map_err(|e| format!("请求失败：{e}"))?;
+    let response = request.send().await.map_err(|e| format!("请求失败：{}", request_error(&e)))?;
     let status = response.status();
     let body = response
         .text()
         .await
-        .map_err(|e| format!("读取响应失败：{e}"))?;
+        .map_err(|e| format!("读取响应失败：{}", request_error(&e)))?;
     if !status.is_success() {
         return Err(format!("Provider 返回 {status}：{}", truncate(&body, 500)));
     }
@@ -893,12 +942,12 @@ pub async fn probe(config: &ProviderConfig, api_key: &str) -> Result<(), String>
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("请求失败：{e}"))?;
+        .map_err(|e| format!("请求失败：{}", request_error(&e)))?;
     let status = response.status();
     let text = response
         .text()
         .await
-        .map_err(|e| format!("读取响应失败：{e}"))?;
+        .map_err(|e| format!("读取响应失败：{}", request_error(&e)))?;
     if !status.is_success() {
         return Err(format!("Provider 返回 {status}：{}", truncate(&text, 500)));
     }
@@ -1060,12 +1109,12 @@ pub async fn review(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("请求失败：{e}"))?;
+        .map_err(|e| format!("请求失败：{}", request_error(&e)))?;
     let status = response.status();
     let text = response
         .text()
         .await
-        .map_err(|e| format!("读取响应失败：{e}"))?;
+        .map_err(|e| format!("读取响应失败：{}", request_error(&e)))?;
     if !status.is_success() {
         return Err(format!("Provider 返回 {status}：{}", truncate(&text, 500)));
     }
@@ -1102,13 +1151,13 @@ where
             .header("anthropic-version", "2023-06-01")
             .json(&body),
     };
-    let response = request.send().await.map_err(|e| format!("请求失败：{e}"))?;
+    let response = request.send().await.map_err(|e| format!("请求失败：{}", request_error(&e)))?;
     let status = response.status();
     if !status.is_success() {
         let body = response
             .text()
             .await
-            .map_err(|e| format!("读取响应失败：{e}"))?;
+            .map_err(|e| format!("读取响应失败：{}", request_error(&e)))?;
         return Err(format!("Provider 返回 {status}：{}", truncate(&body, 500)));
     }
 
@@ -1116,7 +1165,7 @@ where
     let mut stream = response.bytes_stream();
     let mut complete = String::new();
     while let Some(chunk) = stream.next().await {
-        let bytes = chunk.map_err(|e| format!("读取流失败：{e}"))?;
+        let bytes = chunk.map_err(|e| format!("读取流失败：{}", request_error(&e)))?;
         for delta in parser.push_bytes(&bytes) {
             complete.push_str(&delta);
             on_delta(&delta);
@@ -1768,5 +1817,83 @@ rules:
         );
         let errors = validate_candidate(&broken);
         assert!(!errors.is_empty(), "{errors:?}");
+    }
+
+    /// 测试用错误桩：支持嵌套 source，模拟 reqwest 的多层因果链。
+    #[derive(Debug)]
+    struct FakeError(&'static str, Option<Box<dyn std::error::Error + 'static>>);
+
+    impl std::fmt::Display for FakeError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for FakeError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.1.as_deref()
+        }
+    }
+
+    #[test]
+    fn error_chain_appends_unique_sources() {
+        let root = FakeError("tcp connect error: Connection refused (os error 61)", None);
+        let mid = FakeError("client error (Connect)", Some(Box::new(root)));
+        let top = FakeError("error sending request for url (https://x.test/a)", Some(Box::new(mid)));
+        let chain = error_chain(&top);
+        assert!(chain.starts_with("error sending request"));
+        assert!(chain.contains("client error (Connect)"));
+        assert!(chain.contains("Connection refused (os error 61)"));
+        assert_eq!(chain.matches("；").count(), 2, "三段因果用全角分号拼接：{chain}");
+
+        // 与顶层同文的 source 不重复出现。
+        let dup = FakeError("same text", Some(Box::new(FakeError("same text", None))));
+        assert_eq!(error_chain(&dup), "same text");
+    }
+
+    #[test]
+    fn transport_hint_covers_common_causes() {
+        assert_eq!(
+            transport_hint("operation timed out"),
+            "请求超时，可稍后重试"
+        );
+        assert_eq!(
+            transport_hint("proxy connect error"),
+            "代理连接失败：请求遵循 HTTPS_PROXY/ALL_PROXY 环境变量，请确认代理可用或取消设置"
+        );
+        assert_eq!(
+            transport_hint("dns error: failed to lookup address information"),
+            "域名解析失败，请检查网络与 DNS"
+        );
+        assert_eq!(
+            transport_hint("tcp connect error: Connection refused (os error 61)"),
+            "无法建立连接，请检查网络或本地代理是否在运行"
+        );
+        assert_eq!(transport_hint("invalid peer certificate"), "TLS 握手失败，请检查系统时间与证书");
+        // 非传输类文案不追加提示。
+        assert_eq!(transport_hint("响应不是 JSON"), "");
+    }
+
+    #[test]
+    fn request_error_surfaces_transport_cause_and_hint() {
+        // 127.0.0.1:1 必然连接拒绝，不依赖外网；验证真实 reqwest 错误能带出根因与提示。
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = runtime
+            .block_on(async {
+                reqwest::Client::new()
+                    .post("http://127.0.0.1:1/v1/messages")
+                    .send()
+                    .await
+            })
+            .expect_err("本机 1 端口必然拒绝连接");
+        let msg = request_error(&err);
+        assert!(msg.contains("127.0.0.1:1"), "应含请求目标：{msg}");
+        assert!(
+            msg.contains("无法建立连接") || msg.contains("请求超时"),
+            "应含可执行排查提示：{msg}"
+        );
     }
 }

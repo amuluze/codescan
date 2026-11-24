@@ -9,6 +9,7 @@ Provider 形态复刻 axiom：OpenAI-compatible 与 Anthropic-compatible 两类�
 - API Key 仅写入 `~/.codescan/codescan.db` 的 `secrets` 表（Rust 独占读写）；命令面只暴露「已配置/未配置」，不存在明文回读接口。
 - 请求只发往你配置的 Base URL；OpenAI 走 `{base}/chat/completions`（Bearer），Anthropic 走 `{base}/v1/messages`（`x-api-key` + `anthropic-version`）。
 - 超时：非流式 60s，流式 120s；错误信息不含密钥。
+- 传输层错误展示完整根因链（DNS / TCP / TLS / 代理 / 超时）并附一条排查提示；请求遵循 `HTTPS_PROXY` / `ALL_PROXY` 环境变量。
 
 ## 能力
 
@@ -67,6 +68,7 @@ UI 只接收与当前 `requestId` 匹配的增量并实时渲染，命令结束�
 
 - 建议条目携带 `path / line / severity / category / title / detail / confidence`，跨页按 (path, line, title) 去重；无法解析或超出预算的条目按 `dropped` 计数并在行内摘要展示。
 - v1.5.0 起审查卡显示**结果统计卡片**：建议总数与「错误 / 警告 / 提示」分级计数，与扫描结果统计卡片同构；行内摘要只保留覆盖（已审查文件数）与过滤计数。数字仅展示层，不进入发现、基线或门禁。
+- 大文件处理：单个文件 >64 KiB 不纳入审查，计数经摘要「另有 N 个超大文件（>64 KiB）未纳入审查」暴露盲区；压缩/生成形态（行数 < 4 且 > 16 KiB）读入后静默跳过（消费游标，与二进制同口径），避免按行二分无效导致的整页中止。
 - 结果可按严重级 / 维度 / 置信度 / 关键词筛选，并导出 Markdown + JSON 双文件。
 
 ## 纪律与边界

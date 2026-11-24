@@ -3,6 +3,15 @@
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+
+## [1.5.1] - 2026-11-24
+
+### Changed
+
+- Export completion dialog copy lists each written file on its own line, so long base names no longer wrap mid-name
+- LLM transport errors (triage, review, streaming) now include the full underlying cause chain (DNS / TCP / TLS / proxy / timeout) plus a short troubleshooting hint, instead of the bare reqwest top-level message
+- LLM source review now reports how many oversized source files (>64 KiB) were excluded, shown in the review summary so full-candidate coverage can no longer hide the blind spot; minified/generated files (fewer than 4 lines, over 16 KiB) are pre-filtered at read time instead of triggering the page-aborting line-split failure
+
 ## [1.5.0] - 2026-11-24
 
 ### Added
