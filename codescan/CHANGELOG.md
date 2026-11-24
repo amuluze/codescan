@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+
+## [1.5.0] - 2026-11-24
+
+### Added
+
+- LLM source review results on the Scan page now show a stats grid (suggestion total plus error / warning / info counts), mirroring the deterministic scan result stats; the inline summary keeps only coverage (files reviewed) and dropped counts
+
 ## [1.4.0] - 2026-11-20
 
 ### Added

@@ -1,5 +1,5 @@
 /** 扫描页：工作区选择 → 触发/取消 → 阶段与进度 → 结果统计。 */
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useScanStore } from "../stores/scanStore";
 import { useLlmStore } from "../stores/llmStore";
 import { CONFIDENCE_LABEL, DIMENSION_LABEL, SEVERITY_LABEL } from "../labels";
@@ -50,6 +50,14 @@ export function ScanView() {
     reviewResult !== null && reviewResult.next_offset >= reviewResult.candidate_files;
   const suggestions = reviewResult?.suggestions ?? [];
   const shownSuggestions = filterSuggestions(suggestions, reviewFilter);
+  /** 审查结果按严重级的计数（统计卡片用）。 */
+  const severityCounts = useMemo(() => {
+    const base = { error: 0, warning: 0, info: 0 };
+    for (const s of suggestions) {
+      base[s.severity] += 1;
+    }
+    return base;
+  }, [suggestions]);
 
   /** 导出当前筛选下的建议（Markdown + JSON 双文件），目录由 DirectoryPicker 选定。 */
   const exportReviewTo = (dest: string) => {
@@ -260,12 +268,31 @@ export function ScanView() {
           </label>
           {review && (
             <span className="muted review-summary">
-              已审查 {review.files_reviewed} / {review.candidate_files} 个可审查文件 ·{" "}
-              {review.suggestions.length} 条建议
+              已审查 {review.files_reviewed} / {review.candidate_files} 个可审查文件
               {review.dropped > 0 && ` · 过滤 ${review.dropped} 条无效`}
             </span>
           )}
         </div>
+        {review && (
+          <div className="stats-grid" data-testid="review-stats">
+            <div className="stat">
+              <strong>{suggestions.length}</strong>
+              <span>建议</span>
+            </div>
+            <div className="stat">
+              <strong>{severityCounts.error}</strong>
+              <span>{SEVERITY_LABEL.error}</span>
+            </div>
+            <div className="stat">
+              <strong>{severityCounts.warning}</strong>
+              <span>{SEVERITY_LABEL.warning}</span>
+            </div>
+            <div className="stat">
+              <strong>{severityCounts.info}</strong>
+              <span>{SEVERITY_LABEL.info}</span>
+            </div>
+          </div>
+        )}
         {reviewResult && !reviewComplete && (
           <p className="muted review-budget">
             {reviewRunning
