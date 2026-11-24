@@ -74,6 +74,8 @@ export type ReviewSuggestion = {
   title: string;
   detail: string;
   confidence: "high" | "medium" | "low";
+  /** 独立复核结论；null/缺省 = 未开启复核。rejected 不会出现在结果中。 */
+  verification?: "confirmed" | "needs_validation" | null;
 };
 
 export type ReviewResult = {
@@ -85,12 +87,32 @@ export type ReviewResult = {
   total_bytes: number;
   model: string;
   dropped: number;
+  /** 独立复核判定不成立而过滤的建议数。 */
+  rejected: number;
+  /** 本次是否启用独立复核。 */
+  verification_enabled: boolean;
   suggestions: ReviewSuggestion[];
 };
 
 export type TriageResult = {
   assessment: "true-positive" | "likely-false-positive" | "uncertain";
   rationale: string;
+};
+
+/** 内置审查技能文件（设置页展示与编辑）。content 为当前生效正文。 */
+export type ReviewSkillFileInfo = {
+  name: string;
+  title: string;
+  content: string;
+  customized: boolean;
+  bytes: number;
+};
+
+export type ReviewSkillInfo = {
+  version: string;
+  files: ReviewSkillFileInfo[];
+  max_file_bytes: number;
+  max_total_bytes: number;
 };
 
 export type BatchTriageEntry = {
@@ -231,6 +253,7 @@ export const api = {
     offset?: number,
     requestId?: string,
     providerId?: string | null,
+    verify?: boolean,
   ) =>
     platform.invoke<ReviewResult>("llm_review_workspace", {
       root,
@@ -238,6 +261,7 @@ export const api = {
       offset: offset ?? 0,
       requestId: requestId ?? null,
       providerId: providerId ?? null,
+      verify: verify ?? true,
     }),
 
   llmTriage: (scanId: number, fingerprint: string) =>
@@ -262,6 +286,15 @@ export const api = {
     }),
   saveCustomRule: (yaml: string) =>
     platform.invoke<void>("save_custom_rule", { yaml }),
+  llmReviewSkillInfo: () =>
+    platform.invoke<ReviewSkillInfo>("llm_review_skill_info"),
+  saveLlmReviewSkill: (name: string, content: string) =>
+    platform.invoke<ReviewSkillFileInfo>("save_llm_review_skill", {
+      name,
+      content,
+    }),
+  resetLlmReviewSkill: (name: string) =>
+    platform.invoke<ReviewSkillFileInfo>("reset_llm_review_skill", { name }),
 };
 
 export type { Finding };

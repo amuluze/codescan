@@ -2,6 +2,12 @@
 import { useEffect, useState } from "react";
 import { useLlmStore } from "../stores/llmStore";
 import { useUpdateStore } from "../stores/updateStore";
+import {
+  api,
+  type ReviewSkillFileInfo,
+  type ReviewSkillInfo,
+} from "../platform";
+import { SkillEditorDialog } from "../components/SkillEditorDialog";
 
 type EditorState = {
   /** null = 新建（保存后落库并回填 id，便于继续配置 Key）。 */
@@ -47,9 +53,18 @@ export function SettingsView() {
   const [apiKey, setApiKey] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [skillInfo, setSkillInfo] = useState<ReviewSkillInfo | null>(null);
+  const [skillError, setSkillError] = useState<string | null>(null);
+  const [skillMessage, setSkillMessage] = useState<string | null>(null);
+  const [editingSkill, setEditingSkill] = useState<ReviewSkillFileInfo | null>(null);
+  const [skillSaving, setSkillSaving] = useState(false);
 
   useEffect(() => {
     loadProviders().catch((e) => setMessage(String(e)));
+    api
+      .llmReviewSkillInfo()
+      .then(setSkillInfo)
+      .catch((e) => setSkillError(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -89,6 +104,56 @@ export function SettingsView() {
       setConfirmDeleteId(null);
     }
   };
+
+  /** 保存/恢复后就地更新列表；打开中的编辑器同步为新内容。 */
+  const applySkillFile = (updated: ReviewSkillFileInfo) => {
+    setSkillInfo((current) =>
+      current
+        ? {
+            ...current,
+            files: current.files.map((file) =>
+              file.name === updated.name ? updated : file,
+            ),
+          }
+        : current,
+    );
+    setEditingSkill((current) =>
+      current && current.name === updated.name ? updated : current,
+    );
+  };
+
+  const saveSkill = async (content: string) => {
+    if (!editingSkill || skillSaving) return;
+    setSkillSaving(true);
+    setSkillError(null);
+    try {
+      const updated = await api.saveLlmReviewSkill(editingSkill.name, content);
+      applySkillFile(updated);
+      setEditingSkill(null);
+      setSkillMessage(`已保存 ${updated.name}；后续审查使用覆写内容`);
+    } catch (e) {
+      setSkillError(String(e));
+    } finally {
+      setSkillSaving(false);
+    }
+  };
+
+  const resetSkill = async (name: string) => {
+    if (skillSaving) return;
+    setSkillSaving(true);
+    setSkillError(null);
+    try {
+      const updated = await api.resetLlmReviewSkill(name);
+      applySkillFile(updated);
+      setSkillMessage(`已恢复 ${name} 的内置默认内容`);
+    } catch (e) {
+      setSkillError(String(e));
+    } finally {
+      setSkillSaving(false);
+    }
+  };
+
+  const customizedSkills = skillInfo?.files.filter((file) => file.customized).length ?? 0;
 
   return (
     <section className="page settings-view" aria-label="设置">
@@ -329,6 +394,99 @@ export function SettingsView() {
               {testError}
             </p>
           )}
+        </section>
+
+        <section className="card skill-card" data-testid="skill-card">
+          <header className="card-head">
+            <div>
+              <h3>LLM 审查内置 Skill</h3>
+              <p className="card-sub">
+                源码审查使用随应用分发的技能包（{skillInfo?.version ?? "llm-review/v1"}）；
+                可按文件查看并保存本地覆写。覆写只影响模型可见内容，不改变源码不可信声明、
+                JSON 输出校验与「不参与门禁」边界。
+              </p>
+            </div>
+            {customizedSkills > 0 && (
+              <span className="dim-badge">{customizedSkills} 个覆写</span>
+            )}
+          </header>
+
+          {skillError && !editingSkill && (
+            <p role="alert" className="notice failure" data-testid="skill-error">
+              {skillError}
+            </p>
+          )}
+          {skillMessage && (
+            <p role="status" className="notice" data-testid="skill-status">
+              {skillMessage}
+            </p>
+          )}
+
+          {skillInfo ? (
+            <table className="provider-table skill-table" data-testid="skill-table">
+              <thead>
+                <tr>
+                  <th>文件</th>
+                  <th>用途</th>
+                  <th>大小</th>
+                  <th>状态</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {skillInfo.files.map((file) => (
+                  <tr key={file.name}>
+                    <td className="mono-cell">{file.name}</td>
+                    <td>{file.title}</td>
+                    <td className="mono-cell">{file.bytes} B</td>
+                    <td>
+                      <span
+                        className={`status-chip ${file.customized ? "ok" : "muted-chip"}`}
+                      >
+                        {file.customized ? "已覆写" : "内置"}
+                      </span>
+                    </td>
+                    <td>
+                      <div className="table-actions">
+                        <button
+                          className="ghost btn-sm"
+                          aria-label={`编辑 ${file.name}`}
+                          onClick={() => {
+                            setSkillError(null);
+                            setEditingSkill(file);
+                          }}
+                        >
+                          编辑
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            !skillError && <p className="card-sub">加载中…</p>
+          )}
+
+          <p className="key-note">
+            覆写保存在 <code>~/.codescan/skills/llm-review.json</code>；单文件 ≤{" "}
+            {Math.round((skillInfo?.max_file_bytes ?? 16 * 1024) / 1024)} KiB，合计 ≤{" "}
+            {Math.round((skillInfo?.max_total_bytes ?? 32 * 1024) / 1024)} KiB。
+            与内置正文相同的保存视为恢复默认。
+          </p>
+
+          <SkillEditorDialog
+            file={editingSkill}
+            maxBytes={skillInfo?.max_file_bytes ?? 16 * 1024}
+            saving={skillSaving}
+            error={skillError}
+            onSave={(content) => void saveSkill(content)}
+            onReset={() => editingSkill && void resetSkill(editingSkill.name)}
+            onClose={() => {
+              setEditingSkill(null);
+              setSkillError(null);
+            }}
+          />
         </section>
 
         <section className="card">

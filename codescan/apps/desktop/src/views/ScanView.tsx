@@ -9,6 +9,7 @@ import { NoticeDialog } from "../components/NoticeDialog";
 import { useReportExport } from "../useReportExport";
 import {
   EMPTY_REVIEW_FILTER,
+  VERIFICATION_LABEL,
   filterSuggestions,
   hasReviewFilter,
   suggestionsToJson,
@@ -52,6 +53,7 @@ export function ScanView() {
     setReviewProvider,
   } = useLlmStore();
   const [reviewLimit, setReviewLimit] = useState(REVIEW_MAX_FILES);
+  const [verifyReview, setVerifyReview] = useState(true);
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>(EMPTY_REVIEW_FILTER);
   const [exportPickerOpen, setExportPickerOpen] = useState(false);
   const { exporting, notice, run: runExport, dismiss } = useReportExport();
@@ -65,6 +67,15 @@ export function ScanView() {
     const base = { error: 0, warning: 0, info: 0 };
     for (const s of suggestions) {
       base[s.severity] += 1;
+    }
+    return base;
+  }, [suggestions]);
+  /** 独立复核结论计数（摘要用）。 */
+  const verificationCounts = useMemo(() => {
+    const base = { confirmed: 0, needs: 0 };
+    for (const s of suggestions) {
+      if (s.verification === "confirmed") base.confirmed += 1;
+      if (s.verification === "needs_validation") base.needs += 1;
     }
     return base;
   }, [suggestions]);
@@ -236,6 +247,7 @@ export function ScanView() {
             <p className="card-sub">
               每次最多 {reviewLimit} 个可审查源码文件（合计 ≤128 KiB）发送到已配置 Provider，
               覆盖安全、业务逻辑与代码质量三个维度；点击后自动分页连续审查，直至覆盖全部候选。
+              「独立复核」会再对每批建议做一次独立判定，耗时与用量更高。
               源码被视为不可信数据；结果仅作参考，不写入发现、基线或门禁。
             </p>
           </div>
@@ -251,6 +263,7 @@ export function ScanView() {
                 reviewLimit,
                 reviewResult?.next_offset ?? 0,
                 reviewProviderId ?? null,
+                verifyReview,
               )
             }
             disabled={!workspace || reviewRunning || reviewComplete}
@@ -300,6 +313,19 @@ export function ScanView() {
               </select>
             </label>
           )}
+          <label
+            className="inline-check muted"
+            title="对每批建议再做一次独立判定；会增加请求与耗时"
+          >
+            <input
+              type="checkbox"
+              aria-label="独立复核"
+              checked={verifyReview}
+              onChange={(e) => setVerifyReview(e.target.checked)}
+              disabled={reviewRunning}
+            />
+            独立复核
+          </label>
         </div>
         {(review || (reviewResult && !reviewComplete)) && (
           <div className="review-status">
@@ -309,6 +335,10 @@ export function ScanView() {
                 {review.skipped_large > 0 &&
                   ` · 另有 ${review.skipped_large} 个超大文件（>64 KiB）未纳入审查`}
                 {review.dropped > 0 && ` · 过滤 ${review.dropped} 条无效`}
+                {review.verification_enabled &&
+                  (suggestions.length > 0 || review.rejected > 0) &&
+                  ` · 复核：确认 ${verificationCounts.confirmed} 条 / 待验证 ${verificationCounts.needs} 条`}
+                {review.rejected > 0 && ` · 复核过滤 ${review.rejected} 条`}
               </p>
             )}
             {reviewResult && !reviewComplete && (
@@ -437,6 +467,11 @@ export function ScanView() {
                       {SEVERITY_LABEL[s.severity]}
                     </span>
                     <span className="dim-badge">{DIMENSION_LABEL[s.category]}</span>
+                    {s.verification && (
+                      <span className={`verify-chip verify-${s.verification}`}>
+                        {VERIFICATION_LABEL[s.verification]}
+                      </span>
+                    )}
                     <span className="path" title={`${s.path}:${s.line}`}>
                       {s.path}:{s.line}
                     </span>
@@ -448,6 +483,9 @@ export function ScanView() {
                           s.title,
                           s.detail,
                           `置信度：${CONFIDENCE_LABEL[s.confidence]}`,
+                          ...(s.verification
+                            ? [`复核：${VERIFICATION_LABEL[s.verification]}`]
+                            : []),
                         ]
                           .filter((line) => line.trim() !== "")
                           .join("\n")}

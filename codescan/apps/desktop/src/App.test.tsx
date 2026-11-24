@@ -1,5 +1,5 @@
 /** A8 主链路：tab 导航、规则列表/启停、扫描触发 → 进度事件 → 发现过滤。 */
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
@@ -73,6 +73,7 @@ vi.mock("./platform", () => {
       offset?: number,
       requestId?: string,
       providerId?: string | null,
+      verify?: boolean,
     ) =>
       platform.invoke("llm_review_workspace", {
         root,
@@ -80,6 +81,7 @@ vi.mock("./platform", () => {
         offset: offset ?? 0,
         requestId: requestId ?? null,
         providerId: providerId ?? null,
+        verify: verify ?? true,
       }),
     llmTriage: (scanId: number, fingerprint: string) =>
       platform.invoke("llm_triage", { scanId, fingerprint }),
@@ -102,6 +104,11 @@ vi.mock("./platform", () => {
         saveFixture,
       }),
     saveCustomRule: (yaml: string) => platform.invoke("save_custom_rule", { yaml }),
+    llmReviewSkillInfo: () => platform.invoke("llm_review_skill_info"),
+    saveLlmReviewSkill: (name: string, content: string) =>
+      platform.invoke("save_llm_review_skill", { name, content }),
+    resetLlmReviewSkill: (name: string) =>
+      platform.invoke("reset_llm_review_skill", { name }),
   };
   const updater = {
     check: vi.fn(async () => null),
@@ -261,6 +268,7 @@ beforeEach(() => {
         return { kind: "openai", model: "test-model", latency_ms: 87 };
       case "llm_review_workspace": {
         const offset = (args?.offset as number | undefined) ?? 0;
+        const verify = (args?.verify as boolean | undefined) ?? true;
         return {
           files_reviewed: offset === 0 ? 2 : 1,
           candidate_files: 3,
@@ -269,6 +277,8 @@ beforeEach(() => {
           total_bytes: 2048,
           model: "test-model",
           dropped: 1,
+          rejected: verify && offset === 0 ? 1 : 0,
+          verification_enabled: verify,
           suggestions: [
             {
               path: "src/a.ts",
@@ -278,6 +288,9 @@ beforeEach(() => {
               title: "缺少订单归属校验",
               detail: "更新前未校验订单是否属于当前用户。",
               confidence: "medium",
+              ...(verify
+                ? { verification: offset === 0 ? "confirmed" : "needs_validation" }
+                : {}),
             },
           ],
         };
@@ -327,6 +340,51 @@ beforeEach(() => {
         };
       case "export_report":
         return null;
+      case "llm_review_skill_info":
+        return {
+          version: "llm-review/v1",
+          max_file_bytes: 16384,
+          max_total_bytes: 32768,
+          files: [
+            {
+              name: "SKILL.md",
+              title: "审查协议",
+              content: "内置技能正文",
+              customized: false,
+              bytes: new TextEncoder().encode("内置技能正文").length,
+            },
+            {
+              name: "references/security.md",
+              title: "安全检查表",
+              content: "内置安全检查",
+              customized: false,
+              bytes: new TextEncoder().encode("内置安全检查").length,
+            },
+          ],
+        };
+      case "save_llm_review_skill": {
+        const name = String(args?.name ?? "");
+        const content = String(args?.content ?? "");
+        const builtin = name === "SKILL.md" ? "内置技能正文" : "内置安全检查";
+        return {
+          name,
+          title: name === "SKILL.md" ? "审查协议" : "安全检查表",
+          content,
+          customized: content !== builtin,
+          bytes: new TextEncoder().encode(content).length,
+        };
+      }
+      case "reset_llm_review_skill": {
+        const name = String(args?.name ?? "");
+        const content = name === "SKILL.md" ? "内置技能正文" : "内置安全检查";
+        return {
+          name,
+          title: name === "SKILL.md" ? "审查协议" : "安全检查表",
+          content,
+          customized: false,
+          bytes: new TextEncoder().encode(content).length,
+        };
+      }
       default:
         return null;
     }
@@ -858,6 +916,7 @@ describe("App 主链路", () => {
       offset: 0,
       requestId: expect.any(String),
       providerId: null,
+      verify: true,
     });
 
     // 自动续审：无需手动点击，携带游标直至覆盖全部候选。
@@ -868,6 +927,7 @@ describe("App 主链路", () => {
         offset: 2,
         requestId: expect.any(String),
         providerId: null,
+        verify: true,
       }),
     );
     expect(await screen.findByRole("button", { name: "已审查全部候选" })).toBeDisabled();
@@ -878,6 +938,30 @@ describe("App 主链路", () => {
     // 超大文件的排除在摘要中可见（覆盖盲区信号）。
     expect(screen.getByText(/另有 1 个超大文件/)).toBeTruthy();
     expect(screen.getByText(/过滤 2 条无效/)).toBeTruthy();
+    // 独立复核：两页同一条建议分别 confirmed / needs_validation，合并后保留 confirmed。
+    expect(screen.getByText("已复核")).toBeTruthy();
+    expect(screen.getByText(/复核：确认 1 条 \/ 待验证 0 条/)).toBeTruthy();
+    expect(screen.getByText(/复核过滤 1 条/)).toBeTruthy();
+  });
+
+  it("审查卡可关闭独立复核，请求不再携带复核轮", async () => {
+    useScanStore.setState({ workspace: "/tmp/ws" });
+    const user = userEvent.setup();
+    render(<App />);
+    const toggle = screen.getByRole("checkbox", { name: "独立复核" });
+    expect((toggle as HTMLInputElement).checked).toBe(true);
+    await user.click(toggle);
+    await user.click(screen.getByRole("button", { name: "开始审查" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "llm_review_workspace",
+        expect.objectContaining({ offset: 0, verify: false }),
+      ),
+    );
+    // 复核关闭时不再渲染复核徽标与复核计数。
+    await screen.findByTestId("review-suggestions");
+    expect(screen.queryByText("已复核")).toBeNull();
+    expect(screen.queryByText(/复核：确认/)).toBeNull();
   });
 
   it("审查卡可切换模型 Profile，选择随请求下发", async () => {
@@ -898,6 +982,7 @@ describe("App 主链路", () => {
         offset: 0,
         requestId: expect.any(String),
         providerId: "p2",
+        verify: true,
       });
     });
   });
@@ -982,6 +1067,9 @@ describe("App 主链路", () => {
     );
     // 完成提示以对话框呈现，含落盘文件名与目录；可关闭。
     expect(await screen.findByText("导出完成")).toBeTruthy();
+    const exportCall = invokeMock.mock.calls.find(([cmd]) => cmd === "export_report");
+    expect(String(exportCall?.[1]?.markdown)).toContain("复核：已复核");
+    expect(String(exportCall?.[1]?.json)).toContain('"verification": "confirmed"');
     expect(screen.getByTestId("notice-message").textContent).toContain("codescan-review.md");
     expect(screen.getByTestId("notice-message").textContent).toContain("/tmp/ws");
     await user.click(screen.getByTestId("notice-dismiss"));
@@ -1071,5 +1159,83 @@ describe("App 主链路", () => {
       gate.resolve();
     });
     expect(await screen.findByText("导出完成")).toBeTruthy();
+  });
+
+  it("设置页可查看、保存并恢复内置 Skill 覆写", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    await screen.findByTestId("skill-table");
+    expect(screen.getByTestId("skill-table").textContent).toContain("SKILL.md");
+    expect(screen.getAllByText("内置").length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole("button", { name: "编辑 SKILL.md" }));
+    const dialog = screen.getByRole("dialog", {
+      name: "编辑内置 Skill · SKILL.md",
+    });
+    const textarea = within(dialog).getByRole("textbox", {
+      name: "技能正文",
+    }) as HTMLTextAreaElement;
+    expect(textarea.value).toBe("内置技能正文");
+
+    await user.clear(textarea);
+    expect(
+      within(dialog).getByRole("button", { name: "保存 SKILL.md" }),
+    ).toBeDisabled();
+    await user.type(textarea, "自定义技能正文");
+    await user.click(within(dialog).getByRole("button", { name: "保存 SKILL.md" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("save_llm_review_skill", {
+        name: "SKILL.md",
+        content: "自定义技能正文",
+      }),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(await screen.findByText("已覆写")).toBeTruthy();
+    expect(screen.getByTestId("skill-status").textContent).toContain("已保存");
+
+    // 恢复默认在编辑弹窗内完成：保存后再次打开，点击后回到内置正文。
+    await user.click(screen.getByRole("button", { name: "编辑 SKILL.md" }));
+    const reopened = screen.getByRole("dialog", {
+      name: "编辑内置 Skill · SKILL.md",
+    });
+    await user.click(
+      within(reopened).getByRole("button", { name: "恢复默认 SKILL.md" }),
+    );
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("reset_llm_review_skill", {
+        name: "SKILL.md",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        (within(reopened).getByRole("textbox", { name: "技能正文" }) as HTMLTextAreaElement)
+          .value,
+      ).toBe("内置技能正文"),
+    );
+    expect(screen.getByTestId("skill-status").textContent).toContain("恢复");
+  });
+
+  it("Skill 保存失败在弹窗内提示且不关闭", async () => {
+    const base = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (cmd: string, args?: InvokeArgs) => {
+      if (cmd === "save_llm_review_skill") throw new Error("磁盘只读");
+      return base?.(cmd, args);
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    await screen.findByTestId("skill-table");
+    await user.click(screen.getByRole("button", { name: "编辑 SKILL.md" }));
+    const dialog = screen.getByRole("dialog", {
+      name: "编辑内置 Skill · SKILL.md",
+    });
+    await user.type(
+      within(dialog).getByRole("textbox", { name: "技能正文" }),
+      "x",
+    );
+    await user.click(within(dialog).getByRole("button", { name: "保存 SKILL.md" }));
+    expect(await within(dialog).findByRole("alert")).toHaveTextContent("磁盘只读");
+    expect(screen.getByRole("dialog")).toBeTruthy();
   });
 });

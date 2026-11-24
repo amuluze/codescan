@@ -47,11 +47,20 @@ export function filterSuggestions(
   );
 }
 
+/** 复核结论标签（未复核时前端不渲染徽标）。 */
+export const VERIFICATION_LABEL: Record<
+  NonNullable<ReviewSuggestion["verification"]>,
+  string
+> = {
+  confirmed: "已复核",
+  needs_validation: "待验证",
+};
+
 /** 导出文本头部：声明建议层边界，避免与确定性发现混淆。 */
 const EXPORT_HEADER =
   "LLM 源码审查建议（非确定性参考，不参与门禁）\n导出时间不记录；排序：路径 → 行号 → 标题。\n";
 
-/** 导出为 Markdown：与单条「复制」格式一致，另加证据与置信度。 */
+/** 导出为 Markdown：与单条「复制」格式一致，另加证据、置信度与复核状态。 */
 export function suggestionsToMarkdown(suggestions: ReviewSuggestion[]): string {
   const lines: string[] = [EXPORT_HEADER];
   for (const s of suggestions) {
@@ -60,6 +69,9 @@ export function suggestionsToMarkdown(suggestions: ReviewSuggestion[]): string {
       `  - ${s.title}`,
       ...(s.detail ? [`  - ${s.detail}`] : []),
       `  - 置信度：${CONFIDENCE_LABEL[s.confidence]}`,
+      ...(s.verification
+        ? [`  - 复核：${VERIFICATION_LABEL[s.verification]}`]
+        : []),
     );
   }
   return lines.join("\n");

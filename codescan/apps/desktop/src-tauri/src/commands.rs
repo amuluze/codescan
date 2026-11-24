@@ -49,6 +49,146 @@ fn read_custom_rules() -> Option<String> {
     std::fs::read_to_string(custom_rules_path()).ok()
 }
 
+/// 内置技能覆写（设置页编辑）：Rust 独占写入数据根，审查时按名覆盖内置正文。
+fn review_skill_path() -> PathBuf {
+    data_root().join("skills").join("llm-review.json")
+}
+
+#[derive(Serialize)]
+pub struct ReviewSkillFileInfo {
+    pub name: String,
+    pub title: String,
+    pub content: String,
+    pub customized: bool,
+    pub bytes: usize,
+}
+
+#[derive(Serialize)]
+pub struct ReviewSkillInfo {
+    pub version: String,
+    pub files: Vec<ReviewSkillFileInfo>,
+    pub max_file_bytes: usize,
+    pub max_total_bytes: usize,
+}
+
+fn skill_file_info(name: &str, overrides: &llm::ReviewSkillOverrides) -> Option<ReviewSkillFileInfo> {
+    let file = llm::review_skill_file(name)?;
+    let content = overrides.body(name).to_string();
+    Some(ReviewSkillFileInfo {
+        name: file.name.to_string(),
+        title: file.title.to_string(),
+        bytes: content.len(),
+        customized: overrides.is_customized(name),
+        content,
+    })
+}
+
+fn review_skill_info(overrides: &llm::ReviewSkillOverrides) -> ReviewSkillInfo {
+    ReviewSkillInfo {
+        version: llm::REVIEW_SKILL_VERSION.to_string(),
+        files: llm::REVIEW_SKILL_FILES
+            .iter()
+            .filter_map(|file| skill_file_info(file.name, overrides))
+            .collect(),
+        max_file_bytes: llm::REVIEW_SKILL_MAX_FILE_BYTES,
+        max_total_bytes: llm::REVIEW_SKILL_MAX_TOTAL_BYTES,
+    }
+}
+
+/// 读取覆写：损坏 JSON、非法名称、空白或超限条目逐项跳过，回落内置正文。
+pub fn load_review_skill_overrides(path: &std::path::Path) -> llm::ReviewSkillOverrides {
+    let mut overrides = llm::ReviewSkillOverrides::default();
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return overrides;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return overrides;
+    };
+    let Some(files) = value.get("files").and_then(|files| files.as_object()) else {
+        return overrides;
+    };
+    for (name, body) in files {
+        if let Some(body) = body.as_str() {
+            let _ = overrides.set(name, body);
+        }
+    }
+    overrides
+}
+
+/// 原子写入覆写；空覆写删除文件，避免留下空壳。
+pub fn write_review_skill_overrides(
+    path: &std::path::Path,
+    overrides: &llm::ReviewSkillOverrides,
+) -> Result<(), String> {
+    if overrides.is_empty() {
+        return match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(format!("删除技能覆写失败：{err}")),
+        };
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建技能目录失败：{e}"))?;
+    }
+    let files: serde_json::Map<String, serde_json::Value> = overrides
+        .iter()
+        .map(|(name, body)| (name.to_string(), serde_json::Value::String(body.to_string())))
+        .collect();
+    let payload = serde_json::json!({ "version": 1, "files": files });
+    let text = serde_json::to_vec_pretty(&payload).map_err(|e| e.to_string())?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let temp = path.with_extension(format!("json.tmp-{}-{nonce}", std::process::id()));
+    std::fs::write(&temp, text).map_err(|e| format!("写入技能覆写失败：{e}"))?;
+    std::fs::rename(&temp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&temp);
+        format!("更新技能覆写失败：{e}")
+    })
+}
+
+pub fn save_review_skill_override(
+    path: &std::path::Path,
+    name: &str,
+    content: &str,
+) -> Result<ReviewSkillFileInfo, String> {
+    let mut overrides = load_review_skill_overrides(path);
+    overrides.set(name, content)?;
+    write_review_skill_overrides(path, &overrides)?;
+    skill_file_info(name, &overrides).ok_or_else(|| format!("未知技能文件：{name}"))
+}
+
+pub fn reset_review_skill_override(
+    path: &std::path::Path,
+    name: &str,
+) -> Result<ReviewSkillFileInfo, String> {
+    let mut overrides = load_review_skill_overrides(path);
+    overrides.clear(name)?;
+    write_review_skill_overrides(path, &overrides)?;
+    skill_file_info(name, &overrides).ok_or_else(|| format!("未知技能文件：{name}"))
+}
+
+#[tauri::command]
+pub fn llm_review_skill_info() -> Result<ReviewSkillInfo, String> {
+    Ok(review_skill_info(&load_review_skill_overrides(
+        &review_skill_path(),
+    )))
+}
+
+#[tauri::command]
+pub fn save_llm_review_skill(
+    name: String,
+    content: String,
+) -> Result<ReviewSkillFileInfo, String> {
+    save_review_skill_override(&review_skill_path(), &name, &content)
+}
+
+#[tauri::command]
+pub fn reset_llm_review_skill(name: String) -> Result<ReviewSkillFileInfo, String> {
+    reset_review_skill_override(&review_skill_path(), &name)
+}
+
 /// 目录浏览（应用内目录选择器）：返回规范化路径、父目录与直属子目录。
 /// 不依赖原生对话框，行为在所有运行环境一致。
 #[derive(Serialize)]
@@ -752,6 +892,8 @@ pub fn collect_review_files(
 }
 
 /// LLM 源码审查：只返回展示层建议，不写入 findings/基线/门禁。
+/// 参数平铺是 Tauri invoke 契约的一部分，`app`/`state` 也计入参数个数。
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn llm_review_workspace(
     app: AppHandle,
@@ -761,6 +903,7 @@ pub async fn llm_review_workspace(
     offset: Option<usize>,
     request_id: Option<String>,
     provider_id: Option<String>,
+    verify: Option<bool>,
 ) -> Result<llm::ReviewResult, String> {
     let root_path = PathBuf::from(&root);
     if !root_path.is_dir() {
@@ -786,10 +929,15 @@ pub async fn llm_review_workspace(
     }
     let files_reviewed = selection.files.len();
     let request_id = request_id.unwrap_or_default();
-    let (suggestions, dropped) = llm::review_batched(
+    // 缺省开启独立复核；显式 false 时保持单轮审查。
+    let verify_enabled = verify.unwrap_or(true);
+    let skill = load_review_skill_overrides(&review_skill_path());
+    let (suggestions, dropped, rejected) = llm::review_batched(
         &config,
         &key,
         &selection.files,
+        &skill,
+        verify_enabled,
         |done, total| {
             let _ = app.emit(
                 "llm://review_progress",
@@ -811,6 +959,8 @@ pub async fn llm_review_workspace(
         model: config.model,
         skipped_large: selection.skipped_large as u32,
         dropped,
+        rejected,
+        verification_enabled: verify_enabled,
         suggestions,
     })
 }

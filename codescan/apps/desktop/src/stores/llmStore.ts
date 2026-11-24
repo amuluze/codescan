@@ -15,18 +15,27 @@ import {
 /** 源码审查请求序号：切换工作区或重置进度后使在途请求与续审循环失效。 */
 let reviewSeq = 0;
 
-/** 跨页合并建议并按 (path,line,title) 去重。 */
+/** 跨页合并建议并按 (path,line,title) 去重；confirmed 优先于 needs_validation。 */
 function mergeSuggestions(
   a: ReviewResult["suggestions"],
   b: ReviewResult["suggestions"],
 ): ReviewResult["suggestions"] {
-  const seen = new Set<string>();
-  return [...a, ...b].filter((s) => {
-    const key = `${s.path}\n${s.line}\n${s.title}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  const merged: ReviewResult["suggestions"] = [];
+  const positions = new Map<string, number>();
+  for (const suggestion of [...a, ...b]) {
+    const key = `${suggestion.path}\n${suggestion.line}\n${suggestion.title}`;
+    const position = positions.get(key);
+    if (position === undefined) {
+      positions.set(key, merged.length);
+      merged.push(suggestion);
+    } else if (
+      suggestion.verification === "confirmed" &&
+      merged[position].verification !== "confirmed"
+    ) {
+      merged[position] = suggestion;
+    }
+  }
+  return merged;
 }
 
 type LlmState = {
@@ -75,6 +84,7 @@ type LlmState = {
     maxFiles?: number,
     offset?: number,
     providerId?: string | null,
+    verify?: boolean,
   ) => Promise<void>;
   resetReview: () => void;
   runTriage: (scanId: number, fingerprint: string) => Promise<void>;
@@ -162,7 +172,13 @@ export const useLlmStore = create<LlmState>((set, get) => ({
   },
 
 
-  async runReview(root, maxFiles, offset = 0, providerId: string | null = null) {
+  async runReview(
+    root,
+    maxFiles,
+    offset = 0,
+    providerId: string | null = null,
+    verify = true,
+  ) {
     const seq = ++reviewSeq;
     const current = get().review;
     let accumulated: ReviewResult | null = offset > 0 && current ? current : null;
@@ -190,7 +206,14 @@ export const useLlmStore = create<LlmState>((set, get) => ({
         });
         let result: ReviewResult;
         try {
-          result = await api.llmReviewWorkspace(root, maxFiles, cursor, requestId, providerId);
+          result = await api.llmReviewWorkspace(
+            root,
+            maxFiles,
+            cursor,
+            requestId,
+            providerId,
+            verify,
+          );
         } finally {
           unlisten();
         }
@@ -202,6 +225,8 @@ export const useLlmStore = create<LlmState>((set, get) => ({
               files_reviewed: accumulated.files_reviewed + result.files_reviewed,
               total_bytes: accumulated.total_bytes + result.total_bytes,
               dropped: accumulated.dropped + result.dropped,
+              rejected: accumulated.rejected + result.rejected,
+              verification_enabled: result.verification_enabled,
               suggestions: mergeSuggestions(accumulated.suggestions, result.suggestions),
             }
           : result;
