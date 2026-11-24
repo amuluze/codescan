@@ -177,8 +177,9 @@ fn delete_scan_cascades_findings_and_baseline() {
 // ---------- v3：LLM 辅助层（Domain §3a） ----------
 
 use codescan_lib::commands::{
-    collect_review_files, export_report, prepare_batch_llm_call, prepare_llm_call,
-    prepare_provider_probe,
+    collect_review_files, export_report, load_review_skill_overrides, prepare_batch_llm_call,
+    prepare_llm_call, prepare_provider_probe, reset_review_skill_override,
+    save_review_skill_override,
 };
 use codescan_lib::llm;
 
@@ -839,4 +840,52 @@ fn export_report_writes_both_formats_and_rejects_bad_input() {
         let err = export_report(dest.clone(), bad.into(), "x".into(), "y".into()).unwrap_err();
         assert!(err.contains("导出文件名"), "{bad}: {err}");
     }
+}
+
+#[test]
+fn review_skill_override_roundtrip_and_reset() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("skills").join("llm-review.json");
+
+    let saved =
+        save_review_skill_override(&path, "references/security.md", "自定义安全检查").unwrap();
+    assert!(saved.customized);
+    assert_eq!(saved.content, "自定义安全检查");
+    assert_eq!(saved.bytes, "自定义安全检查".len());
+    assert!(path.exists(), "保存覆写应落到数据根");
+
+    let loaded = load_review_skill_overrides(&path);
+    assert_eq!(loaded.body("references/security.md"), "自定义安全检查");
+    assert_eq!(
+        loaded.body("SKILL.md"),
+        llm::review_skill_file("SKILL.md").unwrap().body,
+        "未覆写文件回落内置"
+    );
+
+    assert!(save_review_skill_override(&path, "nope.md", "x").is_err());
+    assert!(save_review_skill_override(&path, "SKILL.md", "  \n ").is_err());
+
+    let reset = reset_review_skill_override(&path, "references/security.md").unwrap();
+    assert!(!reset.customized);
+    assert_eq!(
+        reset.content,
+        llm::review_skill_file("references/security.md")
+            .unwrap()
+            .body
+    );
+    assert!(!path.exists(), "全部恢复后应删除覆写文件");
+}
+
+#[test]
+fn review_skill_override_ignores_corrupt_and_builtin_identical() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("skills").join("llm-review.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "{not json").unwrap();
+    assert!(load_review_skill_overrides(&path).is_empty(), "损坏载荷回落内置");
+
+    let builtin = llm::review_skill_file("SKILL.md").unwrap().body;
+    let saved = save_review_skill_override(&path, "SKILL.md", builtin).unwrap();
+    assert!(!saved.customized, "与内置一致不应标记为覆写");
+    assert!(!path.exists(), "等价内置的保存不应生成覆写文件");
 }

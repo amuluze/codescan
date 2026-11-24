@@ -118,7 +118,7 @@ Determinism guarantees: identical (file set, enabled rule set, engine version) y
 
 ## LLM assist (optional, BYO key)
 
-Configure one or more OpenAI- or Anthropic-compatible provider profiles in **Settings** (per-profile keys, one active by default). The app supports per-finding triage, streaming triage, batch triage, workspace source review (paged, with in-card model switching and result stats cards, advisory), and candidate rule generation with isolated regression runs.
+Configure one or more OpenAI- or Anthropic-compatible provider profiles in **Settings** (per-profile keys, one active by default). The app supports per-finding triage, streaming triage, batch triage, workspace source review (paged, with in-card model switching, a built-in review skill pack, optional independent verification with per-item badges, and result stats cards, advisory), and candidate rule generation with isolated regression runs. Settings also lets you inspect and override each built-in review skill file; overrides only affect model-visible content.
 
 Boundaries that are enforced in code, not just documented:
 

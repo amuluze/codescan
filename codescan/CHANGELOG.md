@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file. The format is b
 
 
 
+## [1.5.4] - 2026-11-24
+
+### Added
+
+- LLM source review now embeds a versioned built-in review skill pack (protocol, false-positive gates, severity/confidence calibration, and per-dimension checklists) instead of a fixed prompt
+- Optional independent verification (on by default) re-checks each batch's suggestions against the cited source, drops explicitly rejected candidates, marks unconfirmed ones as "needs validation", and degrades gracefully when verification fails; the review card exposes a toggle, per-item badges, and verification counts, and exports carry the verification state
+- Settings now lists the built-in review skill files with per-file view/edit, override status, reset-to-default, byte limits, and readable save errors; overrides are stored under the local data root and are used by the next review
+
 ## [1.5.3] - 2026-11-24
 
 ### Changed

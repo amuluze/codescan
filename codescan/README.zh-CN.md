@@ -118,7 +118,7 @@ cargo run --manifest-path codescan/Cargo.toml -p codescan-cli -- scan <repo> \
 
 ## LLM 辅助层（可选，自带 Key）
 
-在**设置**页配置一个或多个 OpenAI / Anthropic 兼容 Provider Profile（密钥按 Profile 独立保存，一个为默认）。支持逐条分诊、流式分诊、批量分诊、工作区源码审查（分页续审 + 审查卡内模型切换 + 结果统计卡片，仅供参考）与候选规则生成 + 隔离回归。
+在**设置**页配置一个或多个 OpenAI / Anthropic 兼容 Provider Profile（密钥按 Profile 独立保存，一个为默认）。支持逐条分诊、流式分诊、批量分诊、工作区源码审查（分页续审 + 审查卡内模型切换 + 内置审查技能包 + 可关闭的独立复核与徽标 + 结果统计卡片，仅供参考）与候选规则生成 + 隔离回归。设置页还可逐文件查看并覆写内置审查 Skill，覆写只影响模型可见内容。
 
 以下边界由代码强制，而非仅写在文档里：
 

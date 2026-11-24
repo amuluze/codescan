@@ -56,6 +56,9 @@ pub fn run() {
             commands::llm_batch_triage,
             commands::llm_generate_rule,
             commands::llm_candidate_regression,
+            commands::llm_review_skill_info,
+            commands::save_llm_review_skill,
+            commands::reset_llm_review_skill,
             commands::save_custom_rule,
         ])
         .manage(AppState {
