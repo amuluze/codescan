@@ -1167,7 +1167,8 @@ pre {
 }
 
 .rules-table,
-.history-table {
+.history-table,
+.provider-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 12.5px;
@@ -1180,14 +1181,17 @@ pre {
 .rules-table th,
 .rules-table td,
 .history-table th,
-.history-table td {
+.history-table td,
+.provider-table th,
+.provider-table td {
   text-align: left;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
 }
 
 .rules-table th,
-.history-table th {
+.history-table th,
+.provider-table th {
   color: var(--faint);
   font-weight: 500;
   font-size: 11px;
@@ -1196,17 +1200,27 @@ pre {
 }
 
 .rules-table tr:last-child td,
-.history-table tr:last-child td {
+.history-table tr:last-child td,
+.provider-table tr:last-child td {
   border-bottom: none;
 }
 
 .rules-table tbody tr:hover,
-.history-table tbody tr:hover {
+.history-table tbody tr:hover,
+.provider-table tbody tr:hover {
   background: var(--surface-2);
 }
 
-.history-table td:last-child {
+.history-table td:last-child,
+.provider-table td:last-child {
   white-space: nowrap;
+}
+
+/* 模型 / URL 等数据列用等宽（DESIGN §7.1：路径与代码一律等宽）。 */
+.mono-cell {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--muted);
 }
 
 /* ---------- 表格操作列 ---------- */

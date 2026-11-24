@@ -118,7 +118,7 @@ Determinism guarantees: identical (file set, enabled rule set, engine version) y
 
 ## LLM assist (optional, BYO key)
 
-Configure an OpenAI- or Anthropic-compatible provider in **Settings**. The app supports per-finding triage, streaming triage, batch triage, workspace source review (paged, advisory, with result stats cards), and candidate rule generation with isolated regression runs.
+Configure one or more OpenAI- or Anthropic-compatible provider profiles in **Settings** (per-profile keys, one active by default). The app supports per-finding triage, streaming triage, batch triage, workspace source review (paged, with in-card model switching and result stats cards, advisory), and candidate rule generation with isolated regression runs.
 
 Boundaries that are enforced in code, not just documented:
 

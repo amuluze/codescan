@@ -208,20 +208,30 @@ fn c1_secrets_boundary_roundtrip() {
 }
 
 #[test]
-fn c2_provider_config_roundtrip_and_missing_key() {
+fn c2_provider_profiles_roundtrip_and_missing_key() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("test.db")).unwrap();
-    let config = llm::ProviderConfig {
+    let profile = llm::ProviderProfile {
+        id: "main".into(),
+        name: "Anthropic".into(),
         kind: llm::ProviderKind::Anthropic,
         base_url: "https://api.anthropic.com".into(),
         model: "claude-x".into(),
     };
-    store.set_meta(llm::META_PROVIDER, &config.to_json()).unwrap();
-    let loaded = llm::ProviderConfig::from_json(
-        &store.get_meta(llm::META_PROVIDER).unwrap().unwrap(),
+    store
+        .set_meta(
+            llm::META_PROVIDER_PROFILES,
+            &llm::profiles_to_json(std::slice::from_ref(&profile)),
+        )
+        .unwrap();
+    store
+        .set_meta(llm::META_ACTIVE_PROVIDER, &serde_json::to_string("main").unwrap())
+        .unwrap();
+    let loaded = llm::profiles_from_json(
+        &store.get_meta(llm::META_PROVIDER_PROFILES).unwrap().unwrap(),
     )
     .unwrap();
-    assert_eq!(loaded, config);
+    assert_eq!(loaded, vec![profile]);
 
     // 无密钥 → 可读错误，且不发起任何请求（错误在 prepare 阶段返回）。
     let scan_id = store
@@ -231,19 +241,21 @@ fn c2_provider_config_roundtrip_and_missing_key() {
     assert!(err.contains("API Key"), "错误应提示未配置密钥：{err}");
     assert!(!err.contains("sk-"), "错误不得包含密钥");
 
-    // 缺 finding / 非法配置同样在 prepare 阶段被拒。
-    store.set_secret(llm::SECRET_API_KEY, "sk-test").unwrap();
-    assert!(prepare_llm_call(&store, None, scan_id, "missing-fp").is_err());
+    // 缺 finding 同样在 prepare 阶段被拒。
     store
-        .set_meta(
-            llm::META_PROVIDER,
-            &llm::ProviderConfig {
-                kind: llm::ProviderKind::OpenAi,
-                base_url: "https://api.openai.com/v1".into(),
-                model: String::new(),
-            }
-            .to_json(),
-        )
+        .set_secret(&llm::ProviderProfile::secret_id("main"), "sk-test")
+        .unwrap();
+    assert!(prepare_llm_call(&store, None, scan_id, "missing-fp").is_err());
+    // 非法配置（model 为空）在 prepare 阶段被拒。
+    let broken = vec![llm::ProviderProfile {
+        id: "main".into(),
+        name: "Anthropic".into(),
+        kind: llm::ProviderKind::OpenAi,
+        base_url: "https://api.openai.com/v1".into(),
+        model: String::new(),
+    }];
+    store
+        .set_meta(llm::META_PROVIDER_PROFILES, &llm::profiles_to_json(&broken))
         .unwrap();
     assert!(prepare_llm_call(&store, None, scan_id, "fp-a").is_err());
 }
@@ -255,18 +267,24 @@ fn c7_llm_failure_is_recoverable() {
     let scan_id = store
         .insert_scan("/tmp/ws", &report(vec![finding("r/a", "a.ts", 1, "fp-a")]), 1, 1)
         .unwrap();
-    store.set_secret(llm::SECRET_API_KEY, "sk-test").unwrap();
+    store
+        .set_secret(&llm::ProviderProfile::secret_id("main"), "sk-test")
+        .unwrap();
     store
         .set_meta(
-            llm::META_PROVIDER,
-            &llm::ProviderConfig {
+            llm::META_PROVIDER_PROFILES,
+            &llm::profiles_to_json(std::slice::from_ref(&llm::ProviderProfile {
+                id: "main".into(),
+                name: "本地拒绝".into(),
                 kind: llm::ProviderKind::OpenAi,
                 // 指向必拒绝的本地端口，验证网络错误可恢复且不 panic。
                 base_url: "http://127.0.0.1:9/v1".into(),
                 model: "m".into(),
-            }
-            .to_json(),
+            })),
         )
+        .unwrap();
+    store
+        .set_meta(llm::META_ACTIVE_PROVIDER, &serde_json::to_string("main").unwrap())
         .unwrap();
 
     let (config, key, context) = prepare_llm_call(&store, None, scan_id, "fp-a").unwrap();
@@ -588,15 +606,17 @@ fn list_directory_follows_directory_symlinks() {
 }
 
 /// 测试连接的前置校验：配置不完整或缺少 Key 时不发起网络请求。
+/// 旧版单一配置（META_PROVIDER + 顶层密钥）在此路径上顺带完成迁移。
 #[test]
 fn provider_probe_preflight_rejects_incomplete_config() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("test.db")).unwrap();
 
-    // 默认配置 model 为空。
-    let err = prepare_provider_probe(&store).unwrap_err();
-    assert!(err.contains("model"), "应提示 model 缺失：{err}");
+    // 无任何 Profile：可读错误。
+    let err = prepare_provider_probe(&store, None).unwrap_err();
+    assert!(err.contains("Profile"), "应提示未配置 Profile：{err}");
 
+    // 旧版单一配置 + 顶层密钥：首次读取时迁移为 default Profile（含密钥）。
     store
         .set_meta(
             llm::META_PROVIDER,
@@ -608,13 +628,68 @@ fn provider_probe_preflight_rejects_incomplete_config() {
             .to_json(),
         )
         .unwrap();
-    let err = prepare_provider_probe(&store).unwrap_err();
-    assert!(err.contains("API Key"), "应提示未配置 Key：{err}");
-
     store.set_secret(llm::SECRET_API_KEY, "sk-probe").unwrap();
-    let (config, key) = prepare_provider_probe(&store).unwrap();
+    let (config, key) = prepare_provider_probe(&store, None).unwrap();
     assert_eq!(config.model, "gpt-test");
     assert_eq!(key, "sk-probe");
+    // 旧密钥已按 Profile 迁移（`llm:api_key:default`），顶层密钥清空。
+    assert!(store.get_secret(llm::SECRET_API_KEY).unwrap().is_none());
+    assert!(store
+        .get_secret(&llm::ProviderProfile::secret_id(llm::LEGACY_PROFILE_ID))
+        .unwrap()
+        .is_some());
+    // 迁移后按 id 显式解析仍成功。
+    let (config, _) = prepare_provider_probe(&store, Some(llm::LEGACY_PROFILE_ID)).unwrap();
+    assert_eq!(config.model, "gpt-test");
+}
+
+/// 多 Profile：密钥按 Profile 独立存储；显式 id 优先，缺省用活动 Profile；
+/// 不存在的 id 报可读错误。
+#[test]
+fn provider_profiles_resolve_by_id_or_active() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("test.db")).unwrap();
+    let profiles = vec![
+        llm::ProviderProfile {
+            id: "a".into(),
+            name: "OpenAI 主力".into(),
+            kind: llm::ProviderKind::OpenAi,
+            base_url: "https://api.openai.com/v1".into(),
+            model: "gpt-main".into(),
+        },
+        llm::ProviderProfile {
+            id: "b".into(),
+            name: "智谱 GLM".into(),
+            kind: llm::ProviderKind::Anthropic,
+            base_url: "https://open.bigmodel.cn/api/anthropic".into(),
+            model: "glm-x".into(),
+        },
+    ];
+    store
+        .set_meta(llm::META_PROVIDER_PROFILES, &llm::profiles_to_json(&profiles))
+        .unwrap();
+    store
+        .set_meta(llm::META_ACTIVE_PROVIDER, &serde_json::to_string("b").unwrap())
+        .unwrap();
+    store
+        .set_secret(&llm::ProviderProfile::secret_id("b"), "sk-b")
+        .unwrap();
+
+    // 缺省 → 活动 Profile b。
+    let (config, key) = prepare_provider_probe(&store, None).unwrap();
+    assert_eq!(config.model, "glm-x");
+    assert_eq!(key, "sk-b");
+
+    // 显式 a：密钥独立，a 未配置时报 a 的名字。
+    let err = prepare_provider_probe(&store, Some("a")).unwrap_err();
+    assert!(
+        err.contains("OpenAI 主力"),
+        "错误应指明缺 Key 的 Profile：{err}"
+    );
+
+    // 不存在的 id 报可读错误。
+    let err = prepare_provider_probe(&store, Some("nope")).unwrap_err();
+    assert!(err.contains("不存在"), "应提示 Profile 不存在：{err}");
 }
 
 /// LLM 审查的文件收集：跳过二进制/未知语言/超限文件，遵守文件数与字节上限。

@@ -45,11 +45,19 @@ export type DirListing = {
   entries: DirEntry[];
 };
 
-export type ProviderInfo = {
+export type ProviderProfileInfo = {
+  id: string;
+  name: string;
   kind: "openai" | "anthropic";
   base_url: string;
   model: string;
   has_key: boolean;
+};
+
+/** Provider Profile 列表与活动 Profile（Domain §3a.2）；密钥只报状态。 */
+export type ProvidersInfo = {
+  profiles: ProviderProfileInfo[];
+  active: string | null;
 };
 
 export type ProviderTestResult = {
@@ -190,25 +198,48 @@ export const api = {
     platform.invoke<void>("export_report", { destDir, base, markdown, json }),
   listDirectory: (path?: string) =>
     platform.invoke<DirListing>("list_directory", { path: path ?? null }),
-  getProviderConfig: () => platform.invoke<ProviderInfo>("get_provider_config"),
-  setProviderConfig: (kind: string, baseUrl: string, model: string) =>
-    platform.invoke<void>("set_provider_config", { kind, baseUrl, model }),
-  setApiKey: (key: string) => platform.invoke<void>("set_api_key", { key }),
-  clearApiKey: () => platform.invoke<void>("clear_api_key"),
-  testProviderConnection: () =>
-    platform.invoke<ProviderTestResult>("test_provider_connection"),
+  listProviders: () => platform.invoke<ProvidersInfo>("list_providers"),
+  upsertProviderProfile: (profile: {
+    id: string | null;
+    name: string;
+    kind: string;
+    baseUrl: string;
+    model: string;
+  }) =>
+    platform.invoke<string>("upsert_provider_profile", {
+      id: profile.id,
+      name: profile.name,
+      kind: profile.kind,
+      baseUrl: profile.baseUrl,
+      model: profile.model,
+    }),
+  deleteProviderProfile: (id: string) =>
+    platform.invoke<void>("delete_provider_profile", { id }),
+  setActiveProvider: (id: string) =>
+    platform.invoke<void>("set_active_provider", { id }),
+  setProviderApiKey: (id: string, key: string) =>
+    platform.invoke<void>("set_provider_api_key", { id, key }),
+  clearProviderApiKey: (id: string) =>
+    platform.invoke<void>("clear_provider_api_key", { id }),
+  testProviderConnection: (id?: string) =>
+    platform.invoke<ProviderTestResult>("test_provider_connection", {
+      profileId: id ?? null,
+    }),
   llmReviewWorkspace: (
     root: string,
     maxFiles?: number,
     offset?: number,
     requestId?: string,
+    providerId?: string | null,
   ) =>
     platform.invoke<ReviewResult>("llm_review_workspace", {
       root,
       maxFiles: maxFiles ?? null,
       offset: offset ?? 0,
       requestId: requestId ?? null,
+      providerId: providerId ?? null,
     }),
+
   llmTriage: (scanId: number, fingerprint: string) =>
     platform.invoke<TriageResult>("llm_triage", { scanId, fingerprint }),
   llmTriageStream: (scanId: number, fingerprint: string, requestId: string) =>

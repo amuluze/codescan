@@ -1,15 +1,34 @@
-/** 设置页：LLM Provider（兼容 OpenAI / Anthropic）、API Key（只写）与应用更新。 */
+/** 设置页：LLM Provider Profile（多 Profile · 兼容 OpenAI / Anthropic）、API Key（只写）与应用更新。 */
 import { useEffect, useState } from "react";
 import { useLlmStore } from "../stores/llmStore";
 import { useUpdateStore } from "../stores/updateStore";
 
+type EditorState = {
+  /** null = 新建（保存后落库并回填 id，便于继续配置 Key）。 */
+  id: string | null;
+  name: string;
+  kind: string;
+  baseUrl: string;
+  model: string;
+};
+
+const EMPTY_EDITOR: EditorState = {
+  id: null,
+  name: "",
+  kind: "openai",
+  baseUrl: "",
+  model: "",
+};
+
 export function SettingsView() {
   const {
-    provider,
-    loadProvider,
-    saveProvider,
-    saveApiKey,
-    clearApiKey,
+    providers,
+    loadProviders,
+    saveProfile,
+    deleteProfile,
+    setActiveProfile,
+    setProfileKey,
+    clearProfileKey,
     testing,
     testResult,
     testError,
@@ -24,44 +43,50 @@ export function SettingsView() {
     check: checkUpdate,
     install: installUpdate,
   } = useUpdateStore();
-  const [kind, setKind] = useState<string>("openai");
-  const [baseUrl, setBaseUrl] = useState("");
-  const [model, setModel] = useState("");
+  const [editor, setEditor] = useState<EditorState | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [message, setMessage] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   useEffect(() => {
-    loadProvider()
-      .then(() => {
-        const p = useLlmStore.getState().provider;
-        if (p) {
-          setKind(p.kind);
-          setBaseUrl(p.base_url);
-          setModel(p.model);
-        }
-      })
-      .catch((e) => setMessage(String(e)));
+    loadProviders().catch((e) => setMessage(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const editingId = editor?.id ?? null;
+  const editingProfile = providers?.profiles.find((p) => p.id === editingId) ?? null;
+
   const save = async () => {
-    setMessage(null);
+    if (!editor) return;
     try {
-      await saveProvider(kind, baseUrl, model);
-      setMessage("Provider 配置已保存");
+      const id = await saveProfile(editor);
+      setEditor({ ...editor, id });
+      setMessage(null);
     } catch (e) {
       setMessage(String(e));
     }
   };
 
   const saveKey = async () => {
-    setMessage(null);
+    if (!editingId || !apiKey.trim()) return;
     try {
-      await saveApiKey(apiKey);
+      await setProfileKey(editingId, apiKey.trim());
       setApiKey("");
-      setMessage("API Key 已保存（仅存本地 SQLite secrets 表）");
+      setMessage("API Key 已保存");
     } catch (e) {
       setMessage(String(e));
+    }
+  };
+
+  const removeProfile = async (id: string) => {
+    try {
+      await deleteProfile(id);
+      if (editor?.id === id) setEditor(null);
+      setMessage(null);
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setConfirmDeleteId(null);
     }
   };
 
@@ -87,73 +112,213 @@ export function SettingsView() {
           <header className="card-head">
             <div>
               <h3>模型 Provider</h3>
-              <p className="card-sub">兼容 OpenAI 与 Anthropic 协议的本地直连；无内置遥测，请求只发往你填写的 Base URL。</p>
+              <p className="card-sub">
+                可保存多个 Provider Profile；密钥按 Profile 独立写入 Rust
+                独占的 secrets 表，无内置遥测，请求只发往该 Profile 的 Base URL。
+                带「默认」标记的 Profile 是分诊与审查的缺省选择。
+              </p>
             </div>
           </header>
-          <div className="form-grid">
-            <label className="field">
-              <span className="field-label">Provider</span>
-              <select aria-label="Provider" value={kind} onChange={(e) => setKind(e.target.value)}>
-                <option value="openai">OpenAI-compatible</option>
-                <option value="anthropic">Anthropic-compatible</option>
-              </select>
-            </label>
-            <label className="field">
-              <span className="field-label">Base URL</span>
-              <input
-                aria-label="Base URL"
-                value={baseUrl}
-                onChange={(e) => setBaseUrl(e.target.value)}
-                placeholder="https://api.openai.com/v1"
-              />
-            </label>
-            <label className="field field-wide">
-              <span className="field-label">Model</span>
-              <input
-                aria-label="Model"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder="模型名，必填（例如 gpt-4o-mini / claude-sonnet-4-5）"
-              />
-            </label>
-          </div>
-          <div className="key-block">
-            <div className="key-head">
-              <span className="field-label">API Key</span>
-              <span
-                className={`status-chip ${provider?.has_key ? "ok" : "muted-chip"}`}
-                data-testid="key-status"
+
+          {providers && providers.profiles.length > 0 && (
+            <table className="provider-table" data-testid="provider-table">
+              <thead>
+                <tr>
+                  <th>名称</th>
+                  <th>协议</th>
+                  <th>模型</th>
+                  <th>Base URL</th>
+                  <th>Key</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {providers.profiles.map((p) => (
+                  <tr key={p.id}>
+                    <td>
+                      {p.name}
+                      {providers.active === p.id && (
+                        <span className="dim-badge" title="活动 Profile：分诊与审查的缺省选择">
+                          默认
+                        </span>
+                      )}
+                    </td>
+                    <td>{p.kind === "openai" ? "OpenAI" : "Anthropic"}</td>
+                    <td className="mono-cell">{p.model}</td>
+                    <td className="mono-cell">{p.base_url}</td>
+                    <td>
+                      <span className={`status-chip ${p.has_key ? "ok" : "muted-chip"}`}>
+                        {p.has_key ? "已配置" : "未配置"}
+                      </span>
+                    </td>
+                    <td>
+                      <div className="table-actions">
+                        {providers.active !== p.id && (
+                          <button
+                            className="ghost btn-sm"
+                            onClick={() => void setActiveProfile(p.id)}
+                          >
+                            设为默认
+                          </button>
+                        )}
+                        <button
+                          className="ghost btn-sm"
+                          onClick={() =>
+                            setEditor({
+                              id: p.id,
+                              name: p.name,
+                              kind: p.kind,
+                              baseUrl: p.base_url,
+                              model: p.model,
+                            })
+                          }
+                        >
+                          编辑
+                        </button>
+                        <button
+                          className="ghost btn-sm"
+                          disabled={testing}
+                          onClick={() => void testConnection(p.id)}
+                        >
+                          测试
+                        </button>
+                        {confirmDeleteId === p.id ? (
+                          <>
+                            <button className="danger btn-sm" onClick={() => void removeProfile(p.id)}>
+                              确认删除
+                            </button>
+                            <button
+                              className="ghost btn-sm"
+                              onClick={() => setConfirmDeleteId(null)}
+                            >
+                              取消
+                            </button>
+                          </>
+                        ) : (
+                          <button className="ghost btn-sm" onClick={() => setConfirmDeleteId(p.id)}>
+                            删除
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {providers && providers.profiles.length === 0 && (
+            <p className="card-sub">尚无 Provider Profile；新建一个以启用 LLM 辅助能力。</p>
+          )}
+
+          {editor && (
+            <div className="profile-editor" data-testid="profile-editor">
+              <div className="form-grid">
+                <label className="field">
+                  <span className="field-label">名称</span>
+                  <input
+                    aria-label="Profile 名称"
+                    value={editor.name}
+                    onChange={(e) => setEditor({ ...editor, name: e.target.value })}
+                    placeholder="例如：OpenAI 主力 / 智谱 GLM"
+                  />
+                </label>
+                <label className="field">
+                  <span className="field-label">Provider</span>
+                  <select
+                    aria-label="Provider"
+                    value={editor.kind}
+                    onChange={(e) => setEditor({ ...editor, kind: e.target.value })}
+                  >
+                    <option value="openai">OpenAI-compatible</option>
+                    <option value="anthropic">Anthropic-compatible</option>
+                  </select>
+                </label>
+                <label className="field">
+                  <span className="field-label">Base URL</span>
+                  <input
+                    aria-label="Base URL"
+                    value={editor.baseUrl}
+                    onChange={(e) => setEditor({ ...editor, baseUrl: e.target.value })}
+                    placeholder="https://api.openai.com/v1"
+                  />
+                </label>
+                <label className="field field-wide">
+                  <span className="field-label">Model</span>
+                  <input
+                    aria-label="Model"
+                    value={editor.model}
+                    onChange={(e) => setEditor({ ...editor, model: e.target.value })}
+                    placeholder="模型名，必填（例如 gpt-4o-mini / glm-4.6）"
+                  />
+                </label>
+              </div>
+              <footer className="card-actions">
+                <button
+                  className="primary"
+                  data-testid="profile-save"
+                  onClick={() => void save()}
+                >
+                  保存 Profile
+                </button>
+                <button className="ghost" onClick={() => setEditor(null)}>
+                  取消
+                </button>
+              </footer>
+              {editingId ? (
+                <div className="key-block">
+                  <div className="key-head">
+                    <span className="field-label">API Key</span>
+                    <span
+                      className={`status-chip ${editingProfile?.has_key ? "ok" : "muted-chip"}`}
+                      data-testid="key-status"
+                    >
+                      {editingProfile?.has_key ? "已配置" : "未配置"}
+                    </span>
+                  </div>
+                  <div className="key-row">
+                    <input
+                      aria-label="API Key"
+                      type="password"
+                      className="key-input"
+                      value={apiKey}
+                      onChange={(e) => setApiKey(e.target.value)}
+                      placeholder="sk-…"
+                      autoComplete="off"
+                    />
+                    <button
+                      className="primary"
+                      onClick={() => void saveKey()}
+                      disabled={!apiKey.trim()}
+                    >
+                      保存 Key
+                    </button>
+                    <button
+                      className="ghost"
+                      onClick={() => void clearProfileKey(editingId)}
+                      disabled={!editingProfile?.has_key}
+                    >
+                      清除 Key
+                    </button>
+                  </div>
+                  <p className="key-note">仅写入 Rust 独占的 SQLite secrets 表；命令面不提供明文回读。</p>
+                </div>
+              ) : (
+                <p className="key-note">保存 Profile 后即可设置该 Profile 的 API Key。</p>
+              )}
+            </div>
+          )}
+          {!editor && (
+            <footer className="card-actions">
+              <button
+                className="ghost"
+                data-testid="profile-new"
+                onClick={() => setEditor({ ...EMPTY_EDITOR })}
               >
-                {provider?.has_key ? "已配置" : "未配置"}
-              </span>
-            </div>
-            <div className="key-row">
-              <input
-                aria-label="API Key"
-                type="password"
-                className="key-input"
-                value={apiKey}
-                onChange={(e) => setApiKey(e.target.value)}
-                placeholder="sk-…"
-                autoComplete="off"
-              />
-              <button className="primary" onClick={() => void saveKey()} disabled={!apiKey.trim()}>
-                保存 Key
+                新建 Profile
               </button>
-              <button className="ghost" onClick={() => void clearApiKey()} disabled={!provider?.has_key}>
-                清除 Key
-              </button>
-            </div>
-            <p className="key-note">仅写入 Rust 独占的 SQLite secrets 表；命令面不提供明文回读。</p>
-          </div>
-          <footer className="card-actions">
-            <button className="primary" onClick={() => void save()}>
-              保存 Provider 配置
-            </button>
-            <button className="ghost" onClick={() => void testConnection()} disabled={testing}>
-              {testing ? "测试中…" : "测试连接"}
-            </button>
-          </footer>
+            </footer>
+          )}
+
           {testResult && (
             <p role="status" className="notice success" data-testid="provider-test-ok">
               连接成功 · {testResult.kind} · {testResult.model} · {testResult.latency_ms} ms

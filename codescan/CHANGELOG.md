@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file. The format is b
 
 
 
+## [1.5.2] - 2026-11-24
+
+### Added
+
+- Multiple provider profiles: Settings stores any number of profiles (name / kind / base URL / model) with per-profile API keys and one active default; the legacy single configuration migrates automatically on first read
+- The Scan page review card gains a model dropdown to run the review with any configured profile; triage and other LLM calls use the active profile
+
 ## [1.5.1] - 2026-11-24
 
 ### Changed
