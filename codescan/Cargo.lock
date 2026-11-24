@@ -484,7 +484,7 @@ dependencies = [
 
 [[package]]
 name = "codescan-cli"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "base64 0.23.1",
  "clap",
@@ -497,7 +497,7 @@ dependencies = [
 
 [[package]]
 name = "codescan-desktop"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "base64 0.23.1",
  "codescan-engine",
@@ -518,7 +518,7 @@ dependencies = [
 
 [[package]]
 name = "codescan-engine"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "ignore",
  "rayon",
