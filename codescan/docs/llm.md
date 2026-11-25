@@ -9,6 +9,7 @@ Provider 形态复刻 axiom：OpenAI-compatible 与 Anthropic-compatible 两类�
 - API Key 按 Profile 写入 `~/.codescan/codescan.db` 的 `secrets` 表（键 `llm:api_key:<id>`，Rust 独占读写）；命令面只暴露「已配置/未配置」，不存在明文回读接口。
 - 请求只发往所选 Profile 的 Base URL；OpenAI 走 `{base}/chat/completions`（Bearer），Anthropic 走 `{base}/v1/messages`（`x-api-key` + `anthropic-version`）。
 - 源码审查可在扫描页的「模型」下拉中显式指定其他 Profile；分诊等其余调用始终使用默认 Profile。
+- 设置页的新增/编辑 Profile 在保存前按与后端相同的规则校验（名称、Base URL 为 http(s)、Model 非空），并预览实际请求 URL（OpenAI 追加 `/chat/completions`，Anthropic 追加 `/v1/messages`）；Base URL 已包含追加路径时给出重复警告。切换 Profile、新建或关闭编辑器前若存在未保存字段或 Key 草稿，需先确认放弃；Key 草稿在切换时清空，不跨 Profile 复用。编辑已有 Profile 保存成功后关闭编辑器；新建保存成功后保留编辑器以继续配置 Key。
 - 超时：非流式 60s，流式 120s；错误信息不含密钥。
 - 传输层错误展示完整根因链（DNS / TCP / TLS / 代理 / 超时）并附一条排查提示；请求遵循 `HTTPS_PROXY` / `ALL_PROXY` 环境变量。
 

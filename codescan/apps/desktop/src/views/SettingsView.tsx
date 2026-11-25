@@ -26,6 +26,65 @@ const EMPTY_EDITOR: EditorState = {
   model: "",
 };
 
+type PendingEditorAction =
+  | { kind: "open"; target: EditorState }
+  | { kind: "close" };
+
+/** Base URL 必须是可解析的 http(s) 地址；与后端 ProviderConfig::validate 同口径。 */
+const isHttpUrl = (value: string): boolean => {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+};
+
+type ProfileFieldErrors = {
+  name?: string;
+  baseUrl?: string;
+  model?: string;
+};
+
+/** 客户端校验：与后端一致的三项必填 + Base URL 协议。 */
+const profileFieldErrors = (editor: EditorState): ProfileFieldErrors => {
+  const errors: ProfileFieldErrors = {};
+  if (!editor.name.trim()) errors.name = "名称为必填项";
+  if (!editor.baseUrl.trim()) {
+    errors.baseUrl = "Base URL 为必填项";
+  } else if (!isHttpUrl(editor.baseUrl.trim())) {
+    errors.baseUrl = "必须以 http:// 或 https:// 开头";
+  }
+  if (!editor.model.trim()) errors.model = "Model 为必填项";
+  return errors;
+};
+
+/** 展示实际请求 URL：OpenAI 追加 /chat/completions，Anthropic 追加 /v1/messages。 */
+const endpointPreview = (editor: EditorState): string => {
+  const base = editor.baseUrl.trim().replace(/\/+$/, "");
+  if (!base || !isHttpUrl(base)) return "—";
+  return editor.kind === "anthropic"
+    ? `${base}/v1/messages`
+    : `${base}/chat/completions`;
+};
+
+/** 常见重复路径：Base URL 已包含协议追加的路径时提示。 */
+const endpointWarning = (editor: EditorState): string | null => {
+  const base = editor.baseUrl.trim().replace(/\/+$/, "");
+  if (!base || !isHttpUrl(base)) return null;
+  if (editor.kind === "anthropic") {
+    if (/\/v1\/messages$/i.test(base)) {
+      return "Base URL 已包含 /v1/messages；实际请求会再追加一次";
+    }
+    if (/\/v1$/i.test(base)) {
+      return "Anthropic 会自动追加 /v1/messages；Base URL 请勿以 /v1 结尾";
+    }
+  } else if (/\/chat\/completions$/i.test(base)) {
+    return "Base URL 已包含 /chat/completions；实际请求会再追加一次";
+  }
+  return null;
+};
+
 export function SettingsView() {
   const {
     providers,
@@ -50,8 +109,17 @@ export function SettingsView() {
     install: installUpdate,
   } = useUpdateStore();
   const [editor, setEditor] = useState<EditorState | null>(null);
+  const [baseline, setBaseline] = useState<EditorState | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [message, setMessage] = useState<string | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [savedNotice, setSavedNotice] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<PendingEditorAction | null>(null);
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [keyBusy, setKeyBusy] = useState(false);
+  const [activatingId, setActivatingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [testedName, setTestedName] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [skillInfo, setSkillInfo] = useState<ReviewSkillInfo | null>(null);
   const [skillError, setSkillError] = useState<string | null>(null);
@@ -70,39 +138,167 @@ export function SettingsView() {
 
   const editingId = editor?.id ?? null;
   const editingProfile = providers?.profiles.find((p) => p.id === editingId) ?? null;
+  /** 字段或 Key 草稿与打开时不同即视为未保存；切换/关闭前必须显式放弃。 */
+  const dirty = Boolean(
+    editor &&
+      baseline &&
+      (editor.name !== baseline.name ||
+        editor.kind !== baseline.kind ||
+        editor.baseUrl !== baseline.baseUrl ||
+        editor.model !== baseline.model ||
+        apiKey !== ""),
+  );
+  const fieldErrors = editor ? profileFieldErrors(editor) : {};
+  const invalid = Object.keys(fieldErrors).length > 0;
+  const missingFields = editor
+    ? [
+        !editor.name.trim() ? "名称" : null,
+        !editor.baseUrl.trim() ? "Base URL" : null,
+        !editor.model.trim() ? "Model" : null,
+      ].filter((value): value is string => value !== null)
+    : [];
+  const endpoint = editor ? endpointPreview(editor) : "";
+  const endpointWarningText = editor ? endpointWarning(editor) : null;
+
+  const closeEditor = () => {
+    setEditor(null);
+    setBaseline(null);
+    setApiKey("");
+    setProfileError(null);
+    setSavedNotice(null);
+    setPendingAction(null);
+  };
+
+  const openEditor = (target: EditorState) => {
+    setEditor(target);
+    setBaseline(target);
+    setApiKey("");
+    setProfileError(null);
+    setSavedNotice(null);
+    setPendingAction(null);
+    setMessage(null);
+  };
+
+  const startEditing = (target: EditorState) => {
+    if (editor?.id && editor.id === target.id) return;
+    if (dirty) {
+      setPendingAction({ kind: "open", target });
+      return;
+    }
+    openEditor(target);
+  };
+
+  const requestClose = () => {
+    if (dirty) {
+      setPendingAction({ kind: "close" });
+      return;
+    }
+    closeEditor();
+  };
+
+  const confirmDiscard = () => {
+    if (!pendingAction) return;
+    if (pendingAction.kind === "close") closeEditor();
+    else openEditor(pendingAction.target);
+  };
+
+  const changeEditor = (patch: Partial<EditorState>) => {
+    setEditor((current) => (current ? { ...current, ...patch } : current));
+    setProfileError(null);
+    setSavedNotice(null);
+  };
 
   const save = async () => {
-    if (!editor) return;
+    if (!editor || savingProfile || invalid) return;
+    const wasNew = !editor.id;
+    const normalized: EditorState = {
+      ...editor,
+      name: editor.name.trim(),
+      baseUrl: editor.baseUrl.trim(),
+      model: editor.model.trim(),
+    };
+    setSavingProfile(true);
+    setProfileError(null);
     try {
-      const id = await saveProfile(editor);
-      setEditor({ ...editor, id });
-      setMessage(null);
+      const id = await saveProfile(normalized);
+      const saved = { ...normalized, id };
+      setBaseline(saved);
+      if (wasNew) {
+        // 新建后保留编辑器，让用户继续配置 Key；此时已有 id，按钮变为「关闭」。
+        setEditor(saved);
+        setSavedNotice("Profile 已保存；可继续配置 API Key，完成后点击关闭。");
+      } else {
+        closeEditor();
+        setMessage(`已保存 Provider Profile：${saved.name}`);
+      }
     } catch (e) {
-      setMessage(String(e));
+      setProfileError(String(e));
+    } finally {
+      setSavingProfile(false);
     }
   };
 
   const saveKey = async () => {
-    if (!editingId || !apiKey.trim()) return;
+    if (!editingId || keyBusy || !apiKey.trim()) return;
+    setKeyBusy(true);
+    setProfileError(null);
     try {
       await setProfileKey(editingId, apiKey.trim());
       setApiKey("");
-      setMessage("API Key 已保存");
+      setSavedNotice(`API Key 已保存（${editingProfile?.name ?? "当前 Profile"}）`);
     } catch (e) {
-      setMessage(String(e));
+      setProfileError(String(e));
+    } finally {
+      setKeyBusy(false);
     }
   };
 
-  const removeProfile = async (id: string) => {
+  const clearKey = async () => {
+    if (!editingId || keyBusy) return;
+    setKeyBusy(true);
+    setProfileError(null);
     try {
-      await deleteProfile(id);
-      if (editor?.id === id) setEditor(null);
-      setMessage(null);
+      await clearProfileKey(editingId);
+      setApiKey("");
+      setSavedNotice(`API Key 已清除（${editingProfile?.name ?? "当前 Profile"}）`);
+    } catch (e) {
+      setProfileError(String(e));
+    } finally {
+      setKeyBusy(false);
+    }
+  };
+
+  const activate = async (p: { id: string; name: string }) => {
+    if (activatingId) return;
+    setActivatingId(p.id);
+    try {
+      await setActiveProfile(p.id);
+      setMessage(`默认 Provider 已切换为：${p.name}`);
+    } catch (e) {
+      setMessage(String(e));
+    } finally {
+      setActivatingId(null);
+    }
+  };
+
+  const removeProfile = async (p: { id: string; name: string }) => {
+    if (deletingId) return;
+    setDeletingId(p.id);
+    try {
+      await deleteProfile(p.id);
+      if (editor?.id === p.id) closeEditor();
+      setMessage(`已删除 Provider Profile：${p.name}`);
     } catch (e) {
       setMessage(String(e));
     } finally {
       setConfirmDeleteId(null);
+      setDeletingId(null);
     }
+  };
+
+  const testProfile = async (p: { id: string; name: string }) => {
+    setTestedName(p.name);
+    await testConnection(p.id);
   };
 
   /** 保存/恢复后就地更新列表；打开中的编辑器同步为新内容。 */
@@ -199,8 +395,11 @@ export function SettingsView() {
               </thead>
               <tbody>
                 {providers.profiles.map((p) => (
-                  <tr key={p.id}>
-                    <td>
+                  <tr
+                    key={p.id}
+                    className={editor?.id === p.id ? "editing" : undefined}
+                  >
+                    <td data-label="名称">
                       {p.name}
                       {providers.active === p.id && (
                         <span className="dim-badge" title="活动 Profile：分诊与审查的缺省选择">
@@ -208,28 +407,34 @@ export function SettingsView() {
                         </span>
                       )}
                     </td>
-                    <td>{p.kind === "openai" ? "OpenAI" : "Anthropic"}</td>
-                    <td className="mono-cell">{p.model}</td>
-                    <td className="mono-cell">{p.base_url}</td>
-                    <td>
+                    <td data-label="协议">{p.kind === "openai" ? "OpenAI" : "Anthropic"}</td>
+                    <td data-label="模型" className="mono-cell" title={p.model}>
+                      {p.model}
+                    </td>
+                    <td data-label="Base URL" className="mono-cell url-cell" title={p.base_url}>
+                      {p.base_url}
+                    </td>
+                    <td data-label="Key">
                       <span className={`status-chip ${p.has_key ? "ok" : "muted-chip"}`}>
                         {p.has_key ? "已配置" : "未配置"}
                       </span>
                     </td>
-                    <td>
+                    <td data-label="操作">
                       <div className="table-actions">
                         {providers.active !== p.id && (
                           <button
                             className="ghost btn-sm"
-                            onClick={() => void setActiveProfile(p.id)}
+                            disabled={activatingId !== null || deletingId !== null}
+                            onClick={() => void activate(p)}
                           >
-                            设为默认
+                            {activatingId === p.id ? "切换中…" : "设为默认"}
                           </button>
                         )}
                         <button
                           className="ghost btn-sm"
+                          disabled={savingProfile}
                           onClick={() =>
-                            setEditor({
+                            startEditing({
                               id: p.id,
                               name: p.name,
                               kind: p.kind,
@@ -242,25 +447,34 @@ export function SettingsView() {
                         </button>
                         <button
                           className="ghost btn-sm"
-                          disabled={testing}
-                          onClick={() => void testConnection(p.id)}
+                          disabled={testing || deletingId !== null}
+                          onClick={() => void testProfile(p)}
                         >
-                          测试
+                          {testing && testedName === p.name ? "测试中…" : "测试"}
                         </button>
                         {confirmDeleteId === p.id ? (
                           <>
-                            <button className="danger btn-sm" onClick={() => void removeProfile(p.id)}>
-                              确认删除
+                            <button
+                              className="danger btn-sm"
+                              disabled={deletingId === p.id}
+                              onClick={() => void removeProfile(p)}
+                            >
+                              {deletingId === p.id ? "删除中…" : "确认删除"}
                             </button>
                             <button
                               className="ghost btn-sm"
+                              disabled={deletingId === p.id}
                               onClick={() => setConfirmDeleteId(null)}
                             >
                               取消
                             </button>
                           </>
                         ) : (
-                          <button className="ghost btn-sm" onClick={() => setConfirmDeleteId(p.id)}>
+                          <button
+                            className="ghost btn-sm"
+                            disabled={deletingId !== null}
+                            onClick={() => setConfirmDeleteId(p.id)}
+                          >
                             删除
                           </button>
                         )}
@@ -277,62 +491,128 @@ export function SettingsView() {
 
           {editor && (
             <div className="profile-editor" data-testid="profile-editor">
+              <div className="profile-editor-head">
+                <h4>
+                  {editor.id
+                    ? `编辑 Provider Profile：${baseline?.name ?? editor.name}`
+                    : "新建 Provider Profile"}
+                </h4>
+                {editingId && providers?.active === editingId && (
+                  <span className="dim-badge">默认</span>
+                )}
+              </div>
+
+              {savedNotice && (
+                <p role="status" className="notice success profile-notice" data-testid="profile-notice">
+                  {savedNotice}
+                </p>
+              )}
+              {profileError && (
+                <p role="alert" className="notice failure profile-notice" data-testid="profile-error">
+                  {profileError}
+                </p>
+              )}
+              {pendingAction && (
+                <div className="profile-discard" role="alert">
+                  <span>当前编辑有未保存的修改，切换或关闭将丢失。</span>
+                  <div className="row">
+                    <button className="danger btn-sm" onClick={confirmDiscard}>
+                      放弃修改
+                    </button>
+                    <button className="ghost btn-sm" onClick={() => setPendingAction(null)}>
+                      继续编辑
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div className="form-grid">
                 <label className="field">
                   <span className="field-label">名称</span>
                   <input
                     aria-label="Profile 名称"
                     value={editor.name}
-                    onChange={(e) => setEditor({ ...editor, name: e.target.value })}
+                    onChange={(e) => changeEditor({ name: e.target.value })}
                     placeholder="例如：OpenAI 主力 / 智谱 GLM"
+                    autoFocus={!editor.id}
                   />
                 </label>
                 <label className="field">
-                  <span className="field-label">Provider</span>
+                  <span className="field-label">协议</span>
                   <select
                     aria-label="Provider"
                     value={editor.kind}
-                    onChange={(e) => setEditor({ ...editor, kind: e.target.value })}
+                    onChange={(e) => changeEditor({ kind: e.target.value })}
                   >
                     <option value="openai">OpenAI-compatible</option>
                     <option value="anthropic">Anthropic-compatible</option>
                   </select>
                 </label>
-                <label className="field">
+                <label
+                  className={`field field-wide${
+                    editor.baseUrl.trim() && fieldErrors.baseUrl ? " field-invalid" : ""
+                  }`}
+                >
                   <span className="field-label">Base URL</span>
                   <input
                     aria-label="Base URL"
                     value={editor.baseUrl}
-                    onChange={(e) => setEditor({ ...editor, baseUrl: e.target.value })}
+                    onChange={(e) => changeEditor({ baseUrl: e.target.value })}
                     placeholder="https://api.openai.com/v1"
                   />
+                  {editor.baseUrl.trim() && fieldErrors.baseUrl && (
+                    <span className="field-error">{fieldErrors.baseUrl}</span>
+                  )}
                 </label>
                 <label className="field field-wide">
                   <span className="field-label">Model</span>
                   <input
                     aria-label="Model"
                     value={editor.model}
-                    onChange={(e) => setEditor({ ...editor, model: e.target.value })}
+                    onChange={(e) => changeEditor({ model: e.target.value })}
                     placeholder="模型名，必填（例如 gpt-4o-mini / glm-4.6）"
                   />
                 </label>
               </div>
+
+              <p className="profile-endpoint">
+                <span>
+                  实际请求：<code>{endpoint}</code>
+                </span>
+                {endpointWarningText && (
+                  <span className="profile-endpoint-warn">{endpointWarningText}</span>
+                )}
+              </p>
+
               <footer className="card-actions">
                 <button
                   className="primary"
                   data-testid="profile-save"
                   onClick={() => void save()}
+                  disabled={savingProfile || invalid || pendingAction !== null}
                 >
-                  保存 Profile
+                  {savingProfile ? "保存中…" : "保存 Profile"}
                 </button>
-                <button className="ghost" onClick={() => setEditor(null)}>
-                  取消
+                <button
+                  className="ghost"
+                  onClick={requestClose}
+                  disabled={savingProfile || pendingAction !== null}
+                >
+                  {editor.id ? "关闭" : "取消"}
                 </button>
+                {missingFields.length > 0 && (
+                  <span className="profile-hint">
+                    请补全：{missingFields.join("、")}
+                  </span>
+                )}
               </footer>
+
               {editingId ? (
                 <div className="key-block">
                   <div className="key-head">
-                    <span className="field-label">API Key</span>
+                    <span className="field-label">
+                      API Key · {editingProfile?.name ?? baseline?.name ?? "当前 Profile"}
+                    </span>
                     <span
                       className={`status-chip ${editingProfile?.has_key ? "ok" : "muted-chip"}`}
                       data-testid="key-status"
@@ -346,21 +626,25 @@ export function SettingsView() {
                       type="password"
                       className="key-input"
                       value={apiKey}
-                      onChange={(e) => setApiKey(e.target.value)}
+                      onChange={(e) => {
+                        setApiKey(e.target.value);
+                        setSavedNotice(null);
+                        setProfileError(null);
+                      }}
                       placeholder="sk-…"
                       autoComplete="off"
                     />
                     <button
                       className="primary"
                       onClick={() => void saveKey()}
-                      disabled={!apiKey.trim()}
+                      disabled={!apiKey.trim() || keyBusy}
                     >
-                      保存 Key
+                      {keyBusy ? "处理中…" : "保存 Key"}
                     </button>
                     <button
                       className="ghost"
-                      onClick={() => void clearProfileKey(editingId)}
-                      disabled={!editingProfile?.has_key}
+                      onClick={() => void clearKey()}
+                      disabled={!editingProfile?.has_key || keyBusy}
                     >
                       清除 Key
                     </button>
@@ -377,7 +661,7 @@ export function SettingsView() {
               <button
                 className="ghost"
                 data-testid="profile-new"
-                onClick={() => setEditor({ ...EMPTY_EDITOR })}
+                onClick={() => startEditing({ ...EMPTY_EDITOR })}
               >
                 新建 Profile
               </button>
@@ -386,11 +670,13 @@ export function SettingsView() {
 
           {testResult && (
             <p role="status" className="notice success" data-testid="provider-test-ok">
-              连接成功 · {testResult.kind} · {testResult.model} · {testResult.latency_ms} ms
+              连接成功 · {testedName ? `${testedName} · ` : ""}
+              {testResult.kind} · {testResult.model} · {testResult.latency_ms} ms
             </p>
           )}
           {testError && (
             <p role="alert" className="notice failure" data-testid="provider-test-error">
+              {testedName ? `${testedName}：` : ""}
               {testError}
             </p>
           )}
