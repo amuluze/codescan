@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file. The format is b
 
 
 
+## [1.5.5] - 2026-11-25
+
+### Fixed
+
+- Provider profile editor: key drafts no longer leak across profiles, unsaved field/key changes require explicit discard confirmation, and save is blocked until name / base URL (http(s)) / model pass the same validation as the backend
+- Provider profile editor now previews the effective request URL (OpenAI `/chat/completions`, Anthropic `/v1/messages`) and flags duplicate path suffixes; the edited row is highlighted, existing-profile saves close the editor, new-profile saves stay open for key setup, test/delete/default-switch results name the profile, and in-flight actions cannot be double-submitted
+
 ## [1.5.4] - 2026-11-24
 
 ### Added

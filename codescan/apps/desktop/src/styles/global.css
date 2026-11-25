@@ -1124,6 +1124,75 @@ pre {
   min-width: 220px;
 }
 
+/* ---------- Provider 编辑器 ---------- */
+
+.profile-editor-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 0 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.profile-editor-head h4 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--fg-strong);
+}
+
+.profile-notice {
+  margin: 0 0 10px;
+}
+
+.profile-discard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(240, 179, 92, 0.35);
+  border-radius: var(--radius-sm);
+  background: rgba(240, 179, 92, 0.08);
+  color: var(--warning);
+  font-size: 12.5px;
+}
+
+.profile-endpoint {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.profile-endpoint code {
+  color: var(--fg);
+  font-size: 11.5px;
+  word-break: break-all;
+}
+
+.profile-endpoint-warn {
+  color: var(--warning);
+}
+
+.profile-hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.field-error {
+  color: var(--error);
+  font-size: 11.5px;
+}
+
+.field-invalid input {
+  border-color: rgba(255, 107, 107, 0.55);
+}
+
 .status-chip {
   display: inline-flex;
   align-items: center;
@@ -1301,6 +1370,76 @@ pre {
 .history-table tbody tr:hover,
 .provider-table tbody tr:hover {
   background: var(--surface-2);
+}
+
+/* 正在编辑的行：左侧强调条 + 底色，避免编辑器与表格行失去对应关系。 */
+.provider-table tbody tr.editing,
+.provider-table tbody tr.editing:hover {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* 长 Base URL 不撑破表格；完整值由 title 提供。 */
+.provider-table .url-cell {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 窄屏把表格行折叠成卡片：保留全部操作，避免横向裁切。 */
+@media (max-width: 760px) {
+  .provider-table thead {
+    display: none;
+  }
+
+  .provider-table,
+  .provider-table tbody,
+  .provider-table tr,
+  .provider-table td {
+    display: block;
+  }
+
+  .provider-table tr {
+    margin-bottom: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+  }
+
+  .provider-table tr:last-child {
+    margin-bottom: 0;
+  }
+
+  .provider-table td {
+    display: flex;
+    gap: 10px;
+    padding: 2px 0;
+    border: none;
+  }
+
+  .provider-table td::before {
+    content: attr(data-label);
+    flex: 0 0 72px;
+    color: var(--faint);
+    font-size: 11px;
+    line-height: 1.6;
+    white-space: nowrap;
+  }
+
+  .provider-table td:last-child {
+    margin-top: 6px;
+  }
+
+  .provider-table td:last-child::before {
+    content: none;
+  }
+
+  .provider-table .url-cell {
+    max-width: none;
+    white-space: normal;
+    word-break: break-all;
+  }
 }
 
 .history-table td:last-child,

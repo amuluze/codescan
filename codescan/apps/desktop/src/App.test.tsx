@@ -526,11 +526,12 @@ describe("App 主链路", () => {
     // 密钥状态按 Profile 独立展示。
     expect(table.textContent).toContain("未配置");
 
-    // 编辑活动 Profile：修改模型保存。
+    // 编辑活动 Profile：修改模型保存后编辑器关闭，并给出卡片内提示。
     await user.click(screen.getAllByRole("button", { name: "编辑" })[0]);
     const model = screen.getByLabelText("Model") as HTMLInputElement;
     expect(model.value).toBe("test-model");
     expect(screen.getByTestId("key-status")).toHaveTextContent("已配置");
+    expect(screen.getByText(/编辑 Provider Profile：OpenAI 主力/)).toBeTruthy();
     await user.clear(model);
     await user.type(model, "new-model");
     await user.click(screen.getByTestId("profile-save"));
@@ -543,24 +544,143 @@ describe("App 主链路", () => {
         model: "new-model",
       });
     });
+    await waitFor(() => expect(screen.queryByTestId("profile-editor")).toBeNull());
+    expect(screen.getByText("已保存 Provider Profile：OpenAI 主力")).toBeTruthy();
 
-    // 新建 Profile：保存后落库 id 并提示配置 Key。
-    await user.click(screen.getByRole("button", { name: "取消" }));
+    // 新建 Profile：必填校验通过后才可保存；保存后保留编辑器以配置 Key。
     await user.click(screen.getByTestId("profile-new"));
+    const save = screen.getByTestId("profile-save");
+    expect(save).toBeDisabled();
     await user.type(screen.getByLabelText("Profile 名称"), "备用");
+    await user.type(screen.getByLabelText("Base URL"), "https://example.com/v1");
     await user.type(screen.getByLabelText("Model"), "backup-model");
-    await user.click(screen.getByTestId("profile-save"));
+    expect(save).toBeEnabled();
+    await user.click(save);
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("upsert_provider_profile", {
         id: null,
         name: "备用",
         kind: "openai",
-        baseUrl: "",
+        baseUrl: "https://example.com/v1",
         model: "backup-model",
       });
     });
     // 新建保存后进入已落库编辑态，可继续配置 Key。
+    expect(screen.getByTestId("profile-editor")).toBeTruthy();
+    expect(screen.getByTestId("profile-notice").textContent).toContain("Profile 已保存");
     expect(screen.getByTestId("key-status")).toHaveTextContent("未配置");
+    expect(screen.getByRole("button", { name: "关闭" })).toBeEnabled();
+  });
+
+  it("切换 Profile 会清空密钥草稿并保护未保存修改", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    await screen.findByTestId("provider-table");
+
+    await user.click(screen.getAllByRole("button", { name: "编辑" })[0]);
+    await user.type(screen.getByLabelText("API Key"), "sk-draft");
+
+    // 切换到第二个 Profile：先提示，不丢弃草稿。
+    await user.click(screen.getAllByRole("button", { name: "编辑" })[1]);
+    expect(screen.getByText(/未保存的修改/)).toBeTruthy();
+    expect(screen.getByLabelText("Model")).toHaveValue("test-model");
+    await user.click(screen.getByRole("button", { name: "继续编辑" }));
+    expect((screen.getByLabelText("API Key") as HTMLInputElement).value).toBe("sk-draft");
+
+    // 放弃后切到第二个 Profile，密钥草稿必须清空。
+    await user.click(screen.getAllByRole("button", { name: "编辑" })[1]);
+    await user.click(screen.getByRole("button", { name: "放弃修改" }));
+    expect(screen.getByLabelText("Model")).toHaveValue("glm-test");
+    expect((screen.getByLabelText("API Key") as HTMLInputElement).value).toBe("");
+    expect(screen.getByText(/编辑 Provider Profile：智谱 GLM/)).toBeTruthy();
+  });
+
+  it("保存 Profile 失败时在编辑器内提示并保留草稿", async () => {
+    const base = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (cmd: string, args?: InvokeArgs) => {
+      if (cmd === "upsert_provider_profile") throw new Error("名称已存在");
+      return base?.(cmd, args);
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    await screen.findByTestId("provider-table");
+    await user.click(screen.getAllByRole("button", { name: "编辑" })[0]);
+    await user.type(screen.getByLabelText("Model"), "-draft");
+    await user.click(screen.getByTestId("profile-save"));
+
+    expect(await screen.findByTestId("profile-error")).toHaveTextContent("名称已存在");
+    expect(screen.getByTestId("profile-editor")).toBeTruthy();
+    expect(screen.getByLabelText("Model")).toHaveValue("test-model-draft");
+  });
+
+  it("关闭编辑器时未保存修改需先确认", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    await screen.findByTestId("provider-table");
+    await user.click(screen.getAllByRole("button", { name: "编辑" })[0]);
+    await user.type(screen.getByLabelText("Model"), "-draft");
+    await user.click(screen.getByRole("button", { name: "关闭" }));
+    expect(screen.getByText(/未保存的修改/)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "继续编辑" }));
+    expect(screen.getByTestId("profile-editor")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "关闭" }));
+    await user.click(screen.getByRole("button", { name: "放弃修改" }));
+    expect(screen.queryByTestId("profile-editor")).toBeNull();
+  });
+
+  it("新建 Profile 校验必填与 Base URL，并预览实际请求", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    await screen.findByTestId("provider-table");
+    await user.click(screen.getByTestId("profile-new"));
+
+    const save = screen.getByTestId("profile-save");
+    expect(save).toBeDisabled();
+    expect(screen.getByText(/请补全：名称、Base URL、Model/)).toBeTruthy();
+
+    await user.type(screen.getByLabelText("Profile 名称"), "自定义");
+    await user.type(screen.getByLabelText("Base URL"), "open.bigmodel.cn/api");
+    expect(save).toBeDisabled();
+    expect(screen.getByText("必须以 http:// 或 https:// 开头")).toBeTruthy();
+
+    await user.clear(screen.getByLabelText("Base URL"));
+    await user.type(screen.getByLabelText("Base URL"), "https://open.bigmodel.cn/api");
+    await user.selectOptions(screen.getByLabelText("Provider"), "anthropic");
+    expect(screen.getByText(/实际请求：/).textContent).toContain(
+      "https://open.bigmodel.cn/api/v1/messages",
+    );
+    await user.type(screen.getByLabelText("Model"), "GLM-5.4");
+    expect(save).toBeEnabled();
+  });
+
+  it("Anthropic Base URL 以 /v1 结尾时提示重复追加", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    await screen.findByTestId("provider-table");
+    await user.click(screen.getByTestId("profile-new"));
+    await user.selectOptions(screen.getByLabelText("Provider"), "anthropic");
+    await user.type(screen.getByLabelText("Base URL"), "https://api.anthropic.com/v1");
+
+    expect(screen.getByText(/请勿以 \/v1 结尾/)).toBeTruthy();
+    expect(screen.getByText(/实际请求：/).textContent).toContain(
+      "https://api.anthropic.com/v1/v1/messages",
+    );
+  });
+
+  it("Provider 测试结果标注 Profile 名称", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    await screen.findByTestId("provider-table");
+    await user.click(screen.getAllByRole("button", { name: "测试" })[0]);
+
+    const result = await screen.findByTestId("provider-test-ok");
+    expect(result.textContent).toContain("OpenAI 主力");
   });
 
   it("分诊面板标注非确定性参考，候选规则可保存", async () => {
