@@ -26,10 +26,11 @@ tauri-plugin-process = "2"
 rusqlite = { version = "0.43", features = ["bundled"] }
 reqwest = { version = "0.13.4", features = ["json", "stream"] }
 futures-util = "0.3"
+# 审查请求的 429/5xx 退避等待（time）与测试运行时（rt）。
+tokio = { version = "1", features = ["rt", "time"] }
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { version = "1", features = ["rt", "time"] }
 # updater 工件发布验收（tests/updater_signature.rs）：与 tauri-plugin-updater
 # 更新时同一 minisign 验证实现，对已构建工件验证 tauri.release.conf.json 公钥
 base64 = "0.23"

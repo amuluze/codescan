@@ -278,6 +278,7 @@ beforeEach(() => {
           dropped: 1,
           rejected: verify && offset === 0 ? 1 : 0,
           verification_enabled: verify,
+          error: null,
           suggestions: [
             {
               path: "src/a.ts",
@@ -1168,6 +1169,79 @@ describe("App 主链路", () => {
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("网络错误");
     expect(screen.getByRole("button", { name: "继续审查" })).toBeEnabled();
+  });
+
+  it("审查保留失败页已完成批次并从部分游标继续", async () => {
+    useScanStore.setState({ workspace: "/tmp/ws" });
+    const base = invokeMock.getMockImplementation();
+    let calls = 0;
+    invokeMock.mockImplementation(async (cmd: string, args?: InvokeArgs) => {
+      if (cmd === "llm_review_workspace") {
+        calls += 1;
+        if (calls === 1) {
+          return {
+            files_reviewed: 2,
+            candidate_files: 6,
+            skipped_large: 0,
+            next_offset: 2,
+            total_bytes: 100,
+            model: "test-model",
+            dropped: 0,
+            rejected: 0,
+            verification_enabled: true,
+            error: "Provider 返回 529 <unknown status code>：overloaded",
+            suggestions: [
+              {
+                path: "src/a.ts",
+                line: 3,
+                severity: "warning",
+                category: "business-logic",
+                title: "已完成批次建议",
+                detail: "d",
+                confidence: "medium",
+                verification: "confirmed",
+              },
+            ],
+          };
+        }
+        return {
+          files_reviewed: 4,
+          candidate_files: 6,
+          skipped_large: 0,
+          next_offset: 6,
+          total_bytes: 200,
+          model: "test-model",
+          dropped: 0,
+          rejected: 0,
+          verification_enabled: true,
+          error: null,
+          suggestions: [],
+        };
+      }
+      return base?.(cmd, args);
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "开始审查" }));
+    expect(await screen.findByText("已完成批次建议")).toBeTruthy();
+    expect(await screen.findByRole("alert")).toHaveTextContent("529");
+    // 部分失败后停止自动续审，已完成的建议仍在。
+    expect(
+      invokeMock.mock.calls.filter(([cmd]) => cmd === "llm_review_workspace"),
+    ).toHaveLength(1);
+
+    // 继续审查使用部分游标，结束后覆盖全部候选。
+    await user.click(screen.getByRole("button", { name: "继续审查" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "llm_review_workspace",
+        expect.objectContaining({ offset: 2 }),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "已审查全部候选" })).toBeDisabled(),
+    );
   });
 
   it("审查中「重置进度」中止自动续审并清空结果", async () => {

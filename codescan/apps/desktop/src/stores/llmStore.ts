@@ -220,7 +220,9 @@ export const useLlmStore = create<LlmState>((set, get) => ({
               suggestions: mergeSuggestions(accumulated.suggestions, result.suggestions),
             }
           : result;
-        set({ review: accumulated, reviewProgress: null });
+        set({ review: accumulated, reviewError: result.error ?? null, reviewProgress: null });
+        // 部分页失败：保留已完成批次与游标，停止自动续审，由用户重试。
+        if (result.error) return;
         // 覆盖全部候选时停止；游标未推进属后端异常，防御性停止避免死循环。
         if (result.next_offset >= result.candidate_files || result.next_offset <= cursor) {
           return;

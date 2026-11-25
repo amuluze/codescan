@@ -899,6 +899,20 @@ pub fn collect_review_files(
     }
 }
 
+/// 失败页只推进到已完成文件；成功页使用完整下一页游标。
+pub fn review_next_offset(
+    page_offset: usize,
+    reviewed_files: usize,
+    full_next_offset: usize,
+    failed: bool,
+) -> usize {
+    if failed {
+        page_offset.saturating_add(reviewed_files)
+    } else {
+        full_next_offset
+    }
+}
+
 /// LLM 源码审查：只返回展示层建议，不写入 findings/基线/门禁。
 /// 参数平铺是 Tauri invoke 契约的一部分，`app`/`state` 也计入参数个数。
 #[allow(clippy::too_many_arguments)]
@@ -926,21 +940,22 @@ pub async fn llm_review_workspace(
     let max_files = max_files
         .unwrap_or(llm::REVIEW_MAX_FILES)
         .clamp(1, llm::REVIEW_MAX_FILES);
+    let page_offset = offset.unwrap_or(0);
     let selection = collect_review_files(
         &listed,
         max_files,
         llm::REVIEW_MAX_BYTES,
-        offset.unwrap_or(0),
+        page_offset,
     );
     if selection.files.is_empty() {
         return Err("工作区中没有可审查的源码文件".into());
     }
-    let files_reviewed = selection.files.len();
+    let page_files = selection.files.len();
     let request_id = request_id.unwrap_or_default();
     // 缺省开启独立复核；显式 false 时保持单轮审查。
     let verify_enabled = verify.unwrap_or(true);
     let skill = load_review_skill_overrides(&review_skill_path());
-    let (suggestions, dropped, rejected) = llm::review_batched(
+    let outcome = llm::review_batched(
         &config,
         &key,
         &selection.files,
@@ -953,23 +968,31 @@ pub async fn llm_review_workspace(
                     "requestId": request_id,
                     "done": done,
                     "total": total,
-                    "files": files_reviewed,
+                    "files": page_files,
                 }),
             );
         },
     )
-    .await?;
+    .await;
+    // 失败时只推进到已完成文件，避免跳过失败批次的源码。
+    let next_offset = review_next_offset(
+        page_offset,
+        outcome.reviewed_files,
+        selection.next_offset,
+        outcome.error.is_some(),
+    );
     Ok(llm::ReviewResult {
-        files_reviewed,
+        files_reviewed: outcome.reviewed_files,
         candidate_files: selection.candidates,
-        next_offset: selection.next_offset,
-        total_bytes: selection.total_bytes,
+        next_offset,
+        total_bytes: outcome.reviewed_bytes,
         model: config.model,
         skipped_large: selection.skipped_large as u32,
-        dropped,
-        rejected,
+        dropped: outcome.dropped,
+        rejected: outcome.rejected,
         verification_enabled: verify_enabled,
-        suggestions,
+        error: outcome.error,
+        suggestions: outcome.suggestions,
     })
 }
 

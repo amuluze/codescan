@@ -764,6 +764,8 @@ pub struct ReviewResult {
     pub rejected: u32,
     /// 本次是否启用独立复核。
     pub verification_enabled: bool,
+    /// 不可恢复错误；存在时结果为部分页，游标仅推进到已完成文件。
+    pub error: Option<String>,
     pub suggestions: Vec<ReviewSuggestion>,
 }
 
@@ -1018,6 +1020,58 @@ pub fn review_verify_user_prompt(
     out
 }
 
+#[derive(Debug, Default)]
+pub struct ReviewBatchOutcome {
+    pub suggestions: Vec<ReviewSuggestion>,
+    pub dropped: u32,
+    pub rejected: u32,
+    /// 已完整覆盖的文件数（按页内文件顺序的前缀）。
+    pub reviewed_files: usize,
+    /// 与 `reviewed_files` 对应的源字节数。
+    pub reviewed_bytes: usize,
+    /// 不可恢复错误；存在时后续批次不再处理。
+    pub error: Option<String>,
+}
+
+/// 判断已完成片段是否覆盖文件的绝对行区间；用于只把完整文件计入游标。
+fn ranges_cover(ranges: &[(usize, usize)], start: usize, end: usize) -> bool {
+    let mut sorted = ranges.to_vec();
+    sorted.sort_unstable();
+    let mut cursor = start;
+    for (range_start, range_end) in sorted {
+        if range_start > cursor {
+            return false;
+        }
+        if range_end >= cursor {
+            cursor = range_end.saturating_add(1);
+            if cursor > end {
+                return true;
+            }
+        }
+    }
+    cursor > end
+}
+
+fn reviewed_prefix(
+    files: &[ReviewFile],
+    covered: &std::collections::HashMap<String, Vec<(usize, usize)>>,
+) -> (usize, usize) {
+    let mut count = 0usize;
+    let mut bytes = 0usize;
+    for file in files {
+        let start = file.start_line.max(1);
+        let end = start + file.lines.max(1) - 1;
+        let Some(ranges) = covered.get(&file.path) else {
+            break;
+        };
+        if !ranges_cover(ranges, start, end) {
+            break;
+        }
+        count += 1;
+        bytes += file.content.len();
+    }
+    (count, bytes)
+}
 /// 截取响应中的 JSON 数组片段（容忍 ```json 围栏与前后说明文字）。
 fn json_array_slice(text: &str) -> Option<&str> {
     let start = text.find('[')?;
@@ -1154,7 +1208,16 @@ pub async fn verify_review(
     }
     let system = review_verify_system_prompt_with(skill);
     let user = review_verify_user_prompt(files, suggestions);
-    let verdicts = match complete_with_timeout(config, api_key, &system, &user, 120).await {
+    let verdicts = match complete_with_timeout(
+        config,
+        api_key,
+        &system,
+        &user,
+        120,
+        REVIEW_RETRY_ATTEMPTS,
+    )
+    .await
+    {
         Ok(reply) => match parse_verification(&reply, suggestions.len()) {
             Ok(verdicts) => verdicts,
             Err(_) => {
@@ -1259,6 +1322,86 @@ fn request_error(e: &reqwest::Error) -> String {
 
 // ---------- 网络调用（唯一非纯函数入口） ----------
 
+/// 429 / 5xx / 529 的额外重试次数：首次失败后再试 5 次。
+pub const REVIEW_RETRY_ATTEMPTS: usize = 5;
+/// 指数退避基准；单测置 0，避免真实等待。
+#[cfg(not(test))]
+const RETRY_BASE_DELAY_MS: u64 = 1_000;
+#[cfg(test)]
+const RETRY_BASE_DELAY_MS: u64 = 0;
+/// 单次等待上限（含 Retry-After）。
+const RETRY_MAX_DELAY_MS: u64 = 30_000;
+
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    let code = status.as_u16();
+    code == 429 || (500..=599).contains(&code)
+}
+
+/// 只解析常见的秒数形式；HTTP-date 由退避兜底。
+fn retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+}
+
+fn retry_delay(
+    attempt: usize,
+    retry_after: Option<u64>,
+    base_ms: u64,
+) -> std::time::Duration {
+    if let Some(seconds) = retry_after {
+        return std::time::Duration::from_secs(seconds.min(RETRY_MAX_DELAY_MS / 1000));
+    }
+    let factor = 1u64 << attempt.min(5);
+    std::time::Duration::from_millis(
+        base_ms
+            .saturating_mul(factor)
+            .min(RETRY_MAX_DELAY_MS),
+    )
+}
+
+/// 发送一次补全请求；仅对 429/5xx/529 做有限重试，其他错误立即返回。
+/// 错误信息不得包含 API Key。
+async fn send_completion_request(
+    client: &reqwest::Client,
+    config: &ProviderConfig,
+    api_key: &str,
+    body: &serde_json::Value,
+    retries: usize,
+) -> Result<String, String> {
+    let url = endpoint(config);
+    for attempt in 0..=retries {
+        let request = match config.kind {
+            ProviderKind::OpenAi => client.post(&url).bearer_auth(api_key),
+            ProviderKind::Anthropic => client
+                .post(&url)
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01"),
+        };
+        let response = request
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| format!("请求失败：{}", request_error(&e)))?;
+        let status = response.status();
+        let retry_after = retry_after_seconds(response.headers());
+        let text = response
+            .text()
+            .await
+            .map_err(|e| format!("读取响应失败：{}", request_error(&e)))?;
+        if status.is_success() {
+            return Ok(text);
+        }
+        if is_retryable_status(status) && attempt < retries {
+            tokio::time::sleep(retry_delay(attempt, retry_after, RETRY_BASE_DELAY_MS)).await;
+            continue;
+        }
+        return Err(format!("Provider 返回 {status}：{}", truncate(&text, 500)));
+    }
+    unreachable!("retry loop returns on success or final failure")
+}
+
 /// 调用 Provider 完成一次补全。错误信息不得包含 API Key。
 pub async fn complete(
     config: &ProviderConfig,
@@ -1266,45 +1409,30 @@ pub async fn complete(
     system: &str,
     user: &str,
 ) -> Result<String, String> {
-    complete_with_timeout(config, api_key, system, user, 60).await
+    complete_with_timeout(config, api_key, system, user, 60, 0).await
 }
 
-/// 非流式补全；审查/复核需要更长超时，与分诊共用同一请求构造。
+/// 非流式补全；审查/复核需要更长超时与过载重试，分诊不重试。
 async fn complete_with_timeout(
     config: &ProviderConfig,
     api_key: &str,
     system: &str,
     user: &str,
     timeout_secs: u64,
+    retries: usize,
 ) -> Result<String, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
         .build()
         .map_err(|e| format!("HTTP 客户端创建失败：{e}"))?;
-    let url = endpoint(config);
-    let request = match config.kind {
-        ProviderKind::OpenAi => client
-            .post(&url)
-            .bearer_auth(api_key)
-            .json(&openai_body(&config.model, system, user)),
-        ProviderKind::Anthropic => client
-            .post(&url)
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&anthropic_body(&config.model, system, user)),
+    let body = match config.kind {
+        ProviderKind::OpenAi => openai_body(&config.model, system, user),
+        ProviderKind::Anthropic => anthropic_body(&config.model, system, user),
     };
-    let response = request.send().await.map_err(|e| format!("请求失败：{}", request_error(&e)))?;
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| format!("读取响应失败：{}", request_error(&e)))?;
-    if !status.is_success() {
-        return Err(format!("Provider 返回 {status}：{}", truncate(&body, 500)));
-    }
+    let text = send_completion_request(&client, config, api_key, &body, retries).await?;
     match config.kind {
-        ProviderKind::OpenAi => parse_openai_response(&body),
-        ProviderKind::Anthropic => parse_anthropic_response(&body),
+        ProviderKind::OpenAi => parse_openai_response(&text),
+        ProviderKind::Anthropic => parse_anthropic_response(&text),
     }
 }
 
@@ -1418,23 +1546,33 @@ pub async fn review_batched(
     skill: &ReviewSkillOverrides,
     verify: bool,
     mut on_progress: impl FnMut(usize, usize),
-) -> Result<(Vec<ReviewSuggestion>, u32, u32), String> {
+) -> ReviewBatchOutcome {
     use std::collections::VecDeque;
     let mut queue: VecDeque<Vec<ReviewFile>> = chunk_review(files).into();
     let mut done = 0usize;
-    let mut suggestions = Vec::new();
-    let mut dropped = 0u32;
-    let mut rejected = 0u32;
+    let mut outcome = ReviewBatchOutcome::default();
+    // 成功的片段行区间；用于只把完整覆盖的文件计入游标。
+    let mut covered: std::collections::HashMap<String, Vec<(usize, usize)>> =
+        std::collections::HashMap::new();
     on_progress(done, queue.len());
     while let Some(batch) = queue.pop_front() {
         let batch_len = batch.len();
         match review(config, api_key, &batch, skill).await {
             Ok((mut found, dropped_here)) => {
                 if verify {
-                    rejected += verify_review(config, api_key, &batch, &mut found, skill).await;
+                    outcome.rejected +=
+                        verify_review(config, api_key, &batch, &mut found, skill).await;
                 }
-                suggestions.append(&mut found);
-                dropped += dropped_here;
+                for file in &batch {
+                    let start = file.start_line.max(1);
+                    let end = start + file.lines.max(1) - 1;
+                    covered
+                        .entry(file.path.clone())
+                        .or_default()
+                        .push((start, end));
+                }
+                outcome.suggestions.append(&mut found);
+                outcome.dropped += dropped_here;
                 done += 1;
                 on_progress(done, done + queue.len());
             }
@@ -1455,19 +1593,25 @@ pub async fn review_batched(
                         on_progress(done, done + queue.len());
                     }
                     None => {
-                        return Err(format!(
+                        outcome.error = Some(format!(
                             "{err}（文件 {} 已切分至单行仍失败）",
                             batch[0].path
                         ));
+                        break;
                     }
                 }
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                outcome.error = Some(err);
+                break;
+            }
         }
     }
-    // 跨批/跨片段去重：同一 (path, line, title) 只保留一条，confirmed 优先。
-    let suggestions = merge_review_suggestions(suggestions);
-    Ok((suggestions, dropped, rejected))
+    outcome.suggestions = merge_review_suggestions(std::mem::take(&mut outcome.suggestions));
+    let (reviewed_files, reviewed_bytes) = reviewed_prefix(files, &covered);
+    outcome.reviewed_files = reviewed_files;
+    outcome.reviewed_bytes = reviewed_bytes;
+    outcome
 }
 
 /// 对一组源码片段执行 LLM 审查；返回（已校验建议, 丢弃条数）。
@@ -1482,49 +1626,34 @@ pub async fn review(
         .timeout(std::time::Duration::from_secs(120))
         .build()
         .map_err(|e| format!("HTTP 客户端创建失败：{e}"))?;
-    let url = endpoint(config);
     let system = review_system_prompt_with(skill);
     let user = review_user_prompt(files);
-    let (body, request) = match config.kind {
-        ProviderKind::OpenAi => (
-            serde_json::json!({
-                "model": config.model,
-                "messages": [
-                    { "role": "system", "content": system },
-                    { "role": "user", "content": user },
-                ],
-                "max_tokens": REVIEW_MAX_TOKENS,
-                "temperature": 0,
-            }),
-            client.post(&url).bearer_auth(api_key),
-        ),
-        ProviderKind::Anthropic => (
-            serde_json::json!({
-                "model": config.model,
-                "max_tokens": REVIEW_MAX_TOKENS,
-                "system": system,
-                "messages": [{ "role": "user", "content": user }],
-                "temperature": 0,
-            }),
-            client
-                .post(&url)
-                .header("x-api-key", api_key)
-                .header("anthropic-version", "2023-06-01"),
-        ),
+    let body = match config.kind {
+        ProviderKind::OpenAi => serde_json::json!({
+            "model": config.model,
+            "messages": [
+                { "role": "system", "content": system },
+                { "role": "user", "content": user },
+            ],
+            "max_tokens": REVIEW_MAX_TOKENS,
+            "temperature": 0,
+        }),
+        ProviderKind::Anthropic => serde_json::json!({
+            "model": config.model,
+            "max_tokens": REVIEW_MAX_TOKENS,
+            "system": system,
+            "messages": [{ "role": "user", "content": user }],
+            "temperature": 0,
+        }),
     };
-    let response = request
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("请求失败：{}", request_error(&e)))?;
-    let status = response.status();
-    let text = response
-        .text()
-        .await
-        .map_err(|e| format!("读取响应失败：{}", request_error(&e)))?;
-    if !status.is_success() {
-        return Err(format!("Provider 返回 {status}：{}", truncate(&text, 500)));
-    }
+    let text = send_completion_request(
+        &client,
+        config,
+        api_key,
+        &body,
+        REVIEW_RETRY_ATTEMPTS,
+    )
+    .await?;
     let reply = match config.kind {
         ProviderKind::OpenAi => parse_openai_response(&text),
         ProviderKind::Anthropic => parse_anthropic_response(&text),
@@ -1866,7 +1995,7 @@ mod tests {
             .build()
             .unwrap();
         let mut progress = Vec::new();
-        let (suggestions, dropped, rejected) = runtime
+        let outcome = runtime
             .block_on(review_batched(
                 &config,
                 "sk-test",
@@ -1876,11 +2005,12 @@ mod tests {
                 |done, total| {
                     progress.push((done, total));
                 },
-            ))
-            .unwrap();
-        assert_eq!(dropped, 0);
-        assert_eq!(rejected, 0);
-        assert_eq!(suggestions.len(), 2, "拆批后两批各返回一条建议");
+            ));
+        assert_eq!(outcome.error, None);
+        assert_eq!(outcome.dropped, 0);
+        assert_eq!(outcome.rejected, 0);
+        assert_eq!(outcome.suggestions.len(), 2, "拆批后两批各返回一条建议");
+        assert_eq!(outcome.reviewed_files, 2);
         assert_eq!(
             progress.last().copied(),
             Some((2, 2)),
@@ -2016,7 +2146,7 @@ mod tests {
             .build()
             .unwrap();
         let mut progress = Vec::new();
-        let (suggestions, dropped, rejected) = runtime
+        let outcome = runtime
             .block_on(review_batched(
                 &config,
                 "sk-test",
@@ -2026,13 +2156,14 @@ mod tests {
                 |done, total| {
                     progress.push((done, total));
                 },
-            ))
-            .unwrap();
-        assert_eq!(dropped, 0);
-        assert_eq!(rejected, 0);
-        assert_eq!(suggestions.len(), 2, "前后片段各返回一条建议");
-        let lines: Vec<u32> = suggestions.iter().map(|s| s.line).collect();
+            ));
+        assert_eq!(outcome.error, None);
+        assert_eq!(outcome.dropped, 0);
+        assert_eq!(outcome.rejected, 0);
+        assert_eq!(outcome.suggestions.len(), 2, "前后片段各返回一条建议");
+        let lines: Vec<u32> = outcome.suggestions.iter().map(|s| s.line).collect();
         assert_eq!(lines, vec![2, 4], "行号保持文件绝对行号");
+        assert_eq!(outcome.reviewed_files, 1, "整文件切分完成后计为一个文件");
         assert_eq!(
             progress.last().copied(),
             Some((2, 2)),
@@ -2055,6 +2186,220 @@ mod tests {
             body.len(),
             body
         )
+    }
+
+    fn http_status(status: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
+    #[test]
+    fn retry_policy_classifies_statuses_and_backoff() {
+        use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+        assert!(is_retryable_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_retryable_status(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        ));
+        assert!(is_retryable_status(
+            reqwest::StatusCode::from_u16(529).unwrap()
+        ));
+        assert!(!is_retryable_status(reqwest::StatusCode::BAD_REQUEST));
+        assert!(!is_retryable_status(reqwest::StatusCode::UNAUTHORIZED));
+
+        assert_eq!(retry_delay(0, None, 1000).as_millis(), 1000);
+        assert_eq!(retry_delay(1, None, 1000).as_millis(), 2000);
+        assert_eq!(retry_delay(2, None, 1000).as_millis(), 4000);
+        assert_eq!(retry_delay(5, None, 1000).as_millis(), 30_000);
+        assert_eq!(retry_delay(0, Some(2), 1000).as_secs(), 2);
+        assert_eq!(retry_delay(0, Some(42), 1000).as_secs(), 30);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("7"));
+        assert_eq!(retry_after_seconds(&headers), Some(7));
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("soon"));
+        assert_eq!(retry_after_seconds(&headers), None);
+    }
+
+    /// 529 连续两次后成功：最多重试 5 次，第三次请求返回建议。
+    #[test]
+    fn review_retries_overloaded_then_succeeds() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut count = 0;
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                count += 1;
+                let mut buf = [0u8; 64 * 1024];
+                let _ = stream.read(&mut buf);
+                let response = if index < 2 {
+                    http_status(
+                        "529 Overloaded",
+                        r#"{"type":"error","error":{"type":"overloaded_error"}}"#,
+                    )
+                } else {
+                    http_ok(&anthropic_reply(
+                        r#"[{"path":"src/a.py","line":1,"severity":"error","category":"security","title":"问题1","detail":"d1","confidence":"high"}]"#,
+                    ))
+                };
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            count
+        });
+
+        let config = ProviderConfig {
+            kind: ProviderKind::Anthropic,
+            base_url: format!("http://{addr}/api"),
+            model: "m".into(),
+        };
+        let files = vec![ReviewFile {
+            path: "src/a.py".into(),
+            content: "eval(x)\n".into(),
+            lines: 1,
+            start_line: 1,
+        }];
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (suggestions, dropped) = runtime
+            .block_on(review(
+                &config,
+                "sk-test",
+                &files,
+                &ReviewSkillOverrides::default(),
+            ))
+            .unwrap();
+        assert_eq!(dropped, 0);
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(server.join().unwrap(), 3);
+    }
+
+    /// 连续 6 次 529：最终错误包含状态与响应摘要，请求次数为 1 + 5 次重试。
+    #[test]
+    fn review_retries_exhausted_returns_overload_error() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut count = 0;
+            for _ in 0..=REVIEW_RETRY_ATTEMPTS {
+                let (mut stream, _) = listener.accept().unwrap();
+                count += 1;
+                let mut buf = [0u8; 64 * 1024];
+                let _ = stream.read(&mut buf);
+                stream
+                    .write_all(
+                        http_status(
+                            "529 Overloaded",
+                            r#"{"type":"error","error":{"type":"overloaded_error"}}"#,
+                        )
+                        .as_bytes(),
+                    )
+                    .unwrap();
+            }
+            count
+        });
+
+        let config = ProviderConfig {
+            kind: ProviderKind::Anthropic,
+            base_url: format!("http://{addr}/api"),
+            model: "m".into(),
+        };
+        let files = vec![ReviewFile {
+            path: "src/a.py".into(),
+            content: "eval(x)\n".into(),
+            lines: 1,
+            start_line: 1,
+        }];
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err = runtime
+            .block_on(review(
+                &config,
+                "sk-test",
+                &files,
+                &ReviewSkillOverrides::default(),
+            ))
+            .unwrap_err();
+        assert!(err.contains("529"), "{err}");
+        assert!(err.contains("overloaded_error"), "{err}");
+        assert_eq!(server.join().unwrap(), 1 + REVIEW_RETRY_ATTEMPTS);
+    }
+
+    /// 两批中第二批重试耗尽：保留第一批建议，并只把第一批文件计入完成数。
+    #[test]
+    fn review_batched_preserves_completed_batches_on_failure() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut count = 0;
+            for index in 0..=(1 + REVIEW_RETRY_ATTEMPTS) {
+                let (mut stream, _) = listener.accept().unwrap();
+                count += 1;
+                let mut buf = [0u8; 64 * 1024];
+                let _ = stream.read(&mut buf);
+                let response = if index == 0 {
+                    http_ok(&anthropic_reply(
+                        r#"[{"path":"src/a.py","line":1,"severity":"error","category":"security","title":"问题1","detail":"d1","confidence":"high"}]"#,
+                    ))
+                } else {
+                    http_status(
+                        "529 Overloaded",
+                        r#"{"type":"error","error":{"type":"overloaded_error"}}"#,
+                    )
+                };
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            count
+        });
+
+        let config = ProviderConfig {
+            kind: ProviderKind::Anthropic,
+            base_url: format!("http://{addr}/api"),
+            model: "m".into(),
+        };
+        let names = ["a.py", "b.py", "c.py", "d.py", "e.py"];
+        let files: Vec<ReviewFile> = names
+            .iter()
+            .map(|name| ReviewFile {
+                path: format!("src/{name}"),
+                content: format!("eval({name})\n"),
+                lines: 1,
+                start_line: 1,
+            })
+            .collect();
+        let expected_bytes: usize = files[..4].iter().map(|f| f.content.len()).sum();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let outcome = runtime.block_on(review_batched(
+            &config,
+            "sk-test",
+            &files,
+            &ReviewSkillOverrides::default(),
+            false,
+            |_, _| {},
+        ));
+        assert!(outcome.error.as_deref().unwrap_or("").contains("529"));
+        assert_eq!(outcome.suggestions.len(), 1, "第一批建议必须保留");
+        assert_eq!(outcome.reviewed_files, 4, "只有第一批 4 个文件完成");
+        assert_eq!(outcome.reviewed_bytes, expected_bytes);
+        assert_eq!(server.join().unwrap(), 1 + 1 + REVIEW_RETRY_ATTEMPTS);
     }
 
     /// 复核开启：先猎取后复核，confirmed 保留、rejected 剔除并计数。
@@ -2104,7 +2449,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let (suggestions, dropped, rejected) = runtime
+        let outcome = runtime
             .block_on(review_batched(
                 &config,
                 "sk-test",
@@ -2112,12 +2457,15 @@ mod tests {
                 &ReviewSkillOverrides::default(),
                 true,
                 |_, _| {},
-            ))
-            .unwrap();
-        assert_eq!(dropped, 0);
-        assert_eq!(rejected, 1, "rejected 候选必须剔除并计数");
-        assert_eq!(suggestions.len(), 1);
-        assert_eq!(suggestions[0].verification.as_deref(), Some("confirmed"));
+            ));
+        assert_eq!(outcome.error, None);
+        assert_eq!(outcome.dropped, 0);
+        assert_eq!(outcome.rejected, 1, "rejected 候选必须剔除并计数");
+        assert_eq!(outcome.suggestions.len(), 1);
+        assert_eq!(
+            outcome.suggestions[0].verification.as_deref(),
+            Some("confirmed")
+        );
 
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 2, "复核开启时每批应有猎取与复核两次请求");
@@ -2160,7 +2508,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let (suggestions, _, rejected) = runtime
+        let outcome = runtime
             .block_on(review_batched(
                 &config,
                 "sk-test",
@@ -2168,11 +2516,14 @@ mod tests {
                 &ReviewSkillOverrides::default(),
                 false,
                 |_, _| {},
-            ))
-            .unwrap();
-        assert_eq!(rejected, 0);
-        assert_eq!(suggestions.len(), 1);
-        assert_eq!(suggestions[0].verification, None, "关闭复核时不得伪造结论");
+            ));
+        assert_eq!(outcome.error, None);
+        assert_eq!(outcome.rejected, 0);
+        assert_eq!(outcome.suggestions.len(), 1);
+        assert_eq!(
+            outcome.suggestions[0].verification, None,
+            "关闭复核时不得伪造结论"
+        );
         server.join().unwrap();
     }
 
@@ -2185,25 +2536,27 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
-            for index in 0..2 {
+            let mut count = 0;
+            for index in 0..=(REVIEW_RETRY_ATTEMPTS + 1) {
                 let (mut stream, _) = listener.accept().unwrap();
+                count += 1;
                 let mut buf = [0u8; 64 * 1024];
                 let _ = stream.read(&mut buf);
-                if index == 0 {
-                    let body = anthropic_reply(
+                let response = if index == 0 {
+                    http_ok(&anthropic_reply(
                         r#"[{"path":"src/a.py","line":1,"severity":"error","category":"security","title":"问题1","detail":"d1","confidence":"high"}]"#,
-                    );
-                    stream.write_all(http_ok(&body).as_bytes()).unwrap();
+                    ))
                 } else {
                     let body = "boom";
-                    let response = format!(
+                    format!(
                         "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                         body.len(),
                         body
-                    );
-                    stream.write_all(response.as_bytes()).unwrap();
-                }
+                    )
+                };
+                stream.write_all(response.as_bytes()).unwrap();
             }
+            count
         });
 
         let config = ProviderConfig {
@@ -2221,7 +2574,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let (suggestions, _, rejected) = runtime
+        let outcome = runtime
             .block_on(review_batched(
                 &config,
                 "sk-test",
@@ -2229,16 +2582,20 @@ mod tests {
                 &ReviewSkillOverrides::default(),
                 true,
                 |_, _| {},
-            ))
-            .unwrap();
-        assert_eq!(rejected, 0, "复核失败不得误杀建议");
-        assert_eq!(suggestions.len(), 1);
+            ));
+        assert_eq!(outcome.error, None);
+        assert_eq!(outcome.rejected, 0, "复核失败不得误杀建议");
+        assert_eq!(outcome.suggestions.len(), 1);
         assert_eq!(
-            suggestions[0].verification.as_deref(),
+            outcome.suggestions[0].verification.as_deref(),
             Some("needs_validation"),
             "复核失败应降级为待验证"
         );
-        server.join().unwrap();
+        assert_eq!(
+            server.join().unwrap(),
+            1 + REVIEW_RETRY_ATTEMPTS + 1,
+            "猎取 1 次 + 复核首次 + 5 次重试"
+        );
     }
 
     /// 端到端：请求构造 → 本地 HTTP 响应（含 thinking 块）→ 建议解析。
