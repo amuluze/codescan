@@ -1126,21 +1126,6 @@ pre {
 
 /* ---------- Provider 编辑器 ---------- */
 
-.profile-editor-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 16px 0 10px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
-}
-
-.profile-editor-head h4 {
-  margin: 0;
-  font-size: 13px;
-  color: var(--fg-strong);
-}
-
 .profile-notice {
   margin: 0 0 10px;
 }
@@ -1182,6 +1167,24 @@ pre {
 .profile-hint {
   color: var(--muted);
   font-size: 12px;
+}
+
+/* Provider 弹窗：Profile 与 Key 同表单；窄屏滚动内容而不是裁切。 */
+.provider-editor-modal {
+  width: min(760px, 100%);
+  max-height: min(860px, 92vh);
+  overflow-y: auto;
+}
+
+.provider-editor-modal .key-block {
+  margin-top: 4px;
+}
+
+.provider-key-clear input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  accent-color: var(--accent);
 }
 
 .field-error {

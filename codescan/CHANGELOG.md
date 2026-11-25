@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file. The format is b
 
 
 
+## [1.5.6] - 2026-11-25
+
+### Changed
+
+- Provider profile add/edit now uses a dedicated dialog that submits the profile fields and API key together: new profiles can set a key immediately, editing keeps the existing key when the field is left empty, and an explicit checkbox clears it; the separate key commands and page-level key block were removed
+- The provider dialog keeps the existing validation, effective-URL preview, discard confirmation, row highlight, and busy states; the underlying `upsert_provider_profile` command now accepts optional `apiKey`/`clearKey` and persists them in one save
+
 ## [1.5.5] - 2026-11-25
 
 ### Fixed

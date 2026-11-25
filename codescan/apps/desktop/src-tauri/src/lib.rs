@@ -47,8 +47,6 @@ pub fn run() {
             commands::upsert_provider_profile,
             commands::delete_provider_profile,
             commands::set_active_provider,
-            commands::set_provider_api_key,
-            commands::clear_provider_api_key,
             commands::test_provider_connection,
             commands::llm_review_workspace,
             commands::llm_triage,

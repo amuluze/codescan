@@ -65,17 +65,19 @@ type LlmState = {
   errors: Record<string, string | null>;
   loadProviders: () => Promise<void>;
   /** 新建（id 为 null）或更新 Profile；返回落库 id。 */
-  saveProfile: (profile: {
-    id: string | null;
-    name: string;
-    kind: string;
-    baseUrl: string;
-    model: string;
-  }) => Promise<string>;
+  saveProfile: (
+    profile: {
+      id: string | null;
+      name: string;
+      kind: string;
+      baseUrl: string;
+      model: string;
+    },
+    apiKey?: string | null,
+    clearKey?: boolean,
+  ) => Promise<string>;
   deleteProfile: (id: string) => Promise<void>;
   setActiveProfile: (id: string) => Promise<void>;
-  setProfileKey: (id: string, key: string) => Promise<void>;
-  clearProfileKey: (id: string) => Promise<void>;
   /** 测试指定（或活动）Profile 连通性。 */
   testConnection: (id?: string) => Promise<void>;
   setReviewProvider: (id: string | null) => void;
@@ -124,8 +126,8 @@ export const useLlmStore = create<LlmState>((set, get) => ({
     set({ providers });
   },
 
-  async saveProfile(profile) {
-    const id = await api.upsertProviderProfile(profile);
+  async saveProfile(profile, apiKey = null, clearKey = false) {
+    const id = await api.upsertProviderProfile(profile, { apiKey, clearKey });
     await get().loadProviders();
     set({ testResult: null, testError: null });
     return id;
@@ -141,18 +143,6 @@ export const useLlmStore = create<LlmState>((set, get) => ({
   async setActiveProfile(id) {
     await api.setActiveProvider(id);
     await get().loadProviders();
-  },
-
-  async setProfileKey(id, key) {
-    await api.setProviderApiKey(id, key);
-    await get().loadProviders();
-    set({ testResult: null, testError: null });
-  },
-
-  async clearProfileKey(id) {
-    await api.clearProviderApiKey(id);
-    await get().loadProviders();
-    set({ testResult: null, testError: null });
   },
 
   async testConnection(id) {
