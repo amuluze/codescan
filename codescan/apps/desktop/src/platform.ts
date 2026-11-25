@@ -91,6 +91,8 @@ export type ReviewResult = {
   rejected: number;
   /** 本次是否启用独立复核。 */
   verification_enabled: boolean;
+  /** 不可恢复错误；存在时结果为部分页，next_offset 只推进到已完成文件。 */
+  error: string | null;
   suggestions: ReviewSuggestion[];
 };
 

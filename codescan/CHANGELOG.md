@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file. The format is b
 
 
 
+## [1.5.7] - 2026-11-25
+
+### Added
+
+- LLM source review now retries 429 / 5xx / 529 responses up to five times with exponential backoff, honoring `Retry-After` (30s cap); the policy applies to both hunt and verification requests
+- When retries are exhausted or another unrecoverable error occurs, completed batches from the failed page are kept and returned with a readable error; the cursor advances only past fully reviewed files, so "继续审查" resumes the remaining files without redoing completed ones
+
 ## [1.5.6] - 2026-11-25
 
 ### Changed

@@ -179,7 +179,7 @@ fn delete_scan_cascades_findings_and_baseline() {
 use codescan_lib::commands::{
     collect_review_files, export_report, load_review_skill_overrides, prepare_batch_llm_call,
     prepare_llm_call, prepare_provider_probe, reset_review_skill_override,
-    save_provider_profile, save_review_skill_override,
+    review_next_offset, save_provider_profile, save_review_skill_override,
 };
 use codescan_lib::llm;
 
@@ -840,6 +840,14 @@ fn export_report_writes_both_formats_and_rejects_bad_input() {
         let err = export_report(dest.clone(), bad.into(), "x".into(), "y".into()).unwrap_err();
         assert!(err.contains("导出文件名"), "{bad}: {err}");
     }
+}
+
+#[test]
+fn review_next_offset_keeps_partial_page_progress() {
+    assert_eq!(review_next_offset(0, 4, 24, true), 4);
+    assert_eq!(review_next_offset(24, 0, 48, true), 24);
+    assert_eq!(review_next_offset(24, 3, 48, true), 27);
+    assert_eq!(review_next_offset(24, 24, 48, false), 48);
 }
 
 #[test]
