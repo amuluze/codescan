@@ -100,6 +100,9 @@ impl<'a> Project<'a> {
         let total_params: usize = (0..self.globals.len())
             .map(|gid| self.fn_fact(gid).params.len())
             .sum();
+        // 只有返回值摘要参与不动点反馈：`sink_from_param` 只用于收集阶段，不被任何
+        // 摘要求值读取。每轮变化至少新增一个 ret_internal / ret_from_param 位，最多
+        // P+G 轮；再加一轮 sink 摘要、一轮确认收敛，P+G+2 是紧上界。
         let max_iterations = total_params + self.globals.len() + 2;
         let mut iterations = 0;
         loop {

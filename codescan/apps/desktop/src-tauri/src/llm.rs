@@ -195,10 +195,19 @@ pub fn endpoint(config: &ProviderConfig) -> String {
     }
 }
 
+/// 输出预算截断的统一错误文案；`is_truncation_error` 依赖该措辞触发降批或按行切分。
+const TEXT_TRUNCATION_ERROR: &str =
+    "响应正文被 max_tokens 截断：模型输出不完整；请减少输入规模、拆分文件或换用输出上限更高的模型。";
+
 pub fn parse_openai_response(body: &str) -> Result<String, String> {
     let value: serde_json::Value =
         serde_json::from_str(body).map_err(|e| format!("响应不是 JSON：{e}"))?;
-    value["choices"][0]["message"]["content"]
+    let choice = &value["choices"][0];
+    // 输出预算耗尽时正文可能是残缺 JSON：必须先归类为截断，交给调用方降批重试。
+    if choice["finish_reason"].as_str() == Some("length") {
+        return Err(TEXT_TRUNCATION_ERROR.to_string());
+    }
+    choice["message"]["content"]
         .as_str()
         .map(|s| s.to_string())
         .ok_or_else(|| {
@@ -246,6 +255,10 @@ pub fn parse_anthropic_response(body: &str) -> Result<String, String> {
             ));
         }
         return Err(format!("响应没有 text 内容块：{}", truncate(body, 300)));
+    }
+    // 正文块存在但输出预算耗尽：正文可能是残缺 JSON，归类为截断而非解析失败。
+    if value["stop_reason"].as_str() == Some("max_tokens") {
+        return Err(TEXT_TRUNCATION_ERROR.to_string());
     }
     Ok(text)
 }
@@ -1079,13 +1092,29 @@ fn json_array_slice(text: &str) -> Option<&str> {
     (end > start).then(|| &text[start..=end])
 }
 
+/// `[` 之后没有任何 `]`：响应在数组中途被输出预算截断（或模型未按协议闭合）。
+fn array_unterminated(text: &str) -> bool {
+    text.find('[')
+        .is_some_and(|start| !text[start + 1..].contains(']'))
+}
+
 /// 解析并校验审查响应：未知路径、越界行号、非法枚举、空标题均丢弃并计数。
 pub fn parse_review(
     text: &str,
     files: &[ReviewFile],
 ) -> Result<(Vec<ReviewSuggestion>, u32), String> {
-    let slice = json_array_slice(text)
-        .ok_or_else(|| format!("响应不是 JSON 数组：{}", truncate(text, 300)))?;
+    let slice = match json_array_slice(text) {
+        Some(slice) => slice,
+        None if array_unterminated(text) => {
+            // 不回显残缺 JSON：它对用户无用，且可能被当成完整建议。
+            return Err(
+                "响应不是完整 JSON 数组（缺少闭合 ]，输出可能被预算截断）；\
+请减少输入规模或换用输出上限更高的模型。"
+                    .to_string(),
+            );
+        }
+        None => return Err(format!("响应不是 JSON 数组：{}", truncate(text, 300))),
+    };
     let value: serde_json::Value =
         serde_json::from_str(slice).map_err(|e| format!("响应不是 JSON 数组：{e}"))?;
     let items = value
@@ -1531,9 +1560,9 @@ fn split_review_file(file: &ReviewFile) -> Option<(ReviewFile, ReviewFile)> {
     ))
 }
 
-/// thinking 阶段被输出预算截断的错误特征（可据此降批重试）。
+/// 输出预算截断的错误特征：thinking 阶段、正文阶段或残缺 JSON 数组（可据此降批重试）。
 pub fn is_truncation_error(message: &str) -> bool {
-    message.contains("thinking 阶段被 max_tokens 截断")
+    message.contains("被 max_tokens 截断") || message.contains("不是完整 JSON 数组")
 }
 
 /// 分批审查：某批因 thinking 截断失败时二分该批重试（单文件仍失败则原样报错）。
@@ -1774,6 +1803,11 @@ mod tests {
         assert!(empty.is_empty());
         assert_eq!(dropped, 0);
         assert!(parse_review("not json", &review_files()).is_err());
+
+        // 未闭合数组归类为截断可重试，且不回显残缺 JSON。
+        let err = parse_review(r#"[{"path":"src/a.py","line":1"#, &review_files()).unwrap_err();
+        assert!(is_truncation_error(&err), "{err}");
+        assert!(!err.contains("\"path\""), "截断错误不应回显残缺 JSON：{err}");
     }
 
     #[test]
@@ -2169,6 +2203,87 @@ mod tests {
             Some((2, 2)),
             "进度应反映切分后的片段总数"
         );
+        server.join().unwrap();
+    }
+
+    /// 正文被输出预算截断（不是 thinking 阶段）时，同样二分该批并继续。
+    #[test]
+    fn review_batched_splits_text_truncated_batch() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 64 * 1024];
+                let _ = stream.read(&mut buf);
+                let path = if index == 1 { "src/a.py" } else { "src/b.py" }.to_string();
+                let body = if index == 0 {
+                    // 正文已开始输出，但 JSON 数组在输出预算处截断。
+                    serde_json::json!({
+                        "stop_reason": "max_tokens",
+                        "content": [{ "type": "text", "text": "[{\"path\":\"src/a.py\",\"line\":1" }]
+                    })
+                } else {
+                    let suggestions = serde_json::json!([{
+                        "path": path,
+                        "line": 1,
+                        "severity": "warning",
+                        "category": "quality",
+                        "title": format!("问题{index}"),
+                        "detail": "d",
+                        "confidence": "medium"
+                    }]);
+                    serde_json::json!({
+                        "content": [{ "type": "text", "text": suggestions.to_string() }]
+                    })
+                }
+                .to_string();
+                stream.write_all(http_ok(&body).as_bytes()).unwrap();
+            }
+        });
+
+        let config = ProviderConfig {
+            kind: ProviderKind::Anthropic,
+            base_url: format!("http://{addr}/api"),
+            model: "m".into(),
+        };
+        let files = vec![
+            ReviewFile {
+                path: "src/a.py".into(),
+                content: "a = 1\n".into(),
+                lines: 1,
+                start_line: 1,
+            },
+            ReviewFile {
+                path: "src/b.py".into(),
+                content: "b = 2\n".into(),
+                lines: 1,
+                start_line: 1,
+            },
+        ];
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut progress = Vec::new();
+        let outcome = runtime
+            .block_on(review_batched(
+                &config,
+                "sk-test",
+                &files,
+                &ReviewSkillOverrides::default(),
+                false,
+                |done, total| {
+                    progress.push((done, total));
+                },
+            ));
+        assert_eq!(outcome.error, None);
+        assert_eq!(outcome.suggestions.len(), 2, "拆批后两批各返回一条建议");
+        assert_eq!(outcome.reviewed_files, 2);
+        assert_eq!(progress.last().copied(), Some((2, 2)));
         server.join().unwrap();
     }
 
@@ -2698,6 +2813,25 @@ mod tests {
         let err = parse_anthropic_response(&long_reply).unwrap_err();
         assert!(err.contains('…'), "{err}");
         assert!(err.chars().count() < 220, "{}", err.chars().count());
+    }
+
+    /// 正文已产出但被输出预算截断：必须归类为截断错误，供降批重试。
+    #[test]
+    fn parsers_flag_text_phase_truncation() {
+        let openai = r#"{"choices":[{"message":{"content":"[{\"path\":\"src/a.rs\",\"line\":1"},"finish_reason":"length"}]}"#;
+        let err = parse_openai_response(openai).unwrap_err();
+        assert!(is_truncation_error(&err), "{err}");
+        assert!(err.contains("截断"), "{err}");
+
+        let anthropic = r#"{"stop_reason":"max_tokens","content":[{"type":"text","text":"[{\"path\":\"src/a.rs\",\"line\":1"}]}"#;
+        let err = parse_anthropic_response(anthropic).unwrap_err();
+        assert!(is_truncation_error(&err), "{err}");
+
+        // 正常完成的响应仍然解析成功。
+        let openai_ok = r#"{"choices":[{"message":{"content":"[]"},"finish_reason":"stop"}]}"#;
+        assert_eq!(parse_openai_response(openai_ok).unwrap(), "[]");
+        let anthropic_ok = r#"{"stop_reason":"end_turn","content":[{"type":"text","text":"[]"}]}"#;
+        assert_eq!(parse_anthropic_response(anthropic_ok).unwrap(), "[]");
     }
 
     #[test]

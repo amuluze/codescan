@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file. The format is b
 
 
 
+## [1.5.8] - 2026-11-25
+
+### Fixed
+
+- LLM source review now treats a truncated response body (`finish_reason: length` / `stop_reason: max_tokens` with partial text, or an unterminated JSON array) as output-budget truncation and retries with a smaller batch or line range; previously it surfaced as `响应不是 JSON 数组` with the partial JSON and aborted the page
+
 ## [1.5.7] - 2026-11-25
 
 ### Added
