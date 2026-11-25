@@ -620,26 +620,29 @@ pub fn list_providers(state: State<'_, AppState>) -> Result<ProvidersInfo, Strin
     })
 }
 
-/// 新建（id 为空）或更新一个 Provider Profile；首个 Profile 自动成为活动 Profile。
-#[tauri::command]
-pub fn upsert_provider_profile(
-    state: State<'_, AppState>,
-    id: Option<String>,
-    name: String,
-    kind: String,
-    base_url: String,
-    model: String,
+/// 新建（id 为空）或更新一个 Provider Profile，并在同一调用中处理密钥。
+/// `clear_key` 优先；`api_key` 去空白后为空表示保持原密钥不变。
+/// 参数平铺服务于命令层调用与测试；字段本身来自 Profile 输入契约。
+#[allow(clippy::too_many_arguments)]
+pub fn save_provider_profile(
+    store: &Store,
+    id: Option<&str>,
+    name: &str,
+    kind: &str,
+    base_url: &str,
+    model: &str,
+    api_key: Option<&str>,
+    clear_key: bool,
 ) -> Result<String, String> {
-    let kind = parse_kind(&kind)?;
-    let store = state.store.lock().unwrap();
-    let mut profiles = read_profiles(&store);
-    let existing_id = id.filter(|value| !value.trim().is_empty());
-    let id = match &existing_id {
+    let kind = parse_kind(kind)?;
+    let mut profiles = read_profiles(store);
+    let existing_id = id.map(str::trim).filter(|value| !value.is_empty());
+    let id = match existing_id {
         Some(id) => {
-            if !profiles.iter().any(|p| p.id == *id) {
+            if !profiles.iter().any(|p| p.id == id) {
                 return Err(format!("Provider Profile 不存在：{id}"));
             }
-            id.clone()
+            id.to_string()
         }
         None => format!(
             "p{}",
@@ -668,12 +671,49 @@ pub fn upsert_provider_profile(
             &llm::profiles_to_json(&profiles),
         )
         .map_err(|e| e.to_string())?;
-    if was_first || read_active_id(&store).is_none() {
+    if was_first || read_active_id(store).is_none() {
         store
             .set_meta(llm::META_ACTIVE_PROVIDER, &serde_json::to_string(&id).unwrap())
             .map_err(|e| e.to_string())?;
     }
+    let secret_id = llm::ProviderProfile::secret_id(&id);
+    if clear_key {
+        store
+            .delete_secret(&secret_id)
+            .map_err(|e| format!("清除 API Key 失败：{e}"))?;
+    } else if let Some(key) = api_key.map(str::trim).filter(|key| !key.is_empty()) {
+        store
+            .set_secret(&secret_id, key)
+            .map_err(|e| format!("保存 API Key 失败：{e}"))?;
+    }
     Ok(id)
+}
+
+/// 新建（id 为空）或更新一个 Provider Profile；首个 Profile 自动成为活动 Profile。
+/// 参数平铺是 Tauri invoke 契约的一部分，`state` 也计入参数个数。
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub fn upsert_provider_profile(
+    state: State<'_, AppState>,
+    id: Option<String>,
+    name: String,
+    kind: String,
+    base_url: String,
+    model: String,
+    api_key: Option<String>,
+    clear_key: Option<bool>,
+) -> Result<String, String> {
+    let store = state.store.lock().unwrap();
+    save_provider_profile(
+        &store,
+        id.as_deref(),
+        &name,
+        &kind,
+        &base_url,
+        &model,
+        api_key.as_deref(),
+        clear_key.unwrap_or(false),
+    )
 }
 
 /// 删除 Profile 及其密钥；被删的是活动 Profile 时，活动改为剩余首个（无剩余则清空）。
@@ -714,38 +754,6 @@ pub fn set_active_provider(state: State<'_, AppState>, id: String) -> Result<(),
     }
     store
         .set_meta(llm::META_ACTIVE_PROVIDER, &serde_json::to_string(&id).unwrap())
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn set_provider_api_key(
-    state: State<'_, AppState>,
-    id: String,
-    key: String,
-) -> Result<(), String> {
-    let key = key.trim();
-    if key.is_empty() {
-        return Err("API Key 不能为空".into());
-    }
-    let store = state.store.lock().unwrap();
-    let profiles = read_profiles(&store);
-    if !profiles.iter().any(|p| p.id == id) {
-        return Err(format!("Provider Profile 不存在：{id}"));
-    }
-    store
-        .set_secret(&llm::ProviderProfile::secret_id(&id), key)
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub fn clear_provider_api_key(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let store = state.store.lock().unwrap();
-    let profiles = read_profiles(&store);
-    if !profiles.iter().any(|p| p.id == id) {
-        return Err(format!("Provider Profile 不存在：{id}"));
-    }
-    store
-        .delete_secret(&llm::ProviderProfile::secret_id(&id))
         .map_err(|e| e.to_string())
 }
 

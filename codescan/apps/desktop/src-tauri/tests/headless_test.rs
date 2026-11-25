@@ -179,7 +179,7 @@ fn delete_scan_cascades_findings_and_baseline() {
 use codescan_lib::commands::{
     collect_review_files, export_report, load_review_skill_overrides, prepare_batch_llm_call,
     prepare_llm_call, prepare_provider_probe, reset_review_skill_override,
-    save_review_skill_override,
+    save_provider_profile, save_review_skill_override,
 };
 use codescan_lib::llm;
 
@@ -840,6 +840,98 @@ fn export_report_writes_both_formats_and_rejects_bad_input() {
         let err = export_report(dest.clone(), bad.into(), "x".into(), "y".into()).unwrap_err();
         assert!(err.contains("导出文件名"), "{bad}: {err}");
     }
+}
+
+#[test]
+fn provider_profile_save_unifies_key_and_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("test.db")).unwrap();
+
+    let id = save_provider_profile(
+        &store,
+        None,
+        "新 Profile",
+        "openai",
+        "https://api.example.com/v1",
+        "m1",
+        Some("sk-1"),
+        false,
+    )
+    .unwrap();
+    let profiles = llm::profiles_from_json(
+        &store
+            .get_meta(llm::META_PROVIDER_PROFILES)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].id, id);
+    assert_eq!(profiles[0].model, "m1");
+    let secret_id = llm::ProviderProfile::secret_id(&id);
+    assert_eq!(
+        store.get_secret(&secret_id).unwrap().as_deref(),
+        Some("sk-1"),
+        "新建时同一个调用写入密钥"
+    );
+
+    // 留空/空白密钥保持原值；非空替换。
+    save_provider_profile(
+        &store,
+        Some(&id),
+        "改名",
+        "openai",
+        "https://api.example.com/v1",
+        "m2",
+        Some("  "),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        store.get_secret(&secret_id).unwrap().as_deref(),
+        Some("sk-1")
+    );
+    save_provider_profile(
+        &store,
+        Some(&id),
+        "改名",
+        "openai",
+        "https://api.example.com/v1",
+        "m2",
+        Some("sk-2"),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        store.get_secret(&secret_id).unwrap().as_deref(),
+        Some("sk-2")
+    );
+
+    // 显式清除优先于 api_key。
+    save_provider_profile(
+        &store,
+        Some(&id),
+        "改名",
+        "openai",
+        "https://api.example.com/v1",
+        "m2",
+        Some("sk-3"),
+        true,
+    )
+    .unwrap();
+    assert_eq!(store.get_secret(&secret_id).unwrap(), None);
+
+    assert!(save_provider_profile(
+        &store,
+        Some("missing"),
+        "x",
+        "openai",
+        "https://api.example.com/v1",
+        "m",
+        None,
+        false,
+    )
+    .is_err());
 }
 
 #[test]

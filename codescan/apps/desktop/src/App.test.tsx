@@ -43,28 +43,29 @@ vi.mock("./platform", () => {
     listDirectory: (path?: string) =>
       platform.invoke("list_directory", { path: path ?? null }),
     listProviders: () => platform.invoke("list_providers"),
-    upsertProviderProfile: (profile: {
-      id: string | null;
-      name: string;
-      kind: string;
-      baseUrl: string;
-      model: string;
-    }) =>
+    upsertProviderProfile: (
+      profile: {
+        id: string | null;
+        name: string;
+        kind: string;
+        baseUrl: string;
+        model: string;
+      },
+      options?: { apiKey?: string | null; clearKey?: boolean },
+    ) =>
       platform.invoke("upsert_provider_profile", {
         id: profile.id,
         name: profile.name,
         kind: profile.kind,
         baseUrl: profile.baseUrl,
         model: profile.model,
+        apiKey: options?.apiKey ?? null,
+        clearKey: options?.clearKey ?? false,
       }),
     deleteProviderProfile: (id: string) =>
       platform.invoke("delete_provider_profile", { id }),
     setActiveProvider: (id: string) =>
       platform.invoke("set_active_provider", { id }),
-    setProviderApiKey: (id: string, key: string) =>
-      platform.invoke("set_provider_api_key", { id, key }),
-    clearProviderApiKey: (id: string) =>
-      platform.invoke("clear_provider_api_key", { id }),
     testProviderConnection: (id?: string) =>
       platform.invoke("test_provider_connection", { profileId: id ?? null }),
     llmReviewWorkspace: (
@@ -261,8 +262,6 @@ beforeEach(() => {
         return ((args?.id as string | undefined) ?? "p-new").trim() || "p-new";
       case "delete_provider_profile":
       case "set_active_provider":
-      case "set_provider_api_key":
-      case "clear_provider_api_key":
         return null;
       case "test_provider_connection":
         return { kind: "openai", model: "test-model", latency_ms: 87 };
@@ -513,7 +512,7 @@ describe("App 主链路", () => {
     expect(screen.getByText("尚未选择工作区。点击「选择工作区」浏览本地目录后开始。")).toBeInTheDocument();
   });
 
-  it("设置页展示多个 Provider Profile，可编辑保存与新建，密钥状态可见", async () => {
+  it("设置页可在弹窗中新建/编辑 Profile 并统一保存密钥", async () => {
     const user = userEvent.setup();
     render(<App />);
 
@@ -522,19 +521,18 @@ describe("App 主链路", () => {
     expect(invokeMock).toHaveBeenCalledWith("list_providers");
     expect(table.textContent).toContain("OpenAI 主力");
     expect(table.textContent).toContain("智谱 GLM");
-    expect(table.textContent).toContain("glm-test");
-    // 密钥状态按 Profile 独立展示。
     expect(table.textContent).toContain("未配置");
 
-    // 编辑活动 Profile：修改模型保存后编辑器关闭，并给出卡片内提示。
+    // 编辑活动 Profile：Profile 与 Key 在同一次调用中提交。
     await user.click(screen.getAllByRole("button", { name: "编辑" })[0]);
-    const model = screen.getByLabelText("Model") as HTMLInputElement;
-    expect(model.value).toBe("test-model");
-    expect(screen.getByTestId("key-status")).toHaveTextContent("已配置");
-    expect(screen.getByText(/编辑 Provider Profile：OpenAI 主力/)).toBeTruthy();
+    const editDialog = screen.getByRole("dialog", { name: "编辑 Provider Profile" });
+    const model = within(editDialog).getByLabelText("Model");
+    expect(model).toHaveValue("test-model");
+    expect(within(editDialog).getByTestId("key-status")).toHaveTextContent("已配置");
     await user.clear(model);
     await user.type(model, "new-model");
-    await user.click(screen.getByTestId("profile-save"));
+    await user.type(within(editDialog).getByLabelText("API Key"), "sk-new");
+    await user.click(within(editDialog).getByTestId("provider-save"));
     await waitFor(() => {
       expect(invokeMock).toHaveBeenCalledWith("upsert_provider_profile", {
         id: "p1",
@@ -542,18 +540,22 @@ describe("App 主链路", () => {
         kind: "openai",
         baseUrl: "https://api.openai.com/v1",
         model: "new-model",
+        apiKey: "sk-new",
+        clearKey: false,
       });
     });
-    await waitFor(() => expect(screen.queryByTestId("profile-editor")).toBeNull());
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(screen.getByText("已保存 Provider Profile：OpenAI 主力")).toBeTruthy();
 
-    // 新建 Profile：必填校验通过后才可保存；保存后保留编辑器以配置 Key。
+    // 新建：Profile 与 Key 一次提交，保存后关闭。
     await user.click(screen.getByTestId("profile-new"));
-    const save = screen.getByTestId("profile-save");
+    const createDialog = screen.getByRole("dialog", { name: "新建 Provider Profile" });
+    const save = within(createDialog).getByTestId("provider-save");
     expect(save).toBeDisabled();
-    await user.type(screen.getByLabelText("Profile 名称"), "备用");
-    await user.type(screen.getByLabelText("Base URL"), "https://example.com/v1");
-    await user.type(screen.getByLabelText("Model"), "backup-model");
+    await user.type(within(createDialog).getByLabelText("Profile 名称"), "备用");
+    await user.type(within(createDialog).getByLabelText("Base URL"), "https://example.com/v1");
+    await user.type(within(createDialog).getByLabelText("Model"), "backup-model");
+    await user.type(within(createDialog).getByLabelText("API Key"), "sk-backup");
     expect(save).toBeEnabled();
     await user.click(save);
     await waitFor(() => {
@@ -563,40 +565,87 @@ describe("App 主链路", () => {
         kind: "openai",
         baseUrl: "https://example.com/v1",
         model: "backup-model",
+        apiKey: "sk-backup",
+        clearKey: false,
       });
     });
-    // 新建保存后进入已落库编辑态，可继续配置 Key。
-    expect(screen.getByTestId("profile-editor")).toBeTruthy();
-    expect(screen.getByTestId("profile-notice").textContent).toContain("Profile 已保存");
-    expect(screen.getByTestId("key-status")).toHaveTextContent("未配置");
-    expect(screen.getByRole("button", { name: "关闭" })).toBeEnabled();
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
-  it("切换 Profile 会清空密钥草稿并保护未保存修改", async () => {
+  it("编辑 Provider 时留空保持 Key，勾选后可显式清除", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "设置" }));
+    await screen.findByTestId("provider-table");
+
+    // 留空保存：apiKey=null、clearKey=false，表示保持原 Key。
+    await user.click(screen.getAllByRole("button", { name: "编辑" })[0]);
+    let dialog = screen.getByRole("dialog", { name: "编辑 Provider Profile" });
+    await user.click(within(dialog).getByTestId("provider-save"));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("upsert_provider_profile", {
+        id: "p1",
+        name: "OpenAI 主力",
+        kind: "openai",
+        baseUrl: "https://api.openai.com/v1",
+        model: "test-model",
+        apiKey: null,
+        clearKey: false,
+      }),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    // 显式清除：clearKey=true，Key 输入被禁用。
+    await user.click(screen.getAllByRole("button", { name: "编辑" })[0]);
+    dialog = screen.getByRole("dialog", { name: "编辑 Provider Profile" });
+    await user.click(within(dialog).getByLabelText("清除已保存的 Key"));
+    expect(within(dialog).getByLabelText("API Key")).toBeDisabled();
+    await user.click(within(dialog).getByTestId("provider-save"));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("upsert_provider_profile", {
+        id: "p1",
+        name: "OpenAI 主力",
+        kind: "openai",
+        baseUrl: "https://api.openai.com/v1",
+        model: "test-model",
+        apiKey: null,
+        clearKey: true,
+      }),
+    );
+  });
+
+  it("关闭 Provider 弹窗会清空密钥草稿并保护未保存修改", async () => {
     const user = userEvent.setup();
     render(<App />);
     await user.click(screen.getByRole("button", { name: "设置" }));
     await screen.findByTestId("provider-table");
 
     await user.click(screen.getAllByRole("button", { name: "编辑" })[0]);
-    await user.type(screen.getByLabelText("API Key"), "sk-draft");
+    const dialog = screen.getByRole("dialog", { name: "编辑 Provider Profile" });
+    await user.type(within(dialog).getByLabelText("API Key"), "sk-draft");
 
-    // 切换到第二个 Profile：先提示，不丢弃草稿。
-    await user.click(screen.getAllByRole("button", { name: "编辑" })[1]);
-    expect(screen.getByText(/未保存的修改/)).toBeTruthy();
-    expect(screen.getByLabelText("Model")).toHaveValue("test-model");
-    await user.click(screen.getByRole("button", { name: "继续编辑" }));
-    expect((screen.getByLabelText("API Key") as HTMLInputElement).value).toBe("sk-draft");
+    // 取消 → 未保存确认；继续编辑保留草稿。
+    await user.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(within(dialog).getByText(/未保存的修改/)).toBeTruthy();
+    await user.click(within(dialog).getByRole("button", { name: "继续编辑" }));
+    expect(
+      (within(dialog).getByLabelText("API Key") as HTMLInputElement).value,
+    ).toBe("sk-draft");
 
-    // 放弃后切到第二个 Profile，密钥草稿必须清空。
+    // 再次取消并放弃：关闭弹窗，重新打开另一 Profile 时密钥草稿为空。
+    await user.click(within(dialog).getByRole("button", { name: "取消" }));
+    await user.click(within(dialog).getByRole("button", { name: "放弃修改" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+
     await user.click(screen.getAllByRole("button", { name: "编辑" })[1]);
-    await user.click(screen.getByRole("button", { name: "放弃修改" }));
-    expect(screen.getByLabelText("Model")).toHaveValue("glm-test");
-    expect((screen.getByLabelText("API Key") as HTMLInputElement).value).toBe("");
-    expect(screen.getByText(/编辑 Provider Profile：智谱 GLM/)).toBeTruthy();
+    const next = screen.getByRole("dialog", { name: "编辑 Provider Profile" });
+    expect(within(next).getByLabelText("Model")).toHaveValue("glm-test");
+    expect(
+      (within(next).getByLabelText("API Key") as HTMLInputElement).value,
+    ).toBe("");
   });
 
-  it("保存 Profile 失败时在编辑器内提示并保留草稿", async () => {
+  it("保存 Profile 失败时在弹窗内提示并保留草稿", async () => {
     const base = invokeMock.getMockImplementation();
     invokeMock.mockImplementation(async (cmd: string, args?: InvokeArgs) => {
       if (cmd === "upsert_provider_profile") throw new Error("名称已存在");
@@ -607,53 +656,44 @@ describe("App 主链路", () => {
     await user.click(screen.getByRole("button", { name: "设置" }));
     await screen.findByTestId("provider-table");
     await user.click(screen.getAllByRole("button", { name: "编辑" })[0]);
-    await user.type(screen.getByLabelText("Model"), "-draft");
-    await user.click(screen.getByTestId("profile-save"));
+    const dialog = screen.getByRole("dialog", { name: "编辑 Provider Profile" });
+    await user.type(within(dialog).getByLabelText("Model"), "-draft");
+    await user.click(within(dialog).getByTestId("provider-save"));
 
-    expect(await screen.findByTestId("profile-error")).toHaveTextContent("名称已存在");
-    expect(screen.getByTestId("profile-editor")).toBeTruthy();
-    expect(screen.getByLabelText("Model")).toHaveValue("test-model-draft");
+    expect(await within(dialog).findByTestId("profile-error")).toHaveTextContent(
+      "名称已存在",
+    );
+    expect(screen.getByRole("dialog", { name: "编辑 Provider Profile" })).toBeTruthy();
+    expect(within(dialog).getByLabelText("Model")).toHaveValue("test-model-draft");
   });
 
-  it("关闭编辑器时未保存修改需先确认", async () => {
-    const user = userEvent.setup();
-    render(<App />);
-    await user.click(screen.getByRole("button", { name: "设置" }));
-    await screen.findByTestId("provider-table");
-    await user.click(screen.getAllByRole("button", { name: "编辑" })[0]);
-    await user.type(screen.getByLabelText("Model"), "-draft");
-    await user.click(screen.getByRole("button", { name: "关闭" }));
-    expect(screen.getByText(/未保存的修改/)).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "继续编辑" }));
-    expect(screen.getByTestId("profile-editor")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "关闭" }));
-    await user.click(screen.getByRole("button", { name: "放弃修改" }));
-    expect(screen.queryByTestId("profile-editor")).toBeNull();
-  });
-
-  it("新建 Profile 校验必填与 Base URL，并预览实际请求", async () => {
+  it("新建 Provider 弹窗校验必填与 Base URL，并预览实际请求", async () => {
     const user = userEvent.setup();
     render(<App />);
     await user.click(screen.getByRole("button", { name: "设置" }));
     await screen.findByTestId("provider-table");
     await user.click(screen.getByTestId("profile-new"));
+    const dialog = screen.getByRole("dialog", { name: "新建 Provider Profile" });
 
-    const save = screen.getByTestId("profile-save");
+    const save = within(dialog).getByTestId("provider-save");
     expect(save).toBeDisabled();
-    expect(screen.getByText(/请补全：名称、Base URL、Model/)).toBeTruthy();
+    expect(within(dialog).getByText(/请补全：名称、Base URL、Model/)).toBeTruthy();
 
-    await user.type(screen.getByLabelText("Profile 名称"), "自定义");
-    await user.type(screen.getByLabelText("Base URL"), "open.bigmodel.cn/api");
+    await user.type(within(dialog).getByLabelText("Profile 名称"), "自定义");
+    await user.type(within(dialog).getByLabelText("Base URL"), "open.bigmodel.cn/api");
     expect(save).toBeDisabled();
-    expect(screen.getByText("必须以 http:// 或 https:// 开头")).toBeTruthy();
+    expect(within(dialog).getByText("必须以 http:// 或 https:// 开头")).toBeTruthy();
 
-    await user.clear(screen.getByLabelText("Base URL"));
-    await user.type(screen.getByLabelText("Base URL"), "https://open.bigmodel.cn/api");
-    await user.selectOptions(screen.getByLabelText("Provider"), "anthropic");
-    expect(screen.getByText(/实际请求：/).textContent).toContain(
+    await user.clear(within(dialog).getByLabelText("Base URL"));
+    await user.type(
+      within(dialog).getByLabelText("Base URL"),
+      "https://open.bigmodel.cn/api",
+    );
+    await user.selectOptions(within(dialog).getByLabelText("Provider"), "anthropic");
+    expect(within(dialog).getByText(/实际请求：/).textContent).toContain(
       "https://open.bigmodel.cn/api/v1/messages",
     );
-    await user.type(screen.getByLabelText("Model"), "GLM-5.4");
+    await user.type(within(dialog).getByLabelText("Model"), "GLM-5.4");
     expect(save).toBeEnabled();
   });
 
@@ -663,11 +703,15 @@ describe("App 主链路", () => {
     await user.click(screen.getByRole("button", { name: "设置" }));
     await screen.findByTestId("provider-table");
     await user.click(screen.getByTestId("profile-new"));
-    await user.selectOptions(screen.getByLabelText("Provider"), "anthropic");
-    await user.type(screen.getByLabelText("Base URL"), "https://api.anthropic.com/v1");
+    const dialog = screen.getByRole("dialog", { name: "新建 Provider Profile" });
+    await user.selectOptions(within(dialog).getByLabelText("Provider"), "anthropic");
+    await user.type(
+      within(dialog).getByLabelText("Base URL"),
+      "https://api.anthropic.com/v1",
+    );
 
-    expect(screen.getByText(/请勿以 \/v1 结尾/)).toBeTruthy();
-    expect(screen.getByText(/实际请求：/).textContent).toContain(
+    expect(within(dialog).getByText(/请勿以 \/v1 结尾/)).toBeTruthy();
+    expect(within(dialog).getByText(/实际请求：/).textContent).toContain(
       "https://api.anthropic.com/v1/v1/messages",
     );
   });

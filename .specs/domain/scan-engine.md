@@ -33,7 +33,7 @@
 ## 3a. 密钥与 Provider 边界（v3 契约）
 
 1. **密钥只存 Rust 独占 secrets 表**（应用数据根 SQLite）：命令面不得存在返回密钥明文的接口；状态查询只返回「已配置/未配置」；密钥不出现在日志、错误消息、发现、事件与任何导出物中。
-2. **Provider 配置以 Profile 列表持久化**（id/name/kind/base_url/model，数量不限）；每个 Profile 独立绑定密钥（secrets 表按 `llm:api_key:<id>` 键存储）；恰有一个「活动 Profile」作为 LLM 调用的默认值，源码审查可在调用期显式指定其他 Profile。请求只发往所选 Profile 的 base_url，无内置遥测或第三方回退；旧版单一配置在首次读取时迁移为 `default` Profile（含密钥迁移）。
+2. **Provider 配置以 Profile 列表持久化**（id/name/kind/base_url/model，数量不限）；每个 Profile 独立绑定密钥（secrets 表按 `llm:api_key:<id>` 键存储）；恰有一个「活动 Profile」作为 LLM 调用的默认值，源码审查可在调用期显式指定其他 Profile。Profile 与其 API Key 必须在同一次保存动作中提交：Key 留空表示保持原值，只有显式清除才删除；命令面不提供独立的 Key 写入接口。请求只发往所选 Profile 的 base_url，无内置遥测或第三方回退；旧版单一配置在首次读取时迁移为 `default` Profile（含密钥迁移）。
 3. **LLM 输出永不进入门禁**（§5.3）：分诊/建议仅作展示层参考并显式标注「非确定性参考」；只有经校验、显式保存为确定性规则的候选才影响后续扫描。
 4. **LLM 失败可恢复**：网络/凭据/解析错误不得影响扫描流程、历史与基线；所有 LLM 命令返回可读错误。
 

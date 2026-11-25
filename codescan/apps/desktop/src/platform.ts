@@ -221,28 +221,29 @@ export const api = {
   listDirectory: (path?: string) =>
     platform.invoke<DirListing>("list_directory", { path: path ?? null }),
   listProviders: () => platform.invoke<ProvidersInfo>("list_providers"),
-  upsertProviderProfile: (profile: {
-    id: string | null;
-    name: string;
-    kind: string;
-    baseUrl: string;
-    model: string;
-  }) =>
+  upsertProviderProfile: (
+    profile: {
+      id: string | null;
+      name: string;
+      kind: string;
+      baseUrl: string;
+      model: string;
+    },
+    options?: { apiKey?: string | null; clearKey?: boolean },
+  ) =>
     platform.invoke<string>("upsert_provider_profile", {
       id: profile.id,
       name: profile.name,
       kind: profile.kind,
       baseUrl: profile.baseUrl,
       model: profile.model,
+      apiKey: options?.apiKey ?? null,
+      clearKey: options?.clearKey ?? false,
     }),
   deleteProviderProfile: (id: string) =>
     platform.invoke<void>("delete_provider_profile", { id }),
   setActiveProvider: (id: string) =>
     platform.invoke<void>("set_active_provider", { id }),
-  setProviderApiKey: (id: string, key: string) =>
-    platform.invoke<void>("set_provider_api_key", { id, key }),
-  clearProviderApiKey: (id: string) =>
-    platform.invoke<void>("clear_provider_api_key", { id }),
   testProviderConnection: (id?: string) =>
     platform.invoke<ProviderTestResult>("test_provider_connection", {
       profileId: id ?? null,
