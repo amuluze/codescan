@@ -52,8 +52,8 @@ vi.mock("./platform", () => {
     setBaseline: (scanId: number) => platform.invoke("set_baseline", { scanId }),
     gateDiff: (scanId: number) => platform.invoke("gate_diff", { scanId }),
     baselineInfo: () => platform.invoke("baseline_info"),
-    exportSarif: (scanId: number, dest: string) =>
-      platform.invoke("export_sarif", { scanId, dest }),
+    exportSarif: (scanId: number, destDir: string) =>
+      platform.invoke("export_sarif", { scanId, destDir }),
     exportReport: (destDir: string, base: string, markdown: string, json: string) =>
       platform.invoke("export_report", { destDir, base, markdown, json }),
     listDirectory: (path?: string) =>

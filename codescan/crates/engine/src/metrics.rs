@@ -194,7 +194,8 @@ fn finding_for(
     }
 }
 
-fn span_of(node: Node<'_>) -> Span {
+/// 节点 → 工作区 span（行列从 1 起）；types.rs 复用。
+pub(crate) fn span_of(node: Node<'_>) -> Span {
     let start = node.start_position();
     let end = node.end_position();
     Span {
@@ -215,7 +216,8 @@ fn node_text<'a>(node: Node<'_>, source: &'a str) -> &'a str {
     source.get(start..end).unwrap_or("")
 }
 
-fn named_children(node: Node<'_>) -> Vec<Node<'_>> {
+/// 具名子节点列表；types.rs 复用。
+pub(crate) fn named_children(node: Node<'_>) -> Vec<Node<'_>> {
     let mut cursor = node.walk();
     let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
     drop(cursor);
@@ -304,7 +306,6 @@ pub fn file_metrics_with_tests(
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     let root = tree.root_node();
-    let prof = profile(lang);
 
     let function_rules: Vec<&MetricRule> = metric_rules
         .iter()
@@ -317,85 +318,16 @@ pub fn file_metrics_with_tests(
             )
         })
         .collect();
-
     if !function_rules.is_empty() {
-        let mut functions = Vec::new();
-        walk_all(root, &mut |node| {
-            if prof.functions.contains(&node.kind()) {
-                functions.push(node);
-            }
-        });
-        for func in functions {
-            // 无函数体（抽象方法/声明）不参与度量。
-            let has_body = named_children(func).iter().any(|c| prof.blocks.contains(&c.kind()));
-            if !has_body {
-                continue;
-            }
-            let span = span_of(func);
-            let lines = span.end.line - span.start.line + 1;
-            let name = function_name(func, source);
-            let text = node_text(func, source).to_string();
-
-            for rule in &function_rules {
-                if option(&rule.options, "skip_tests", 0.0) > 0.0
-                    && span_in_ranges(&span, test_ranges)
-                {
-                    continue;
-                }
-                match rule.kind {
-                    MetricKind::FunctionLength => {
-                        let threshold = option(&rule.options, "threshold", 80.0);
-                        if lines as f64 > threshold {
-                            findings.push(finding_for(
-                                rule,
-                                format!("函数 {name} 长度 {lines} 行，超过阈值 {threshold}"),
-                                path,
-                                span,
-                                &text,
-                                degraded,
-                            ));
-                        }
-                    }
-                    MetricKind::CyclomaticComplexity => {
-                        let threshold = option(&rule.options, "threshold", 15.0);
-                        let mut decisions = 0usize;
-                        walk_own_subtree(func, prof.functions, &mut |node| {
-                            if prof.decisions.contains(&node.kind())
-                                || is_logic_operator_node(node, source, lang)
-                            {
-                                decisions += 1;
-                            }
-                        });
-                        let complexity = 1 + decisions;
-                        if complexity as f64 > threshold {
-                            findings.push(finding_for(
-                                rule,
-                                format!("函数 {name} 圈复杂度 {complexity}，超过阈值 {threshold}"),
-                                path,
-                                span,
-                                &text,
-                                degraded,
-                            ));
-                        }
-                    }
-                    MetricKind::NestingDepth => {
-                        let threshold = option(&rule.options, "threshold", 5.0);
-                        let depth = max_block_depth(func, prof.blocks, prof.functions) - 1; // 函数体自身为 0 层
-                        if depth as f64 > threshold {
-                            findings.push(finding_for(
-                                rule,
-                                format!("函数 {name} 最大嵌套深度 {depth}，超过阈值 {threshold}"),
-                                path,
-                                span,
-                                &text,
-                                degraded,
-                            ));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+        findings.extend(function_findings(
+            lang,
+            root,
+            source,
+            path,
+            degraded,
+            &function_rules,
+            test_ranges,
+        ));
     }
 
     for rule in metric_rules
@@ -414,6 +346,97 @@ pub fn file_metrics_with_tests(
     }
 
     findings
+}
+
+/// 函数级度量（复杂度/长度/嵌套）：按函数出现顺序、再按规则顺序产出发现。
+/// 无函数体（抽象方法/声明）不参与度量。
+fn function_findings(
+    lang: Language,
+    root: Node<'_>,
+    source: &str,
+    path: &str,
+    degraded: bool,
+    rules: &[&MetricRule],
+    test_ranges: &[(usize, usize)],
+) -> Vec<Finding> {
+    let prof = profile(lang);
+    let mut findings = Vec::new();
+    let mut functions = Vec::new();
+    walk_all(root, &mut |node| {
+        if prof.functions.contains(&node.kind()) {
+            functions.push(node);
+        }
+    });
+    for func in functions {
+        let has_body = named_children(func)
+            .iter()
+            .any(|c| prof.blocks.contains(&c.kind()));
+        if !has_body {
+            continue;
+        }
+        let span = span_of(func);
+        let lines = span.end.line - span.start.line + 1;
+        let name = function_name(func, source);
+        let text = node_text(func, source).to_string();
+        for rule in rules {
+            // skip_tests：测试代码里的函数不计入复杂度/长度/嵌套（逐规则生效）。
+            if option(&rule.options, "skip_tests", 0.0) > 0.0 && span_in_ranges(&span, test_ranges) {
+                continue;
+            }
+            let detail = match rule.kind {
+                MetricKind::FunctionLength => length_detail(lines, &name, rule),
+                MetricKind::CyclomaticComplexity => {
+                    complexity_detail(func, source, lang, &prof, &name, rule)
+                }
+                MetricKind::NestingDepth => nesting_detail(func, &prof, &name, rule),
+                _ => None,
+            };
+            if let Some(detail) = detail {
+                findings.push(finding_for(rule, detail, path, span, &text, degraded));
+            }
+        }
+    }
+    findings
+}
+
+/// 函数长度（整个函数 span 的行数，含嵌套函数体）；未超阈值时为 `None`。
+fn length_detail(lines: usize, name: &str, rule: &MetricRule) -> Option<String> {
+    let threshold = option(&rule.options, "threshold", 80.0);
+    (lines as f64 > threshold)
+        .then(|| format!("函数 {name} 长度 {lines} 行，超过阈值 {threshold}"))
+}
+
+/// 圈复杂度 = 1 + 函数自身子树内的决策点数（嵌套函数不计入）；未超阈值时为 `None`。
+fn complexity_detail(
+    func: Node<'_>,
+    source: &str,
+    lang: Language,
+    prof: &Profile,
+    name: &str,
+    rule: &MetricRule,
+) -> Option<String> {
+    let threshold = option(&rule.options, "threshold", 15.0);
+    let complexity = 1 + count_decisions(func, source, lang, prof);
+    (complexity as f64 > threshold)
+        .then(|| format!("函数 {name} 圈复杂度 {complexity}，超过阈值 {threshold}"))
+}
+
+/// 最大嵌套深度（块层级，函数体自身为 0 层）；未超阈值时为 `None`。
+fn nesting_detail(func: Node<'_>, prof: &Profile, name: &str, rule: &MetricRule) -> Option<String> {
+    let threshold = option(&rule.options, "threshold", 5.0);
+    let depth = max_block_depth(func, prof.blocks, prof.functions) - 1;
+    (depth as f64 > threshold)
+        .then(|| format!("函数 {name} 最大嵌套深度 {depth}，超过阈值 {threshold}"))
+}
+
+fn count_decisions(func: Node<'_>, source: &str, lang: Language, prof: &Profile) -> usize {
+    let mut decisions = 0usize;
+    walk_own_subtree(func, prof.functions, &mut |node| {
+        if prof.decisions.contains(&node.kind()) || is_logic_operator_node(node, source, lang) {
+            decisions += 1;
+        }
+    });
+    decisions
 }
 
 /// 只遍历函数自身子树：不进入嵌套函数体（其度量归属嵌套函数自身）。
@@ -538,6 +561,7 @@ fn unreachable_findings(
         let mut terminal_seen = false;
         for child in children {
             // 注释是 extra 节点，不占语句序位（否则「return 后注释」会顶替首个不可达语句）。
+            // 各语法注释节点名不同：`comment`（TS/Go/Java/Python）、`line_comment`/`block_comment`（Rust）。
             if matches!(child.kind(), "comment" | "line_comment" | "block_comment") {
                 continue;
             }
@@ -761,7 +785,7 @@ mod tests {
         kind: MetricKind,
         options: &[(&str, f64)],
     ) -> Vec<Finding> {
-        let parsed = parse(lang, source.as_bytes());
+        let parsed = parse(lang, source.as_bytes()).expect("parse");
         let configs = vec![metric_rule(kind, options)];
         file_metrics(lang, &parsed.tree, &parsed.source, "t", false, &configs)
     }
@@ -779,7 +803,8 @@ mod tests {
         let parsed = parse(
             Language::Python,
             b"def f():\n    a = 1\n    b = 2\n    c = 3\n    return a\n",
-        );
+        )
+        .expect("parse");
         let mut rule = metric_rule(MetricKind::FunctionLength, &[("threshold", 3.0)]);
         rule.spec.id = "custom/long".into();
         rule.spec.dimension = Dimension::Security;

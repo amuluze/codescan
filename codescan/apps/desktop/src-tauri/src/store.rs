@@ -113,21 +113,39 @@ impl Store {
                value TEXT NOT NULL
              );",
         )?;
-        // v1→v2 迁移：既有 findings 表补 flows_json 列（已存在则忽略）。
-        let _ = self.conn.execute(
-            "ALTER TABLE findings ADD COLUMN flows_json TEXT NOT NULL DEFAULT '[]'",
-            [],
-        );
+        // v1→v2 迁移：旧库补列，列已存在则跳过。只有「列不存在」才执行 ALTER；
+        // 磁盘、锁、损坏等其他错误必须暴露，不能被当成「已存在」吞掉。
+        self.ensure_column("findings", "flows_json", "TEXT NOT NULL DEFAULT '[]'")?;
         // 历史事件与规则集快照（Domain §6.1）；旧库按空值升级。
-        let _ = self.conn.execute(
-            "ALTER TABLE scans ADD COLUMN events_json TEXT NOT NULL DEFAULT '[]'",
-            [],
-        );
-        let _ = self.conn.execute(
-            "ALTER TABLE scans ADD COLUMN ruleset_json TEXT NOT NULL DEFAULT '{}'",
-            [],
-        );
+        self.ensure_column("scans", "events_json", "TEXT NOT NULL DEFAULT '[]'")?;
+        self.ensure_column("scans", "ruleset_json", "TEXT NOT NULL DEFAULT '{}'")?;
         Ok(())
+    }
+
+    /// 列不存在时 `ADD COLUMN`；`table` / `column` / `definition` 只来自本模块的字面量。
+    fn ensure_column(&self, table: &str, column: &str, definition: &str) -> Result<()> {
+        for existing in self
+            .conn
+            .prepare(&format!("PRAGMA table_info({table})"))?
+            .query_map([], |row| row.get::<_, String>(1))?
+        {
+            if existing? == column {
+                return Ok(());
+            }
+        }
+        self.conn.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+        ))?;
+        Ok(())
+    }
+
+    /// 在单个事务内执行多步写入：`body` 返回 `Err` 或 panic 展开时整体回滚，
+    /// 不留下半完成的 Profile 或迁移状态。
+    pub fn transaction<T>(&self, body: impl FnOnce() -> Result<T>) -> Result<T> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let value = body()?;
+        transaction.commit()?;
+        Ok(value)
     }
 
     pub fn insert_scan(
@@ -172,11 +190,17 @@ impl Store {
             let flows = serde_json::to_string(&f.flows).map_err(|e| {
                 StoreError::Db(rusqlite::Error::ToSqlConversionFailure(e.into()))
             })?;
+            let dimension = serde_json::to_string(&f.dimension).map_err(|e| {
+                StoreError::Db(rusqlite::Error::ToSqlConversionFailure(e.into()))
+            })?;
+            let severity = serde_json::to_string(&f.severity).map_err(|e| {
+                StoreError::Db(rusqlite::Error::ToSqlConversionFailure(e.into()))
+            })?;
             stmt.execute(params![
                 scan_id,
                 f.rule_id,
-                serde_json::to_string(&f.dimension).unwrap(),
-                serde_json::to_string(&f.severity).unwrap(),
+                dimension,
+                severity,
                 f.path,
                 f.span.start.line as i64,
                 f.span.start.column as i64,
@@ -524,4 +548,66 @@ struct FindingRow {
     degraded: i64,
     fingerprint: String,
     flows_json: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// v1 表结构（迁移前的 scans / findings，无 events_json / ruleset_json / flows_json）：
+    /// 打开时补列，旧行按默认值读取，重复打开幂等。
+    #[test]
+    fn opens_v1_schema_and_adds_missing_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v1.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE scans(id INTEGER PRIMARY KEY AUTOINCREMENT, root TEXT NOT NULL, engine_version TEXT NOT NULL, started_at_ms INTEGER NOT NULL, duration_ms INTEGER NOT NULL, stats_json TEXT NOT NULL);
+                 CREATE TABLE findings(scan_id INTEGER NOT NULL, rule_id TEXT NOT NULL, dimension TEXT NOT NULL, severity TEXT NOT NULL, path TEXT NOT NULL, start_line INTEGER NOT NULL, start_col INTEGER NOT NULL, end_line INTEGER NOT NULL, end_col INTEGER NOT NULL, message TEXT NOT NULL, match_text TEXT NOT NULL, captures_json TEXT NOT NULL, degraded INTEGER NOT NULL, fingerprint TEXT NOT NULL);
+                 INSERT INTO scans(root, engine_version, started_at_ms, duration_ms, stats_json) VALUES ('r', '1', 0, 0, '{}');",
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        // 旧行按列默认值升级：事件为空、规则集快照为空对象。
+        assert!(store.get_events(1).unwrap().is_empty());
+        assert_eq!(store.scan_ruleset_json(1).unwrap(), "{}");
+
+        let finding = Finding {
+            rule_id: "r".into(),
+            dimension: Dimension::Security,
+            severity: Severity::Info,
+            path: "a.ts".into(),
+            span: Span {
+                start: Position { line: 1, column: 1 },
+                end: Position { line: 1, column: 2 },
+            },
+            message: "m".into(),
+            match_text: "x".into(),
+            captures: Vec::new(),
+            degraded: false,
+            flows: Vec::new(),
+            fingerprint: "f".into(),
+        };
+        let scan_id = store
+            .insert_scan(
+                "r",
+                &ScanReport {
+                    engine_version: "1".into(),
+                    findings: vec![finding],
+                    events: Vec::new(),
+                    stats: Default::default(),
+                },
+                0,
+                0,
+                "{}",
+            )
+            .unwrap();
+        assert_eq!(store.get_findings(scan_id).unwrap().len(), 1);
+
+        // 重复打开：列已存在时跳过 ALTER，不报错。
+        drop(Store::open(&path).unwrap());
+    }
 }

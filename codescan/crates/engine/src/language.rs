@@ -1,6 +1,7 @@
 //! 语言注册表：扩展名识别 + tree-sitter 语法接入。
 //! 某语言缺席不影响其他语言（Domain §4.2）。
 
+use crate::model::ScanError;
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -101,24 +102,26 @@ pub struct ParsedFile {
     pub error_nodes: usize,
 }
 
-pub fn parse(lang: Language, bytes: &[u8]) -> ParsedFile {
+/// 解析源文本。语法注册失败或 tree-sitter 拒绝解析时返回 `Err`，由调用方
+/// 记录为逐文件事件（Domain §3.1），不中止整个扫描。
+pub fn parse(lang: Language, bytes: &[u8]) -> Result<ParsedFile, ScanError> {
     let mut parser = tree_sitter::Parser::new();
-    // 语法注册失败属引擎构建错误，panic 即 bug（fail-fast 于开发期）。
+    // 语法注册失败只可能来自引擎与 tree-sitter 依赖版本不匹配。
     parser
         .set_language(&lang.tree_sitter_language())
-        .expect("tree-sitter grammar registration failed");
+        .map_err(|error| ScanError::Parser(format!("{} 语法注册失败：{error}", lang.as_str())))?;
     // 解析与 AST 规则/证据使用同一份文本：非 UTF-8 字节先做 lossy 归一，
     // 避免 tree-sitter 字节偏移与查询文本偏移错位导致静默漏报。
     let source = String::from_utf8_lossy(bytes).into_owned();
     let tree = parser
         .parse(source.as_bytes(), None)
-        .expect("parser returned None");
+        .ok_or_else(|| ScanError::Parser(format!("{} 解析被 tree-sitter 拒绝", lang.as_str())))?;
     let error_nodes = count_error_nodes(tree.root_node());
-    ParsedFile {
+    Ok(ParsedFile {
         tree,
         source,
         error_nodes,
-    }
+    })
 }
 
 /// 统计 ERROR/缺失节点数（用于 ParseError 事件与 degraded 标记）。

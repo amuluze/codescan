@@ -201,7 +201,7 @@ mod tests {
     }
 
     fn facts_for(rule: &TaintRule, lang: Language, path: &str, source: &str) -> FileFacts {
-        let parsed = crate::language::parse(lang, source.as_bytes());
+        let parsed = crate::language::parse(lang, source.as_bytes()).expect("parse");
         extract_file(rule, lang, &parsed.tree, source, path, false, &[])
     }
 

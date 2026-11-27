@@ -3,7 +3,8 @@
 
 use crate::compile::InheritanceRule;
 use crate::language::Language;
-use crate::model::{Finding, Position, Span};
+use crate::metrics::{named_children, span_of};
+use crate::model::{Finding, Span};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use tree_sitter::Node;
 
@@ -267,28 +268,6 @@ fn type_refs(node: Node<'_>, source: &str) -> Vec<String> {
     refs.sort();
     refs.dedup();
     refs
-}
-
-fn named_children(node: Node<'_>) -> Vec<Node<'_>> {
-    let mut cursor = node.walk();
-    let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
-    drop(cursor);
-    children
-}
-
-fn span_of(node: Node<'_>) -> Span {
-    let start = node.start_position();
-    let end = node.end_position();
-    Span {
-        start: Position {
-            line: start.row + 1,
-            column: start.column + 1,
-        },
-        end: Position {
-            line: end.row + 1,
-            column: end.column + 1,
-        },
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

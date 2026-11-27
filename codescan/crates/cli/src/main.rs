@@ -6,7 +6,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use codescan_engine::baseline::Baseline;
 use codescan_engine::packs;
 use codescan_engine::scan::ScanOptions;
-use codescan_engine::{sarif, CancelToken, Engine, ScanReport, Severity};
+use codescan_engine::{fsutil, sarif, CancelToken, Engine, ScanReport, Severity};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -259,180 +259,196 @@ fn data_root() -> PathBuf {
         })
 }
 
+/// `--rules` 规则文件的读取上限。
+const MAX_RULES_FILE_BYTES: u64 = 16 * 1024 * 1024;
+/// 密钥文件（keygen 产物，base64 文本）的读取上限。
+const MAX_KEY_FILE_BYTES: u64 = 64 * 1024;
+/// `--sarif` 与 `--baseline` JSON 文件的读取上限。
+const MAX_JSON_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
 fn run_pack(args: PackArgs) -> Result<i32, String> {
     match args.command {
-        PackCommand::Install(args) => {
-            let info = packs::install(&data_root(), &args.source)?;
-            if args.json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&info)
-                        .map_err(|err| format!("JSON 序列化失败: {err}"))?
-                );
-            } else {
-                println!(
-                    "installed {}@{} rules={} path={}{}",
-                    info.id,
-                    info.version,
+        PackCommand::Install(args) => pack_install(args),
+        PackCommand::List(args) => pack_list(args),
+        PackCommand::Remove(args) => pack_remove(args),
+        PackCommand::Keygen(args) => pack_keygen(args),
+        PackCommand::Sign(args) => pack_sign(args),
+        PackCommand::Trust(args) => match args.command {
+            PackTrustCommand::Add(args) => pack_trust_add(args),
+            PackTrustCommand::List(args) => pack_trust_list(args),
+            PackTrustCommand::Remove(args) => pack_trust_remove(args),
+        },
+    }
+}
+
+/// `--json` 输出：pretty JSON；序列化失败按命令错误返回。
+fn print_json(json: Result<String, serde_json::Error>) -> Result<(), String> {
+    let text = json.map_err(|err| format!("JSON 序列化失败: {err}"))?;
+    println!("{text}");
+    Ok(())
+}
+
+/// 文本输出里 `signed_by` 的后缀（未签名时为空）。
+fn signed_by_suffix(signed_by: Option<&str>) -> String {
+    signed_by
+        .map(|key_id| format!(" signed_by={key_id}"))
+        .unwrap_or_default()
+}
+
+fn pack_install(args: PackInstallArgs) -> Result<i32, String> {
+    let info = packs::install(&data_root(), &args.source)?;
+    if args.json {
+        print_json(serde_json::to_string_pretty(&info))?;
+    } else {
+        println!(
+            "installed {}@{} rules={} path={}{}",
+            info.id,
+            info.version,
+            info.rules,
+            info.path,
+            signed_by_suffix(info.signed_by.as_deref())
+        );
+    }
+    Ok(0)
+}
+
+fn pack_list(args: PackListArgs) -> Result<i32, String> {
+    let infos = packs::list(&data_root());
+    if args.json {
+        print_json(serde_json::to_string_pretty(&infos))?;
+    } else if infos.is_empty() {
+        println!("no rule packs installed");
+    } else {
+        for info in &infos {
+            let status = match &info.error {
+                Some(error) => format!("error={error}"),
+                None => format!(
+                    "rules={} integrity=ok path={}{}",
                     info.rules,
                     info.path,
-                    info.signed_by
-                        .as_deref()
-                        .map(|key_id| format!(" signed_by={key_id}"))
-                        .unwrap_or_default()
-                );
-            }
+                    signed_by_suffix(info.signed_by.as_deref())
+                ),
+            };
+            println!("{}@{} {status}", info.id, info.version);
         }
-        PackCommand::List(args) => {
-            let infos = packs::list(&data_root());
-            if args.json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&infos)
-                        .map_err(|err| format!("JSON 序列化失败: {err}"))?
-                );
-            } else if infos.is_empty() {
-                println!("no rule packs installed");
-            } else {
-                for info in infos {
-                    match info.error {
-                        Some(error) => println!("{}@{} error={error}", info.id, info.version),
-                        None => println!(
-                            "{}@{} rules={} integrity=ok path={}{}",
-                            info.id,
-                            info.version,
-                            info.rules,
-                            info.path,
-                            info.signed_by
-                                .as_deref()
-                                .map(|key_id| format!(" signed_by={key_id}"))
-                                .unwrap_or_default()
-                        ),
-                    }
-                }
-            }
+    }
+    Ok(0)
+}
+
+fn pack_remove(args: PackRemoveArgs) -> Result<i32, String> {
+    packs::remove(&data_root(), &args.id, &args.version)?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "removed": { "id": args.id, "version": args.version }
+            })
+        );
+    } else {
+        println!("removed {}@{}", args.id, args.version);
+    }
+    Ok(0)
+}
+
+fn pack_keygen(args: PackKeygenArgs) -> Result<i32, String> {
+    if args.out.join("private.key").exists() || args.out.join("public.key").exists() {
+        return Err(format!("密钥文件已存在：{}", args.out.display()));
+    }
+    let (private, public) = packs::generate_keypair()?;
+    std::fs::create_dir_all(&args.out).map_err(|error| error.to_string())?;
+    let private_path = args.out.join("private.key");
+    let public_path = args.out.join("public.key");
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&private_path)
+            .map_err(|error| error.to_string())?;
+        file.write_all(format!("{private}\n").as_bytes())
+            .map_err(|error| error.to_string())?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&private_path, format!("{private}\n"))
+            .map_err(|error| error.to_string())?;
+    }
+    std::fs::write(&public_path, format!("{public}\n"))
+        .map_err(|error| error.to_string())?;
+    let public_bytes = packs::parse_public_key(&public)?;
+    let key_id = packs::public_key_id(&public_bytes)?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "key_id": key_id,
+                "private_key": private_path.to_string_lossy(),
+                "public_key": public_path.to_string_lossy(),
+            })
+        );
+    } else {
+        println!("generated key_id={key_id}");
+        println!("private_key={}", private_path.display());
+        println!("public_key={}", public_path.display());
+    }
+    Ok(0)
+}
+
+fn pack_sign(args: PackSignArgs) -> Result<i32, String> {
+    let private = fsutil::read_to_string_limited(&args.key, MAX_KEY_FILE_BYTES)
+        .map_err(|error| format!("读取私钥失败 {}: {error}", args.key.display()))?;
+    let signature = packs::sign_pack(&args.source, &private)?;
+    if args.json {
+        print_json(serde_json::to_string_pretty(&signature))?;
+    } else {
+        println!(
+            "signed {} key_id={}",
+            args.source.display(),
+            signature.key_id
+        );
+    }
+    Ok(0)
+}
+
+fn pack_trust_add(args: PackTrustAddArgs) -> Result<i32, String> {
+    let text = fsutil::read_to_string_limited(&args.public_key, MAX_KEY_FILE_BYTES)
+        .map_err(|error| format!("读取公钥失败 {}: {error}", args.public_key.display()))?;
+    let public_key = packs::parse_public_key(&text)?;
+    let key = packs::trust_key(&data_root(), &public_key)?;
+    if args.json {
+        print_json(serde_json::to_string_pretty(&key))?;
+    } else {
+        println!("trusted key_id={} path={}", key.key_id, key.path);
+    }
+    Ok(0)
+}
+
+fn pack_trust_list(args: PackTrustListArgs) -> Result<i32, String> {
+    let keys = packs::trusted_keys(&data_root())?;
+    if args.json {
+        print_json(serde_json::to_string_pretty(&keys))?;
+    } else if keys.is_empty() {
+        println!("no trusted keys");
+    } else {
+        for key in keys {
+            println!("{}", key.key_id);
         }
-        PackCommand::Remove(args) => {
-            packs::remove(&data_root(), &args.id, &args.version)?;
-            if args.json {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "removed": { "id": args.id, "version": args.version }
-                    })
-                );
-            } else {
-                println!("removed {}@{}", args.id, args.version);
-            }
-        }
-        PackCommand::Keygen(args) => {
-            if args.out.join("private.key").exists() || args.out.join("public.key").exists() {
-                return Err(format!("密钥文件已存在：{}", args.out.display()));
-            }
-            let (private, public) = packs::generate_keypair()?;
-            std::fs::create_dir_all(&args.out).map_err(|error| error.to_string())?;
-            let private_path = args.out.join("private.key");
-            let public_path = args.out.join("public.key");
-            #[cfg(unix)]
-            {
-                use std::io::Write as _;
-                use std::os::unix::fs::OpenOptionsExt;
-                let mut file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .open(&private_path)
-                    .map_err(|error| error.to_string())?;
-                file.write_all(format!("{private}\n").as_bytes())
-                    .map_err(|error| error.to_string())?;
-            }
-            #[cfg(not(unix))]
-            {
-                std::fs::write(&private_path, format!("{private}\n"))
-                    .map_err(|error| error.to_string())?;
-            }
-            std::fs::write(&public_path, format!("{public}\n"))
-                .map_err(|error| error.to_string())?;
-            let public_bytes = packs::parse_public_key(&public)?;
-            let key_id = packs::public_key_id(&public_bytes)?;
-            if args.json {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "key_id": key_id,
-                        "private_key": private_path.to_string_lossy(),
-                        "public_key": public_path.to_string_lossy(),
-                    })
-                );
-            } else {
-                println!("generated key_id={key_id}");
-                println!("private_key={}", private_path.display());
-                println!("public_key={}", public_path.display());
-            }
-        }
-        PackCommand::Sign(args) => {
-            let private = std::fs::read_to_string(&args.key)
-                .map_err(|error| format!("读取私钥失败 {}: {error}", args.key.display()))?;
-            let signature = packs::sign_pack(&args.source, &private)?;
-            if args.json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&signature)
-                        .map_err(|error| format!("JSON 序列化失败: {error}"))?
-                );
-            } else {
-                println!(
-                    "signed {} key_id={}",
-                    args.source.display(),
-                    signature.key_id
-                );
-            }
-        }
-        PackCommand::Trust(args) => match args.command {
-            PackTrustCommand::Add(args) => {
-                let text = std::fs::read_to_string(&args.public_key).map_err(|error| {
-                    format!("读取公钥失败 {}: {error}", args.public_key.display())
-                })?;
-                let public_key = packs::parse_public_key(&text)?;
-                let key = packs::trust_key(&data_root(), &public_key)?;
-                if args.json {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&key)
-                            .map_err(|error| format!("JSON 序列化失败: {error}"))?
-                    );
-                } else {
-                    println!("trusted key_id={} path={}", key.key_id, key.path);
-                }
-            }
-            PackTrustCommand::List(args) => {
-                let keys = packs::trusted_keys(&data_root())?;
-                if args.json {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&keys)
-                            .map_err(|error| format!("JSON 序列化失败: {error}"))?
-                    );
-                } else if keys.is_empty() {
-                    println!("no trusted keys");
-                } else {
-                    for key in keys {
-                        println!("{}", key.key_id);
-                    }
-                }
-            }
-            PackTrustCommand::Remove(args) => {
-                packs::untrust_key(&data_root(), &args.key_id)?;
-                if args.json {
-                    println!(
-                        "{}",
-                        serde_json::json!({ "untrusted": args.key_id })
-                    );
-                } else {
-                    println!("untrusted {}", args.key_id);
-                }
-            }
-        },
+    }
+    Ok(0)
+}
+
+fn pack_trust_remove(args: PackTrustRemoveArgs) -> Result<i32, String> {
+    packs::untrust_key(&data_root(), &args.key_id)?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({ "untrusted": args.key_id })
+        );
+    } else {
+        println!("untrusted {}", args.key_id);
     }
     Ok(0)
 }
@@ -440,7 +456,7 @@ fn run_pack(args: PackArgs) -> Result<i32, String> {
 // ---------- GitHub Code Scanning 上传（v6.1） ----------
 
 fn run_github_upload(args: GithubUploadArgs) -> Result<i32, String> {
-    let sarif_bytes = std::fs::read(&args.sarif)
+    let sarif_bytes = fsutil::read_bytes_limited(&args.sarif, MAX_JSON_FILE_BYTES)
         .map_err(|err| format!("读取 SARIF 失败 {}: {err}", args.sarif.display()))?;
     let value: serde_json::Value =
         serde_json::from_slice(&sarif_bytes).map_err(|err| format!("SARIF 解析失败: {err}"))?;
@@ -637,7 +653,7 @@ fn build_engine(rules: Option<&Path>) -> Result<Engine, String> {
             if !path.is_file() {
                 return Err(format!("规则文件不存在: {}", path.display()));
             }
-            let yaml = std::fs::read_to_string(path)
+            let yaml = fsutil::read_to_string_limited(path, MAX_RULES_FILE_BYTES)
                 .map_err(|err| format!("读取规则文件失败 {}: {err}", path.display()))?;
             Some(yaml)
         }
@@ -663,7 +679,7 @@ fn load_baseline(path: Option<&Path>) -> Result<Option<Baseline>, String> {
     if !path.is_file() {
         return Err(format!("基线文件不存在: {}", path.display()));
     }
-    let raw = std::fs::read_to_string(path)
+    let raw = fsutil::read_to_string_limited(path, MAX_JSON_FILE_BYTES)
         .map_err(|err| format!("读取基线失败 {}: {err}", path.display()))?;
     let baseline = serde_json::from_str(&raw)
         .map_err(|err| format!("基线解析失败 {}: {err}", path.display()))?;

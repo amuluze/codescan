@@ -13,6 +13,10 @@ use std::path::{Component, Path, PathBuf};
 const TRUSTED_KEYS_DIR: &str = "trusted-keys";
 const SIGNATURE_FILE: &str = ".signature";
 const SIGNATURE_ALGORITHM: &str = "ed25519";
+/// 规则包内文件（pack.yaml / 规则文件 / 签名 / 完整性标记）与自定义规则文件的读取上限。
+const MAX_RULE_FILE_BYTES: u64 = 1024 * 1024;
+/// 信任公钥文件的读取上限（Ed25519 公钥为 32 字节）。
+const MAX_KEY_FILE_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -148,7 +152,7 @@ fn validate_manifest(manifest: &PackManifest) -> Result<(), String> {
 
 fn read_manifest(dir: &Path) -> Result<PackManifest, String> {
     let path = dir.join("pack.yaml");
-    let text = std::fs::read_to_string(&path)
+    let text = crate::fsutil::read_to_string_limited(&path, MAX_RULE_FILE_BYTES)
         .map_err(|error| format!("读取 {} 失败：{error}", path.display()))?;
     let manifest: PackManifest = serde_yaml::from_str(&text)
         .map_err(|error| format!("解析 {} 失败：{error}", path.display()))?;
@@ -160,7 +164,7 @@ fn read_rule_values(dir: &Path, manifest: &PackManifest) -> Result<Vec<serde_yam
     let mut rules = Vec::new();
     for relative in &manifest.rules {
         let path = dir.join(relative);
-        let text = std::fs::read_to_string(&path)
+        let text = crate::fsutil::read_to_string_limited(&path, MAX_RULE_FILE_BYTES)
             .map_err(|error| format!("读取 {} 失败：{error}", path.display()))?;
         let value: serde_yaml::Value = serde_yaml::from_str(&text)
             .map_err(|error| format!("解析 {} 失败：{error}", path.display()))?;
@@ -179,12 +183,12 @@ fn read_rule_values(dir: &Path, manifest: &PackManifest) -> Result<Vec<serde_yam
 }
 
 fn pack_content_hash(dir: &Path, manifest: &PackManifest) -> Result<String, String> {
-    let mut content = std::fs::read_to_string(dir.join("pack.yaml"))
+    let mut content = crate::fsutil::read_to_string_limited(&dir.join("pack.yaml"), MAX_RULE_FILE_BYTES)
         .map_err(|error| format!("读取 pack.yaml 失败：{error}"))?;
     for relative in &manifest.rules {
         content.push('\0');
         content.push_str(
-            &std::fs::read_to_string(dir.join(relative))
+            &crate::fsutil::read_to_string_limited(&dir.join(relative), MAX_RULE_FILE_BYTES)
                 .map_err(|error| format!("读取 {relative} 失败：{error}"))?,
         );
     }
@@ -192,7 +196,7 @@ fn pack_content_hash(dir: &Path, manifest: &PackManifest) -> Result<String, Stri
 }
 
 fn read_integrity(dir: &Path) -> Option<String> {
-    std::fs::read_to_string(dir.join(".integrity"))
+    crate::fsutil::read_to_string_limited(&dir.join(".integrity"), MAX_RULE_FILE_BYTES)
         .ok()
         .map(|value| value.trim().to_string())
 }
@@ -266,7 +270,7 @@ fn load_trusted_keys(data_root: &Path) -> Result<Vec<TrustedKey>, String> {
         {
             continue;
         }
-        let public_key = std::fs::read(entry.path()).map_err(|error| {
+        let public_key = crate::fsutil::read_bytes_limited(&entry.path(), MAX_KEY_FILE_BYTES).map_err(|error| {
             format!("读取信任公钥失败 {}：{error}", entry.path().display())
         })?;
         let key_id = public_key_id(&public_key).map_err(|error| {
@@ -324,7 +328,8 @@ fn read_signature(dir: &Path) -> Result<Option<PackSignature>, String> {
         return Ok(None);
     }
     let text =
-        std::fs::read_to_string(&path).map_err(|error| format!("读取签名失败：{error}"))?;
+        crate::fsutil::read_to_string_limited(&path, MAX_RULE_FILE_BYTES)
+            .map_err(|error| format!("读取签名失败：{error}"))?;
     let signature: PackSignature =
         serde_json::from_str(&text).map_err(|error| format!("签名文件解析失败：{error}"))?;
     if signature.algorithm != SIGNATURE_ALGORITHM {
@@ -499,7 +504,7 @@ fn custom_rule_values(data_root: &Path) -> Result<Vec<serde_yaml::Value>, String
     if !path.is_file() {
         return Ok(Vec::new());
     }
-    let text = std::fs::read_to_string(&path)
+    let text = crate::fsutil::read_to_string_limited(&path, MAX_RULE_FILE_BYTES)
         .map_err(|error| format!("读取 {} 失败：{error}", path.display()))?;
     let value: serde_yaml::Value =
         serde_yaml::from_str(&text).map_err(|error| format!("自定义规则解析失败：{error}"))?;
@@ -581,10 +586,17 @@ pub fn install(data_root: &Path, source: &Path) -> Result<RulePackInfo, String> 
         std::fs::rename(&temp, &target).map_err(|error| error.to_string())?;
         Ok(signed_by)
     })();
-    if result.is_err() {
-        let _ = std::fs::remove_dir_all(&temp);
-    }
-    let signed_by = result?;
+    let signed_by = match result {
+        Ok(signed_by) => signed_by,
+        Err(error) => {
+            // 安装失败后清理临时目录；清理失败只留下磁盘残留，附加到原错误便于排查。
+            let cleanup = std::fs::remove_dir_all(&temp)
+                .err()
+                .map(|cleanup_error| format!("；清理临时目录 {} 失败：{cleanup_error}", temp.display()))
+                .unwrap_or_default();
+            return Err(format!("{error}{cleanup}"));
+        }
+    };
     Ok(RulePackInfo {
         id: manifest.id,
         version: manifest.version,

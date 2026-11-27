@@ -383,13 +383,15 @@ fn ignore_sources_and_defaults() {
 #[test]
 fn text_rules_scan_hidden_and_unknown_text_files() {
     let dir = tempfile::tempdir().unwrap();
+    // 假密钥运行时拼出：源码里不出现会被 text/aws-access-key 命中的完整字面量。
+    let fake_key = format!("AKIA{}", "A".repeat(16));
     write_file(
         dir.path(),
         ".env",
-        "AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP\n",
+        &format!("AWS_ACCESS_KEY_ID={fake_key}\n"),
     );
     write_file(dir.path(), ".hidden/app.ts", "// TODO: hidden debt\n");
-    write_file(dir.path(), "config.yaml", "token: AKIAABCDEFGHIJKLMNOP\n");
+    write_file(dir.path(), "config.yaml", &format!("token: {fake_key}\n"));
     write_file(dir.path(), ".git/secret.ts", "// TODO: vcs metadata\n");
 
     let report = scan_root(dir.path());

@@ -108,6 +108,8 @@ impl ScanEvent {
 pub enum ScanError {
     Cancelled,
     Io(std::io::Error),
+    /// 解析器无法工作（语法注册失败或 tree-sitter 拒绝解析）；携带语言与原因。
+    Parser(String),
 }
 
 impl std::fmt::Display for ScanError {
@@ -115,6 +117,7 @@ impl std::fmt::Display for ScanError {
         match self {
             ScanError::Cancelled => write!(f, "扫描已取消"),
             ScanError::Io(e) => write!(f, "IO 错误：{e}"),
+            ScanError::Parser(message) => write!(f, "解析器错误：{message}"),
         }
     }
 }

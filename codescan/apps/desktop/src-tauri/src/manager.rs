@@ -54,6 +54,16 @@ struct ActiveScan {
     token: Arc<CancelToken>,
 }
 
+/// 活动扫描登记的 RAII 守卫：离开作用域（含 panic 展开）时清除登记，
+/// 扫描线程异常退出不会让应用永久停在「已有扫描在进行」。
+struct ActiveRegistration(Arc<Mutex<Option<ActiveScan>>>);
+
+impl Drop for ActiveRegistration {
+    fn drop(&mut self) {
+        *crate::lock_recovering(&self.0) = None;
+    }
+}
+
 impl ScanManager {
     pub fn new(store: Arc<Mutex<Store>>) -> ScanManager {
         ScanManager {
@@ -72,14 +82,11 @@ impl ScanManager {
         self
     }
 
+    /// 取消当前活动扫描；没有活动扫描时什么也不做。
     pub fn cancel_active(&self) {
-        if let Some(active) = self.active.lock().unwrap().as_ref() {
+        if let Some(active) = crate::lock_recovering(&self.active).as_ref() {
             active.token.cancel();
         }
-    }
-
-    pub fn is_busy(&self) -> bool {
-        self.active.lock().unwrap().is_some()
     }
 
     /// 同步执行一次完整扫描（供命令层 spawn_blocking 与无头测试复用）。
@@ -93,15 +100,14 @@ impl ScanManager {
     ) -> Result<ScanOutcome, ManagerError> {
         let token = Arc::new(CancelToken::new());
         {
-            let mut active = self.active.lock().unwrap();
+            let mut active = crate::lock_recovering(&self.active);
             if active.is_some() {
                 return Err(ManagerError::Busy);
             }
             *active = Some(ActiveScan { token });
         }
-        let result = self.run_scan_inner(root, custom_rules_yaml, packs, progress);
-        *self.active.lock().unwrap() = None;
-        result
+        let _registration = ActiveRegistration(self.active.clone());
+        self.run_scan_inner(root, custom_rules_yaml, packs, progress)
     }
 
     /// 按扫描相同的忽略规则列出工作区文件（LLM 审查等只读消费者使用）。
@@ -134,7 +140,7 @@ impl ScanManager {
         progress: &(dyn Fn(codescan_engine::Progress) + Sync),
     ) -> Result<ScanOutcome, ManagerError> {
         let token = {
-            let guard = self.active.lock().unwrap();
+            let guard = crate::lock_recovering(&self.active);
             guard
                 .as_ref()
                 .map(|a| a.token.clone())
@@ -151,10 +157,7 @@ impl ScanManager {
         cancel: &CancelToken,
         progress: &(dyn Fn(codescan_engine::Progress) + Sync),
     ) -> Result<ScanOutcome, ManagerError> {
-        let disabled: HashSet<String> = self
-            .store
-            .lock()
-            .unwrap()
+        let disabled: HashSet<String> = crate::lock_recovering(&self.store)
             .disabled_rules()
             .unwrap_or_default()
             .into_iter()
@@ -188,7 +191,7 @@ impl ScanManager {
         })
         .to_string();
 
-        let scan_id = self.store.lock().unwrap().insert_scan(
+        let scan_id = crate::lock_recovering(&self.store).insert_scan(
             &root.to_string_lossy(),
             &report,
             duration_ms,

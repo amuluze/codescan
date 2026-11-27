@@ -7,6 +7,7 @@
 pub mod baseline;
 pub mod compile;
 pub mod fingerprint;
+pub mod fsutil;
 pub mod language;
 pub mod metrics;
 pub mod model;
