@@ -17,4 +17,10 @@ public class WeakDigest {
         MessageDigest md = MessageDigest.getInstance("SHA-256");
         return md.digest(data);
     }
+
+    public static byte[] qualified(byte[] data) throws Exception {
+        // ruleid: java/weak-message-digest
+        java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
+        return md.digest(data);
+    }
 }

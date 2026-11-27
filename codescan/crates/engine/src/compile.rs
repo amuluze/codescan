@@ -12,6 +12,11 @@ pub struct AstRule {
     pub inside_queries: Vec<Query>,
     /// (捕获名, 正则)：该捕获的文本必须匹配正则才保留命中。
     pub metavariables: Vec<(String, Regex)>,
+    /// 可选导入条件：文件 import 声明至少命中一条正则。
+    pub imports: Vec<Regex>,
+    /// 允许以导入别名满足 metavariable 的原始符号名。
+    pub imported_symbols: Vec<String>,
+    pub no_shadow: bool,
 }
 
 pub struct TextRule {
@@ -31,6 +36,17 @@ pub struct TaintRule {
     pub source_queries: Vec<Query>,
     pub sink_queries: Vec<Query>,
     pub sanitizer_queries: Vec<Query>,
+    /// 可选导入条件：文件 import 声明至少命中一条正则。
+    pub imports: Vec<Regex>,
+}
+
+/// 类型继承规则（v2 类型层）：目标类型 + 方法名 + 可选空实现/间接实现约束。
+pub struct InheritanceRule {
+    pub spec: RuleSpec,
+    pub target: String,
+    pub methods: Vec<String>,
+    pub empty_only: bool,
+    pub indirect_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,11 +71,89 @@ impl MetricKind {
     }
 }
 
+/// @match 捕获决定发现 span；缺失即规则无法产出可定位发现。
+fn query_has_match(query: &Query) -> bool {
+    query.capture_names().contains(&"match")
+}
+
+fn compile_metric(spec: &RuleSpec, metric: &str) -> Result<MetricRule, Vec<RuleError>> {
+    let Some(kind) = MetricKind::parse(metric) else {
+        return Err(vec![RuleError {
+            rule_id: spec.id.clone(),
+            field: "metric".into(),
+            message: format!("未知度量 {metric:?}"),
+        }]);
+    };
+    let allowed: &[&str] = match kind {
+        MetricKind::CyclomaticComplexity | MetricKind::FunctionLength | MetricKind::NestingDepth => {
+            &["threshold"]
+        }
+        MetricKind::DuplicateBlock => &["window", "min_occurrences"],
+        MetricKind::UnreachableCode => &[],
+    };
+    let mut errors = Vec::new();
+    for (name, value) in &spec.options {
+        if !allowed.contains(&name.as_str()) {
+            errors.push(RuleError {
+                rule_id: spec.id.clone(),
+                field: "options".into(),
+                message: format!("度量 {metric} 不支持 option {name:?}"),
+            });
+            continue;
+        }
+        if !value.is_finite() || *value < 0.0 {
+            errors.push(RuleError {
+                rule_id: spec.id.clone(),
+                field: "options".into(),
+                message: format!("option {name} 必须是非负有限数"),
+            });
+        }
+    }
+    if kind == MetricKind::DuplicateBlock {
+        let window = spec
+            .options
+            .iter()
+            .find(|(name, _)| name == "window")
+            .map(|(_, value)| *value)
+            .unwrap_or(10.0);
+        if window < 1.0 {
+            errors.push(RuleError {
+                rule_id: spec.id.clone(),
+                field: "options.window".into(),
+                message: "window 必须 ≥ 1".into(),
+            });
+        }
+        let min_occurrences = spec
+            .options
+            .iter()
+            .find(|(name, _)| name == "min_occurrences")
+            .map(|(_, value)| *value)
+            .unwrap_or(2.0);
+        if min_occurrences < 2.0 {
+            errors.push(RuleError {
+                rule_id: spec.id.clone(),
+                field: "options.min_occurrences".into(),
+                message: "min_occurrences 必须 ≥ 2".into(),
+            });
+        }
+    }
+    if errors.is_empty() {
+        Ok(MetricRule {
+            spec: clone_spec(spec),
+            kind,
+            options: spec.options.clone(),
+        })
+    } else {
+        Err(errors)
+    }
+}
+
 pub enum CompiledRule {
     Ast(AstRule),
     Text(TextRule),
     Metric(MetricRule),
     Taint(TaintRule),
+    Inheritance(InheritanceRule),
 }
 
 pub fn compile(specs: Vec<RuleSpec>) -> Result<Vec<CompiledRule>, Vec<RuleError>> {
@@ -72,12 +166,13 @@ pub fn compile(specs: Vec<RuleSpec>) -> Result<Vec<CompiledRule>, Vec<RuleError>
             spec.text.as_deref(),
             spec.metric.as_deref(),
             spec.taint.as_ref(),
+            spec.inheritance.as_ref(),
         ) {
-            (Some(pattern), None, None, None) => match compile_ast(&spec, pattern) {
+            (Some(pattern), None, None, None, None) => match compile_ast(&spec, pattern) {
                 Ok(rule) => compiled.push(CompiledRule::Ast(rule)),
                 Err(mut errs) => errors.append(&mut errs),
             },
-            (None, Some(text), None, None) => match Regex::new(text) {
+            (None, Some(text), None, None, None) => match Regex::new(text) {
                 Ok(regex) => compiled.push(CompiledRule::Text(TextRule {
                     spec: clone_spec(&spec),
                     regex,
@@ -88,27 +183,28 @@ pub fn compile(specs: Vec<RuleSpec>) -> Result<Vec<CompiledRule>, Vec<RuleError>
                     message: e.to_string(),
                 }),
             },
-            (None, None, Some(metric), None) => match MetricKind::parse(metric) {
-                Some(kind) => compiled.push(CompiledRule::Metric(MetricRule {
-                    spec: clone_spec(&spec),
-                    kind,
-                    options: spec.options.clone(),
-                })),
-                None => errors.push(RuleError {
-                    rule_id: spec.id.clone(),
-                    field: "metric".into(),
-                    message: format!("未知度量 {metric:?}"),
-                }),
+            (None, None, Some(metric), None, None) => match compile_metric(&spec, metric) {
+                Ok(rule) => compiled.push(CompiledRule::Metric(rule)),
+                Err(mut errs) => errors.append(&mut errs),
             },
-            (None, None, None, Some(taint)) => match compile_taint(&spec, taint) {
+            (None, None, None, Some(taint), None) => match compile_taint(&spec, taint) {
                 Ok(rule) => compiled.push(CompiledRule::Taint(rule)),
                 Err(mut errs) => errors.append(&mut errs),
             },
+            (None, None, None, None, Some(inheritance)) => {
+                compiled.push(CompiledRule::Inheritance(InheritanceRule {
+                    spec: spec.clone(),
+                    target: inheritance.target.clone(),
+                    methods: inheritance.methods.clone(),
+                    empty_only: inheritance.empty_only,
+                    indirect_only: inheritance.indirect_only,
+                }));
+            }
             _ => {
                 // 互斥性已在 rules.rs 校验；防御性兜底。
                 errors.push(RuleError {
                     rule_id: spec.id.clone(),
-                    field: "pattern|text|metric|taint".into(),
+                    field: "pattern|text|metric|taint|inheritance".into(),
                     message: "body 形态不合法".into(),
                 });
             }
@@ -143,7 +239,15 @@ fn compile_taint(
         queries
             .iter()
             .filter_map(|q| match Query::new(&ts_lang, q) {
-                Ok(query) => Some(query),
+                Ok(query) if query_has_match(&query) => Some(query),
+                Ok(_) => {
+                    errors.push(RuleError {
+                        rule_id: spec.id.clone(),
+                        field: field.into(),
+                        message: "taint query 必须包含 @match 捕获".into(),
+                    });
+                    None
+                }
                 Err(e) => {
                     errors.push(RuleError {
                         rule_id: spec.id.clone(),
@@ -159,6 +263,17 @@ fn compile_taint(
     let source_queries = compile_list(&taint.sources, "taint.sources", &mut errors);
     let sink_queries = compile_list(&taint.sinks, "taint.sinks", &mut errors);
     let sanitizer_queries = compile_list(&taint.sanitizers, "taint.sanitizers", &mut errors);
+    let mut imports = Vec::new();
+    for regex_src in &spec.imports {
+        match Regex::new(regex_src) {
+            Ok(regex) => imports.push(regex),
+            Err(error) => errors.push(RuleError {
+                rule_id: spec.id.clone(),
+                field: "imports".into(),
+                message: error.to_string(),
+            }),
+        }
+    }
 
     if errors.is_empty() {
         Ok(TaintRule {
@@ -166,6 +281,7 @@ fn compile_taint(
             source_queries,
             sink_queries,
             sanitizer_queries,
+            imports,
         })
     } else {
         Err(errors)
@@ -183,10 +299,15 @@ fn clone_spec(spec: &RuleSpec) -> RuleSpec {
         text: None,
         metric: None,
         taint: None,
+        inheritance: None,
         options: spec.options.clone(),
         filters_not: Vec::new(),
         filters_inside: Vec::new(),
         metavariables: Vec::new(),
+        imports: Vec::new(),
+        imported_symbols: Vec::new(),
+        no_shadow: false,
+        field_receiver: false,
     }
 }
 
@@ -214,11 +335,23 @@ fn compile_ast(spec: &RuleSpec, pattern: &str) -> Result<AstRule, Vec<RuleError>
             }])
         }
     };
+    if !query_has_match(&query) {
+        errors.push(RuleError {
+            rule_id: spec.id.clone(),
+            field: "pattern".into(),
+            message: "pattern 必须包含 @match 捕获".into(),
+        });
+    }
 
     let mut not_queries = Vec::new();
     for neg in &spec.filters_not {
         match Query::new(&ts_lang, neg) {
-            Ok(q) => not_queries.push(q),
+            Ok(q) if query_has_match(&q) => not_queries.push(q),
+            Ok(_) => errors.push(RuleError {
+                rule_id: spec.id.clone(),
+                field: "filters.not".into(),
+                message: "filter query 必须包含 @match 捕获".into(),
+            }),
             Err(e) => errors.push(RuleError {
                 rule_id: spec.id.clone(),
                 field: "filters.not".into(),
@@ -229,7 +362,12 @@ fn compile_ast(spec: &RuleSpec, pattern: &str) -> Result<AstRule, Vec<RuleError>
     let mut inside_queries = Vec::new();
     for ins in &spec.filters_inside {
         match Query::new(&ts_lang, ins) {
-            Ok(q) => inside_queries.push(q),
+            Ok(q) if query_has_match(&q) => inside_queries.push(q),
+            Ok(_) => errors.push(RuleError {
+                rule_id: spec.id.clone(),
+                field: "filters.inside".into(),
+                message: "filter query 必须包含 @match 捕获".into(),
+            }),
             Err(e) => errors.push(RuleError {
                 rule_id: spec.id.clone(),
                 field: "filters.inside".into(),
@@ -243,6 +381,18 @@ fn compile_ast(spec: &RuleSpec, pattern: &str) -> Result<AstRule, Vec<RuleError>
         .iter()
         .map(|n| n.to_string())
         .collect();
+    let mut imports = Vec::new();
+    for regex_src in &spec.imports {
+        match Regex::new(regex_src) {
+            Ok(re) => imports.push(re),
+            Err(e) => errors.push(RuleError {
+                rule_id: spec.id.clone(),
+                field: "imports".into(),
+                message: e.to_string(),
+            }),
+        }
+    }
+
     let mut metavariables = Vec::new();
     for (capture, regex_src) in &spec.metavariables {
         if !capture_names.iter().any(|n| n == capture) {
@@ -270,6 +420,9 @@ fn compile_ast(spec: &RuleSpec, pattern: &str) -> Result<AstRule, Vec<RuleError>
             not_queries,
             inside_queries,
             metavariables,
+            imports,
+            imported_symbols: spec.imported_symbols.clone(),
+            no_shadow: spec.no_shadow,
         })
     } else {
         Err(errors)

@@ -2,7 +2,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useScanStore } from "../stores/scanStore";
 import { useLlmStore } from "../stores/llmStore";
-import { CONFIDENCE_LABEL, DIMENSION_LABEL, SEVERITY_LABEL } from "../labels";
+import {
+  CONFIDENCE_LABEL,
+  DIMENSION_LABEL,
+  SEVERITY_LABEL,
+  formatScanEvent,
+} from "../labels";
 import { CopyButton } from "../components/CopyButton";
 import { DirectoryPicker } from "../components/DirectoryPicker";
 import { NoticeDialog } from "../components/NoticeDialog";
@@ -36,6 +41,7 @@ export function ScanView() {
     progress,
     error,
     stats,
+    events,
     setWorkspace,
     startScan,
     cancelScan,
@@ -237,6 +243,16 @@ export function ScanView() {
               <span>未知语言</span>
             </div>
           </div>
+          {events.length > 0 && (
+            <details className="detail-section" data-testid="scan-events">
+              <summary>扫描事件（{events.length}）</summary>
+              <ul>
+                {events.map((event, index) => (
+                  <li key={`${event.kind}-${index}`}>{formatScanEvent(event)}</li>
+                ))}
+              </ul>
+            </details>
+          )}
         </section>
       )}
 

@@ -1,3 +1,6 @@
+use std::fs as f;
+use std::{fs as nested_fs};
+
 fn load(path: &str) {
     // ruleid: rust/fs-read-unbounded
     let text = std::fs::read_to_string(path);
@@ -14,4 +17,16 @@ fn checked(path: &str) -> bool {
     let meta = std::fs::metadata(path);
     let _ = meta;
     true
+}
+
+fn alias_read(path: &str) {
+    // ruleid: rust/fs-read-unbounded
+    let text = f::read_to_string(path);
+    let _ = text;
+}
+
+fn nested_alias_read(path: &str) {
+    // ruleid: rust/fs-read-unbounded
+    let text = nested_fs::read_to_string(path);
+    let _ = text;
 }

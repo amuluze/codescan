@@ -88,6 +88,7 @@ impl ScanManager {
         &self,
         root: &std::path::Path,
         custom_rules_yaml: Option<&str>,
+        packs: &[codescan_engine::packs::PackSnapshot],
         progress: &(dyn Fn(codescan_engine::Progress) + Sync),
     ) -> Result<ScanOutcome, ManagerError> {
         let token = Arc::new(CancelToken::new());
@@ -98,7 +99,7 @@ impl ScanManager {
             }
             *active = Some(ActiveScan { token });
         }
-        let result = self.run_scan_inner(root, custom_rules_yaml, progress);
+        let result = self.run_scan_inner(root, custom_rules_yaml, packs, progress);
         *self.active.lock().unwrap() = None;
         result
     }
@@ -118,16 +119,18 @@ impl ScanManager {
         &self,
         root: &std::path::Path,
         custom_rules_yaml: Option<&str>,
+        packs: &[codescan_engine::packs::PackSnapshot],
         cancel: &CancelToken,
         progress: &(dyn Fn(codescan_engine::Progress) + Sync),
     ) -> Result<ScanOutcome, ManagerError> {
-        self.run_scan_with(root, custom_rules_yaml, cancel, progress)
+        self.run_scan_with(root, custom_rules_yaml, packs, cancel, progress)
     }
 
     fn run_scan_inner(
         &self,
         root: &std::path::Path,
         custom_rules_yaml: Option<&str>,
+        packs: &[codescan_engine::packs::PackSnapshot],
         progress: &(dyn Fn(codescan_engine::Progress) + Sync),
     ) -> Result<ScanOutcome, ManagerError> {
         let token = {
@@ -137,13 +140,14 @@ impl ScanManager {
                 .map(|a| a.token.clone())
                 .unwrap_or_else(|| Arc::new(CancelToken::new()))
         };
-        self.run_scan_with(root, custom_rules_yaml, &token, progress)
+        self.run_scan_with(root, custom_rules_yaml, packs, &token, progress)
     }
 
     fn run_scan_with(
         &self,
         root: &std::path::Path,
         custom_rules_yaml: Option<&str>,
+        packs: &[codescan_engine::packs::PackSnapshot],
         cancel: &CancelToken,
         progress: &(dyn Fn(codescan_engine::Progress) + Sync),
     ) -> Result<ScanOutcome, ManagerError> {
@@ -175,11 +179,21 @@ impl ScanManager {
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
 
+        // 历史快照：启用规则集 + 自定义规则内容哈希（Domain §6.1 可复现三元组）。
+        let ruleset_json = serde_json::json!({
+            "enabled_rules": engine.enabled_rule_ids(),
+            "custom_rules_sha256": custom_rules_yaml
+                .map(codescan_engine::fingerprint::content_hash),
+            "packs": packs,
+        })
+        .to_string();
+
         let scan_id = self.store.lock().unwrap().insert_scan(
             &root.to_string_lossy(),
             &report,
             duration_ms,
             started_at_ms,
+            &ruleset_json,
         )?;
         Ok(ScanOutcome { scan_id, report })
     }

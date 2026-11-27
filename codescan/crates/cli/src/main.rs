@@ -4,6 +4,7 @@
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use codescan_engine::baseline::Baseline;
+use codescan_engine::packs;
 use codescan_engine::scan::ScanOptions;
 use codescan_engine::{sarif, CancelToken, Engine, ScanReport, Severity};
 use std::collections::HashSet;
@@ -26,6 +27,128 @@ enum Command {
     Scan(ScanArgs),
     /// 上传 SARIF 到 GitHub Code Scanning（REST API）。
     GithubUpload(GithubUploadArgs),
+    /// 管理本地规则包。
+    Pack(PackArgs),
+}
+
+#[derive(Debug, Args)]
+struct PackArgs {
+    #[command(subcommand)]
+    command: PackCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum PackCommand {
+    /// 安装规则包目录。
+    Install(PackInstallArgs),
+    /// 列出已安装规则包。
+    List(PackListArgs),
+    /// 卸载指定规则包版本。
+    Remove(PackRemoveArgs),
+    /// 生成 Ed25519 密钥对。
+    Keygen(PackKeygenArgs),
+    /// 用私钥签名规则包目录（写入 .signature）。
+    Sign(PackSignArgs),
+    /// 管理信任公钥。
+    Trust(PackTrustArgs),
+}
+
+#[derive(Debug, Args)]
+struct PackInstallArgs {
+    /// 包含 pack.yaml 的规则包目录。
+    source: PathBuf,
+
+    /// 输出 JSON。
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct PackListArgs {
+    /// 输出 JSON。
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct PackRemoveArgs {
+    /// 规则包 id。
+    id: String,
+
+    /// 规则包版本。
+    version: String,
+
+    /// 输出 JSON。
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct PackKeygenArgs {
+    /// 输出目录；写入 private.key（PKCS#8 base64）与 public.key。
+    #[arg(long)]
+    out: PathBuf,
+
+    /// 输出 JSON。
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct PackSignArgs {
+    /// 包含 pack.yaml 的规则包目录。
+    source: PathBuf,
+
+    /// 私钥文件（keygen 生成的 private.key）。
+    #[arg(long)]
+    key: PathBuf,
+
+    /// 输出 JSON。
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct PackTrustArgs {
+    #[command(subcommand)]
+    command: PackTrustCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum PackTrustCommand {
+    /// 信任一个 Ed25519 公钥文件。
+    Add(PackTrustAddArgs),
+    /// 列出信任公钥。
+    List(PackTrustListArgs),
+    /// 移除信任公钥。
+    Remove(PackTrustRemoveArgs),
+}
+
+#[derive(Debug, Args)]
+struct PackTrustAddArgs {
+    /// public.key 文件（base64 Ed25519 公钥）。
+    public_key: PathBuf,
+
+    /// 输出 JSON。
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct PackTrustListArgs {
+    /// 输出 JSON。
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct PackTrustRemoveArgs {
+    /// 公钥 id（sha256 hex）。
+    key_id: String,
+
+    /// 输出 JSON。
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -119,7 +242,199 @@ fn run(cli: Cli) -> Result<i32, String> {
     match cli.command {
         Command::Scan(args) => run_scan(args),
         Command::GithubUpload(args) => run_github_upload(args),
+        Command::Pack(args) => run_pack(args),
     }
+}
+
+// ---------- 本地规则包 ----------
+
+fn data_root() -> PathBuf {
+    std::env::var_os("CODESCAN_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."));
+            home.join(".codescan")
+        })
+}
+
+fn run_pack(args: PackArgs) -> Result<i32, String> {
+    match args.command {
+        PackCommand::Install(args) => {
+            let info = packs::install(&data_root(), &args.source)?;
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&info)
+                        .map_err(|err| format!("JSON 序列化失败: {err}"))?
+                );
+            } else {
+                println!(
+                    "installed {}@{} rules={} path={}{}",
+                    info.id,
+                    info.version,
+                    info.rules,
+                    info.path,
+                    info.signed_by
+                        .as_deref()
+                        .map(|key_id| format!(" signed_by={key_id}"))
+                        .unwrap_or_default()
+                );
+            }
+        }
+        PackCommand::List(args) => {
+            let infos = packs::list(&data_root());
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&infos)
+                        .map_err(|err| format!("JSON 序列化失败: {err}"))?
+                );
+            } else if infos.is_empty() {
+                println!("no rule packs installed");
+            } else {
+                for info in infos {
+                    match info.error {
+                        Some(error) => println!("{}@{} error={error}", info.id, info.version),
+                        None => println!(
+                            "{}@{} rules={} integrity=ok path={}{}",
+                            info.id,
+                            info.version,
+                            info.rules,
+                            info.path,
+                            info.signed_by
+                                .as_deref()
+                                .map(|key_id| format!(" signed_by={key_id}"))
+                                .unwrap_or_default()
+                        ),
+                    }
+                }
+            }
+        }
+        PackCommand::Remove(args) => {
+            packs::remove(&data_root(), &args.id, &args.version)?;
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "removed": { "id": args.id, "version": args.version }
+                    })
+                );
+            } else {
+                println!("removed {}@{}", args.id, args.version);
+            }
+        }
+        PackCommand::Keygen(args) => {
+            if args.out.join("private.key").exists() || args.out.join("public.key").exists() {
+                return Err(format!("密钥文件已存在：{}", args.out.display()));
+            }
+            let (private, public) = packs::generate_keypair()?;
+            std::fs::create_dir_all(&args.out).map_err(|error| error.to_string())?;
+            let private_path = args.out.join("private.key");
+            let public_path = args.out.join("public.key");
+            #[cfg(unix)]
+            {
+                use std::io::Write as _;
+                use std::os::unix::fs::OpenOptionsExt;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&private_path)
+                    .map_err(|error| error.to_string())?;
+                file.write_all(format!("{private}\n").as_bytes())
+                    .map_err(|error| error.to_string())?;
+            }
+            #[cfg(not(unix))]
+            {
+                std::fs::write(&private_path, format!("{private}\n"))
+                    .map_err(|error| error.to_string())?;
+            }
+            std::fs::write(&public_path, format!("{public}\n"))
+                .map_err(|error| error.to_string())?;
+            let public_bytes = packs::parse_public_key(&public)?;
+            let key_id = packs::public_key_id(&public_bytes)?;
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "key_id": key_id,
+                        "private_key": private_path.to_string_lossy(),
+                        "public_key": public_path.to_string_lossy(),
+                    })
+                );
+            } else {
+                println!("generated key_id={key_id}");
+                println!("private_key={}", private_path.display());
+                println!("public_key={}", public_path.display());
+            }
+        }
+        PackCommand::Sign(args) => {
+            let private = std::fs::read_to_string(&args.key)
+                .map_err(|error| format!("读取私钥失败 {}: {error}", args.key.display()))?;
+            let signature = packs::sign_pack(&args.source, &private)?;
+            if args.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&signature)
+                        .map_err(|error| format!("JSON 序列化失败: {error}"))?
+                );
+            } else {
+                println!(
+                    "signed {} key_id={}",
+                    args.source.display(),
+                    signature.key_id
+                );
+            }
+        }
+        PackCommand::Trust(args) => match args.command {
+            PackTrustCommand::Add(args) => {
+                let text = std::fs::read_to_string(&args.public_key).map_err(|error| {
+                    format!("读取公钥失败 {}: {error}", args.public_key.display())
+                })?;
+                let public_key = packs::parse_public_key(&text)?;
+                let key = packs::trust_key(&data_root(), &public_key)?;
+                if args.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&key)
+                            .map_err(|error| format!("JSON 序列化失败: {error}"))?
+                    );
+                } else {
+                    println!("trusted key_id={} path={}", key.key_id, key.path);
+                }
+            }
+            PackTrustCommand::List(args) => {
+                let keys = packs::trusted_keys(&data_root())?;
+                if args.json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&keys)
+                            .map_err(|error| format!("JSON 序列化失败: {error}"))?
+                    );
+                } else if keys.is_empty() {
+                    println!("no trusted keys");
+                } else {
+                    for key in keys {
+                        println!("{}", key.key_id);
+                    }
+                }
+            }
+            PackTrustCommand::Remove(args) => {
+                packs::untrust_key(&data_root(), &args.key_id)?;
+                if args.json {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "untrusted": args.key_id })
+                    );
+                } else {
+                    println!("untrusted {}", args.key_id);
+                }
+            }
+        },
+    }
+    Ok(0)
 }
 
 // ---------- GitHub Code Scanning 上传（v6.1） ----------
@@ -329,7 +644,9 @@ fn build_engine(rules: Option<&Path>) -> Result<Engine, String> {
         None => None,
     };
 
-    let result = match custom.as_deref() {
+    let effective = packs::combined_rules(&data_root(), custom.as_deref())
+        .map_err(|err| format!("规则包加载失败: {err}"))?;
+    let result = match effective.as_deref() {
         Some(yaml) => Engine::with_rules(Some(yaml), &disabled),
         None => Engine::with_builtin(&disabled),
     };

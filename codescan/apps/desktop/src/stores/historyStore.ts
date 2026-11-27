@@ -1,7 +1,7 @@
 /** 扫描历史、基线与门禁差异。 */
 import { create } from "zustand";
-import { api, type ScanSummary } from "../platform";
-import type { Finding } from "../types";
+import { api, type ScanRuleset, type ScanSummary } from "../platform";
+import type { Finding, ScanEvent } from "../types";
 import type { BaselineInfo } from "../platform";
 
 type HistoryState = {
@@ -9,6 +9,8 @@ type HistoryState = {
   baseline: BaselineInfo | null;
   openScanId: number | null;
   openFindings: Finding[];
+  openEvents: ScanEvent[];
+  openRuleset: ScanRuleset | null;
   gateNew: Finding[] | null;
   loading: boolean;
   load: () => Promise<void>;
@@ -23,6 +25,8 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
   baseline: null,
   openScanId: null,
   openFindings: [],
+  openEvents: [],
+  openRuleset: null,
   gateNew: null,
   loading: false,
 
@@ -41,8 +45,18 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
   },
 
   async openScan(scanId) {
-    const findings = await api.getScan(scanId);
-    set({ openScanId: scanId, openFindings: findings, gateNew: null });
+    const [findings, events, ruleset] = await Promise.all([
+      api.getScan(scanId),
+      api.getScanEvents(scanId).catch(() => [] as ScanEvent[]),
+      api.getScanRuleset(scanId).catch(() => null),
+    ]);
+    set({
+      openScanId: scanId,
+      openFindings: findings,
+      openEvents: events,
+      openRuleset: ruleset,
+      gateNew: null,
+    });
     await get().refreshGate(scanId);
   },
 
@@ -56,7 +70,7 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
       scans,
       baseline,
       ...(state.openScanId === scanId
-        ? { openScanId: null, openFindings: [], gateNew: null }
+        ? { openScanId: null, openFindings: [], openEvents: [], openRuleset: null, gateNew: null }
         : {}),
     }));
   },

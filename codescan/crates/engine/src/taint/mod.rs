@@ -25,6 +25,7 @@ pub(crate) struct Endpoint {
     pub span: Span,
     pub name: Option<String>,
     pub text: String,
+    pub captures: Vec<(String, String)>,
 }
 
 pub(crate) fn collect_endpoints(
@@ -79,6 +80,18 @@ pub(crate) fn collect_endpoints(
             let text = source.get(sp..se).unwrap_or("").to_string();
             let identifier_like = kind.contains("identifier") || kind == "attribute";
             let name = identifier_like.then(|| text.clone());
+            let captures: Vec<(String, String)> = m
+                .captures()
+                .iter()
+                .map(|cap| {
+                    let name = names.get(cap.index as usize).cloned().unwrap_or_default();
+                    let text = source
+                        .get(cap.node.start_byte()..cap.node.end_byte())
+                        .unwrap_or("")
+                        .to_string();
+                    (name, text)
+                })
+                .collect();
             out.push(Endpoint {
                 start: sp,
                 end: se,
@@ -86,6 +99,7 @@ pub(crate) fn collect_endpoints(
                 span: span_of_bytes(sp, se, source),
                 name,
                 text,
+                captures,
             });
         }
     }
@@ -102,7 +116,7 @@ pub fn taint_findings(
     path: &str,
     degraded: bool,
 ) -> Vec<Finding> {
-    let facts = facts::extract_file(rule, lang, tree, source, path, degraded);
+    let facts = facts::extract_file(rule, lang, tree, source, path, degraded, &[]);
     analyze_project(rule, &[facts])
 }
 
@@ -188,7 +202,7 @@ mod tests {
 
     fn facts_for(rule: &TaintRule, lang: Language, path: &str, source: &str) -> FileFacts {
         let parsed = crate::language::parse(lang, source.as_bytes());
-        extract_file(rule, lang, &parsed.tree, source, path, false)
+        extract_file(rule, lang, &parsed.tree, source, path, false, &[])
     }
 
     fn analyze(rule: &TaintRule, files: &[(&str, Language, &str)]) -> Vec<Finding> {
@@ -230,6 +244,473 @@ mod tests {
     fn sanitizer_cuts_flow() {
         assert!(scan_py(INPUT_SOURCE, "def f():\n    v = int(input(\"x\"))\n    eval(v)\n")
             .is_empty());
+    }
+
+    #[test]
+    fn cross_function_field_write_propagates_to_caller() {
+        let rule = ts_param_rule();
+        let source = "function fill(o: any, v: string) {\n  o.value = v;\n}\nfunction f(input: string) {\n  const o: any = {};\n  fill(o, input);\n  eval(o.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert!(findings.iter().any(|f| f.span.start.line == 7), "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_field_write_through_local_alias() {
+        let rule = ts_param_rule();
+        let source = "function fill(o: any, v: string) {\n  const x = o;\n  x.value = v;\n}\nfunction f(input: string) {\n  const o: any = {};\n  fill(o, input);\n  eval(o.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert!(findings.iter().any(|f| f.span.start.line == 8), "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_nested_field_write_propagates() {
+        let rule = ts_param_rule();
+        let source = "function fill(o: any, v: string) {\n  o.inner.value = v;\n}\nfunction f(input: string) {\n  const o: any = { inner: {} };\n  fill(o, input);\n  eval(o.inner.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert!(findings.iter().any(|f| f.span.start.line == 7), "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_returned_object_identity_propagates() {
+        let rule = ts_param_rule();
+        let source = "function id(o: any) {\n  return o;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b = id(a);\n  b.value = input;\n  eval(a.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert!(findings.iter().any(|f| f.span.start.line == 8), "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_returned_field_identity_propagates() {
+        let rule = ts_param_rule();
+        let source = "function inner(o: any) {\n  return o.inner;\n}\nfunction f(input: string) {\n  const a: any = { inner: {} };\n  const b = inner(a);\n  b.value = input;\n  eval(a.inner.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert!(findings.iter().any(|f| f.span.start.line == 8), "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_conditional_return_aliases_both_branches() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any, flag: boolean) {\n  return flag ? a : b;\n}\nfunction f(input: string, flag: boolean) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b, flag);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|f| f.span.start.line == 9 || f.span.start.line == 10)
+                .count(),
+            2,
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn cross_function_nullish_return_aliases_both_branches() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any) {\n  return a ?? b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|f| f.span.start.line == 9 || f.span.start.line == 10)
+                .count(),
+            2,
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn cross_function_conditional_literal_branch_is_not_identity() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any, flag: boolean) {\n  return flag ? { ...a } : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b, true);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|f| f.span.start.line == 9 || f.span.start.line == 10)
+                .cloned()
+                .collect::<Vec<_>>()
+                .len(),
+            1,
+            "{findings:?}"
+        );
+        assert!(findings.iter().any(|f| f.span.start.line == 10), "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_true_condition_prunes_alternative_identity() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any) {\n  return true ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 9, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_false_condition_prunes_consequence_identity() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any) {\n  return false ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 10, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_nullish_literal_selects_right_branch() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any) {\n  return null ?? b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 10, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_const_condition_prunes_identity() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any) {\n  const flag = true;\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 10, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_constant_uses_value_at_expression_site() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any) {\n  let flag = true;\n  const c = flag ? a : b;\n  flag = false;\n  return c;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 12, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_reassigned_constant_prunes_latest_branch() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any) {\n  let flag = true;\n  flag = false;\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 12, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_const_nullish_prunes_identity() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any) {\n  const flag = null;\n  return flag ?? b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 11, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_if_else_same_constant_keeps_identity_branch() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any, cond: boolean) {\n  let flag;\n  if (cond) {\n    flag = true;\n  } else {\n    flag = true;\n  }\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b, true);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 15, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_if_else_different_constants_merges_to_unknown() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any, cond: boolean) {\n  let flag;\n  if (cond) {\n    flag = true;\n  } else {\n    flag = false;\n  }\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b, true);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|f| f.span.start.line == 15 || f.span.start.line == 16)
+                .count(),
+            2,
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn cross_function_if_without_else_merges_with_current_value() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any, cond: boolean) {\n  let flag = true;\n  if (cond) {\n    flag = false;\n  }\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b, true);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(
+            findings
+                .iter()
+                .filter(|f| f.span.start.line == 13 || f.span.start.line == 14)
+                .count(),
+            2,
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn cross_function_true_if_prunes_else_branch_constants() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any) {\n  let flag = true;\n  if (true) {\n    flag = false;\n  }\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 14, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_false_if_selects_else_branch_constants() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any) {\n  let flag;\n  if (false) {\n    flag = false;\n  } else {\n    flag = true;\n  }\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 15, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_while_may_skip_body_merges_to_unknown() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any, cond: boolean) {\n  let flag = true;\n  while (cond) {\n    flag = false;\n    break;\n  }\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b, false);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 2, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_while_same_constant_keeps_branch() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any, cond: boolean) {\n  let flag = true;\n  while (cond) {\n    flag = true;\n    break;\n  }\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b, true);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 14, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_do_while_applies_body_constant() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any, cond: boolean) {\n  let flag = true;\n  do {\n    flag = false;\n    break;\n  } while (cond);\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b, false);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 15, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_switch_different_cases_merge_to_unknown() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any, n: number) {\n  let flag;\n  switch (n) {\n    case 1: flag = true; break;\n    default: flag = false;\n  }\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b, 1);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 2, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_switch_same_cases_keep_branch() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any, n: number) {\n  let flag;\n  switch (n) {\n    case 1: flag = true; break;\n    default: flag = true;\n  }\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b, 1);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 14, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_try_catch_different_constants_merge_to_unknown() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any) {\n  let flag = true;\n  try {\n    flag = false;\n  } catch {\n    flag = true;\n  }\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 2, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_try_finally_applies_constant() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any) {\n  let flag = false;\n  try {\n    flag = true;\n  } finally {\n    flag = false;\n  }\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 16, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_switch_fallthrough_until_break() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any, n: number) {\n  let flag;\n  switch (n) {\n    case 1: flag = true;\n    case 2: flag = false; break;\n    default: flag = false;\n  }\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b, 1);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 16, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_do_while_break_is_path_sensitive() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any, cond: boolean) {\n  let flag = true;\n  do {\n    flag = false;\n    if (cond) break;\n    flag = true;\n  } while (false);\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b, true);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 2, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_do_while_continue_is_path_sensitive() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any, cond: boolean) {\n  let flag = true;\n  do {\n    flag = false;\n    if (cond) continue;\n    flag = true;\n  } while (false);\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b, true);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 2, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_labeled_break_exits_outer_loop() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any, cond: boolean) {\n  let flag = true;\n  outer: for (let i = 0; i < 1; i++) {\n    while (cond) {\n      flag = false;\n      break outer;\n    }\n    flag = true;\n  }\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b, true);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 2, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_labeled_continue_targets_outer_loop() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any, cond: boolean) {\n  let flag = true;\n  outer: for (let i = 0; i < 1; i++) {\n    while (cond) {\n      flag = false;\n      continue outer;\n    }\n    flag = true;\n  }\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b, true);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 2, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_labeled_block_break_skips_rest() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any) {\n  let flag = true;\n  block: {\n    flag = false;\n    break block;\n    flag = true;\n  }\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 16, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_labeled_continue_applies_next_iteration_state() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any) {\n  let flag = true;\n  outer: for (;;) {\n    if (flag) {\n      flag = false;\n      continue outer;\n    }\n    flag = true;\n    break outer;\n  }\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 18, "{findings:?}");
+    }
+
+    #[test]
+    fn labels_do_not_propagate_into_or_out_of_nested_functions() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any): any {\n  let flag = true;\n  outer: for (let i = 0; i < 1; i++) {\n    function inner() {\n      label: {\n        flag = false;\n        break label;\n      }\n    }\n    flag = true;\n    break outer;\n  }\n  return flag ? a : b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 20, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_conditional_field_write_respects_false_argument() {
+        let rule = ts_param_rule();
+        let source = "function maybe(o: any, v: string, cond: boolean) {\n  if (cond) {\n    o.value = v;\n  }\n}\nfunction f(input: string) {\n  const o: any = {};\n  maybe(o, input, false);\n  eval(o.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_conditional_field_write_applies_with_true_argument() {
+        let rule = ts_param_rule();
+        let source = "function maybe(o: any, v: string, cond: boolean) {\n  if (cond) {\n    o.value = v;\n  }\n}\nfunction f(input: string) {\n  const o: any = {};\n  maybe(o, input, true);\n  eval(o.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 9, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_unreachable_return_is_not_an_identity() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any) {\n  if (false) {\n    return a;\n  }\n  return b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 13, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_conditional_return_respects_false_argument() {
+        let rule = ts_param_rule();
+        let source = "function choose(a: any, b: any, cond: boolean) {\n  if (cond) {\n    return a;\n  }\n  return b;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b: any = {};\n  const c = choose(a, b, false);\n  c.value = input;\n  eval(a.value);\n  eval(b.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].span.start.line, 13, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_loop_guard_controls_field_effect() {
+        let rule = ts_param_rule();
+        let source = "function maybe(o: any, v: string, cond: boolean) {\n  while (cond) {\n    o.value = v;\n    break;\n  }\n}\nfunction f(input: string) {\n  const o: any = {};\n  maybe(o, input, false);\n  eval(o.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_loop_guard_allows_true_field_effect() {
+        let rule = ts_param_rule();
+        let source = "function maybe(o: any, v: string, cond: boolean) {\n  while (cond) {\n    o.value = v;\n    break;\n  }\n}\nfunction f(input: string) {\n  const o: any = {};\n  maybe(o, input, true);\n  eval(o.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_unreachable_call_does_not_apply_effect() {
+        let rule = ts_param_rule();
+        let source = "function fill(o: any, v: string) {\n  o.value = v;\n}\nfunction f(input: string) {\n  const o: any = {};\n  if (false) {\n    fill(o, input);\n  }\n  eval(o.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_switch_matched_case_applies_effect() {
+        let rule = ts_param_rule();
+        let source = "function fill(o: any, v: string) {\n  o.value = v;\n}\nfunction f(input: string, mode: number) {\n  const o: any = {};\n  switch (mode) {\n    case 1: fill(o, input); break;\n  }\n  eval(o.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+    }
+
+    #[test]
+    fn unreachable_sink_is_not_reported() {
+        let rule = ts_param_rule();
+        let source = "function f(input: string) {\n  if (false) {\n    eval(input);\n  }\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn unreachable_assignment_is_not_applied() {
+        let rule = ts_param_rule();
+        let source = "function f(input: string) {\n  const o: any = {};\n  if (false) {\n    o.value = input;\n  }\n  eval(o.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn compound_guard_blocks_false_effect() {
+        let rule = ts_param_rule();
+        let source = "function maybe(o: any, v: string, cond: boolean, other: boolean) {\n  if (cond && other) {\n    o.value = v;\n  }\n}\nfunction f(input: string) {\n  const o: any = {};\n  maybe(o, input, false, false);\n  eval(o.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn switch_case_guard_blocks_unmatched_effect() {
+        let rule = ts_param_rule();
+        let source = "function maybe(o: any, v: string, n: number) {\n  switch (n) {\n    case 1: o.value = v; break;\n  }\n}\nfunction f(input: string) {\n  const o: any = {};\n  maybe(o, input, 2);\n  eval(o.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn switch_case_guard_allows_matching_effect() {
+        let rule = ts_param_rule();
+        let source = "function maybe(o: any, v: string, n: number) {\n  switch (n) {\n    case 1: o.value = v; break;\n  }\n}\nfunction f(input: string) {\n  const o: any = {};\n  maybe(o, input, 1);\n  eval(o.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_clone_return_does_not_alias() {
+        let rule = ts_param_rule();
+        let source = "function clone(o: any) {\n  return { ...o };\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b = clone(a);\n  b.value = input;\n  eval(a.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_identity_plus_field_write_propagates() {
+        let rule = ts_param_rule();
+        let source = "function fill(o: any, v: string) {\n  o.value = v;\n}\nfunction id(o: any) {\n  return o;\n}\nfunction f(input: string) {\n  const a: any = {};\n  const b = id(a);\n  fill(b, input);\n  eval(a.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert!(findings.iter().any(|f| f.span.start.line == 11), "{findings:?}");
+    }
+
+    #[test]
+    fn cross_function_literal_field_write_stays_clean() {
+        let rule = ts_param_rule();
+        let source = "function fill(o: any, v: string) {\n  o.value = \"safe\";\n}\nfunction f(input: string) {\n  const o: any = {};\n  fill(o, input);\n  eval(o.value);\n}\n";
+        let findings = analyze(&rule, &[("f.ts", Language::TypeScript, source)]);
+        assert!(findings.is_empty(), "{findings:?}");
     }
 
     #[test]

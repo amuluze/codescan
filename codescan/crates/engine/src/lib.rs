@@ -10,10 +10,12 @@ pub mod fingerprint;
 pub mod language;
 pub mod metrics;
 pub mod model;
+pub mod packs;
 pub mod rules;
 pub mod sarif;
 pub mod scan;
 pub mod taint;
+pub mod types;
 
 pub use model::{
     CancelToken, Dimension, Finding, Position, Progress, ScanError, ScanEvent, ScanReport,

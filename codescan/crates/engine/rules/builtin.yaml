@@ -14,7 +14,8 @@ rules:
     message: 函数圈复杂度过高（启发式：决策点计数）
     metric: cyclomatic-complexity
     # 依据真实仓库分布（axiom：违规集 p50=23/p90=57）：默认取 25，
-    # 只标记明确偏高的函数；复杂仓库可在自定义规则中覆盖。
+    # 只标记明确偏高的函数；复杂仓库可追加自定义 metric 规则，
+    # 或禁用本条后用自定义阈值规则替换。
     options:
       threshold: 25
   - id: metric/function-length

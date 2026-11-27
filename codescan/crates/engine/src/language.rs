@@ -107,11 +107,16 @@ pub fn parse(lang: Language, bytes: &[u8]) -> ParsedFile {
     parser
         .set_language(&lang.tree_sitter_language())
         .expect("tree-sitter grammar registration failed");
-    let tree = parser.parse(bytes, None).expect("parser returned None");
+    // 解析与 AST 规则/证据使用同一份文本：非 UTF-8 字节先做 lossy 归一，
+    // 避免 tree-sitter 字节偏移与查询文本偏移错位导致静默漏报。
+    let source = String::from_utf8_lossy(bytes).into_owned();
+    let tree = parser
+        .parse(source.as_bytes(), None)
+        .expect("parser returned None");
     let error_nodes = count_error_nodes(tree.root_node());
     ParsedFile {
         tree,
-        source: String::from_utf8_lossy(bytes).into_owned(),
+        source,
         error_nodes,
     }
 }

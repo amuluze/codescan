@@ -24,6 +24,14 @@ func bump(base, delta int) (int, error) {
 	return base + delta, nil
 }
 
+func discardLiteral() {
+	_ = 1
+}
+
+func discardBoth(path string) {
+	_, _ = os.ReadFile(path)
+}
+
 func parse(s string) (int, string) {
 	n, err := strconv.Atoi(s)
 	if err != nil {

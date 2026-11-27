@@ -11,6 +11,11 @@ rules:
     pattern: |
       (call_expression
         function: (identifier) @fn) @match
+
+      (call_expression
+        function: (member_expression
+          object: (identifier) @obj (#match? @obj "^(window|globalThis|self)$")
+          property: (property_identifier) @fn)) @match
     metavariables:
       - capture: fn
         regex: "^eval$"
@@ -70,7 +75,9 @@ rules:
       (call_expression
         function: (member_expression
           property: (property_identifier) @prop)
-        arguments: (arguments (string (string_fragment) @origin))) @match
+        arguments: (arguments
+          . (_)
+          . (string (string_fragment) @origin))) @match
     metavariables:
       - capture: prop
         regex: "^postMessage$"
@@ -153,6 +160,11 @@ rules:
     pattern: |
       (call_expression
         function: (identifier) @fn) @match
+
+      (call_expression
+        function: (member_expression
+          object: (identifier) @obj (#match? @obj "^(window|globalThis|self)$")
+          property: (property_identifier) @fn)) @match
     metavariables:
       - capture: fn
         regex: "^eval$"
@@ -211,7 +223,9 @@ rules:
       (call_expression
         function: (member_expression
           property: (property_identifier) @prop)
-        arguments: (arguments (string (string_fragment) @origin))) @match
+        arguments: (arguments
+          . (_)
+          . (string (string_fragment) @origin))) @match
     metavariables:
       - capture: prop
         regex: "^postMessage$"
@@ -288,3 +302,325 @@ rules:
         - |
           (call_expression
             function: (identifier) @fn (#eq? @fn "parseInt")) @match
+
+  # ---------- TSX（tsx，.tsx）：与 TS 规则分开声明，避免语言作用域静默缺失 ----------
+  - id: tsx/no-eval
+    language: tsx
+    dimension: security
+    severity: error
+    message: 调用 eval() 动态执行代码
+    pattern: |
+      (call_expression
+        function: (identifier) @fn) @match
+
+      (call_expression
+        function: (member_expression
+          object: (identifier) @obj (#match? @obj "^(window|globalThis|self)$")
+          property: (property_identifier) @fn)) @match
+    metavariables:
+      - capture: fn
+        regex: "^eval$"
+
+  - id: tsx/no-new-function
+    language: tsx
+    dimension: security
+    severity: error
+    message: 使用 new Function() 动态构造函数体
+    pattern: |
+      (new_expression
+        constructor: (identifier) @ctor) @match
+    metavariables:
+      - capture: ctor
+        regex: "^Function$"
+
+  - id: tsx/no-timer-string
+    language: tsx
+    dimension: security
+    severity: error
+    message: setTimeout/setInterval 以字符串参数调度代码执行
+    pattern: |
+      (call_expression
+        function: (identifier) @fn
+        arguments: (arguments . (string))) @match
+
+      (call_expression
+        function: (identifier) @fn
+        arguments: (arguments . (template_string))) @match
+    metavariables:
+      - capture: fn
+        regex: "^(setTimeout|setInterval)$"
+
+  - id: tsx/no-inner-html
+    language: tsx
+    dimension: security
+    severity: warning
+    message: 为 innerHTML/outerHTML 赋值（未净化内容属常见注入入口，需人工确认）
+    pattern: |
+      (assignment_expression
+        left: (member_expression
+          property: (property_identifier) @prop) @match)
+
+      (augmented_assignment_expression
+        left: (member_expression
+          property: (property_identifier) @prop) @match)
+    metavariables:
+      - capture: prop
+        regex: "^(innerHTML|outerHTML)$"
+
+  - id: tsx/no-postmessage-wildcard
+    language: tsx
+    dimension: security
+    severity: warning
+    message: postMessage 目标 origin 使用通配符 *
+    pattern: |
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @prop)
+        arguments: (arguments
+          . (_)
+          . (string (string_fragment) @origin))) @match
+    metavariables:
+      - capture: prop
+        regex: "^postMessage$"
+      - capture: origin
+        regex: "^\\*$"
+
+  - id: tsx/no-document-write
+    language: tsx
+    dimension: security
+    severity: warning
+    message: 调用 document.write/writeln 写入文档流
+    pattern: |
+      (call_expression
+        function: (member_expression
+          object: (identifier) @obj
+          property: (property_identifier) @prop) @match)
+    metavariables:
+      - capture: obj
+        regex: "^document$"
+      - capture: prop
+        regex: "^(write|writeln)$"
+
+  - id: tsx/no-document-domain-assign
+    language: tsx
+    dimension: security
+    severity: error
+    message: 对 document.domain 赋值（放宽同源策略的构造）
+    pattern: |
+      (assignment_expression
+        left: (member_expression
+          object: (identifier) @obj
+          property: (property_identifier) @prop) @match)
+    metavariables:
+      - capture: obj
+        regex: "^document$"
+      - capture: prop
+        regex: "^domain$"
+
+  - id: tsx/taint-eval-param
+    language: tsx
+    dimension: security
+    severity: error
+    message: 不可信参数可能流入 eval()（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (function_declaration
+            parameters: (formal_parameters
+              (required_parameter (identifier) @match))) @match
+      sinks:
+        - |
+          (call_expression
+            function: (identifier) @fn (#eq? @fn "eval")) @match
+      sanitizers:
+        - |
+          (call_expression
+            function: (identifier) @fn (#eq? @fn "parseInt")) @match
+
+  - id: tsx/taint-prompt-innerhtml
+    language: tsx
+    dimension: security
+    severity: warning
+    message: 用户输入可能写入 innerHTML（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (call_expression
+            function: (identifier) @fn (#eq? @fn "prompt")) @match
+      sinks:
+        - |
+          (assignment_expression
+            left: (member_expression
+              property: (property_identifier) @prop (#eq? @prop "innerHTML"))) @match
+
+  - id: tsx/taint-sql-execute-param
+    language: tsx
+    dimension: security
+    severity: error
+    message: 不可信参数可能流入 SQL execute（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (function_declaration
+            parameters: (formal_parameters
+              (required_parameter (identifier) @match))) @match
+      sinks:
+        - |
+          (call_expression
+            function: (member_expression
+              property: (property_identifier) @prop (#eq? @prop "execute"))) @match
+      sanitizers:
+        - |
+          (call_expression
+            function: (identifier) @fn (#eq? @fn "parseInt")) @match
+
+  # ---------- JSX（jsx，.jsx）：与 JavaScript 规则分开声明 ----------
+  - id: jsx/no-eval
+    language: jsx
+    dimension: security
+    severity: error
+    message: 调用 eval() 动态执行代码
+    pattern: |
+      (call_expression
+        function: (identifier) @fn) @match
+
+      (call_expression
+        function: (member_expression
+          object: (identifier) @obj (#match? @obj "^(window|globalThis|self)$")
+          property: (property_identifier) @fn)) @match
+    metavariables:
+      - capture: fn
+        regex: "^eval$"
+
+  - id: jsx/no-new-function
+    language: jsx
+    dimension: security
+    severity: error
+    message: 使用 new Function() 动态构造函数体
+    pattern: |
+      (new_expression
+        constructor: (identifier) @ctor) @match
+    metavariables:
+      - capture: ctor
+        regex: "^Function$"
+
+  - id: jsx/no-inner-html
+    language: jsx
+    dimension: security
+    severity: warning
+    message: 为 innerHTML/outerHTML 赋值（未净化内容属常见注入入口，需人工确认）
+    pattern: |
+      (assignment_expression
+        left: (member_expression
+          property: (property_identifier) @prop) @match)
+
+      (augmented_assignment_expression
+        left: (member_expression
+          property: (property_identifier) @prop) @match)
+    metavariables:
+      - capture: prop
+        regex: "^(innerHTML|outerHTML)$"
+
+  - id: jsx/no-document-write
+    language: jsx
+    dimension: security
+    severity: warning
+    message: 调用 document.write/writeln 写入文档流
+    pattern: |
+      (call_expression
+        function: (member_expression
+          object: (identifier) @obj
+          property: (property_identifier) @prop) @match)
+    metavariables:
+      - capture: obj
+        regex: "^document$"
+      - capture: prop
+        regex: "^(write|writeln)$"
+
+  - id: jsx/no-postmessage-wildcard
+    language: jsx
+    dimension: security
+    severity: warning
+    message: postMessage 目标 origin 使用通配符 *
+    pattern: |
+      (call_expression
+        function: (member_expression
+          property: (property_identifier) @prop)
+        arguments: (arguments
+          . (_)
+          . (string (string_fragment) @origin))) @match
+    metavariables:
+      - capture: prop
+        regex: "^postMessage$"
+      - capture: origin
+        regex: "^\\*$"
+
+  # ---------- TypeScript 高价值补充（v1 规则库扩展） ----------
+  - id: ts/prototype-pollution
+    language: typescript
+    dimension: security
+    severity: warning
+    message: 向 __proto__/constructor/prototype 写入属性（原型污染构造）
+    pattern: |
+      (assignment_expression
+        left: (member_expression
+          property: (property_identifier) @name)) @match
+
+      (assignment_expression
+        left: (subscript_expression
+          index: (string (string_fragment) @name))) @match
+    metavariables:
+      - capture: name
+        regex: "^(__proto__|constructor|prototype)$"
+
+  - id: ts/child-process-string
+    language: typescript
+    dimension: security
+    severity: warning
+    message: 通过 child_process 以字符串命令执行外部进程
+    pattern: |
+      (call_expression
+        function: (identifier) @fn
+        arguments: (arguments . (_))) @match
+    metavariables:
+      - capture: fn
+        regex: "^(exec|execSync)$"
+    filters:
+      - not:
+          pattern: |
+            (function_declaration
+              name: (identifier) @name (#match? @name "^(exec|execSync)$")) @match
+      - not:
+          pattern: |
+            (variable_declarator
+              name: (identifier) @name (#match? @name "^(exec|execSync)$")) @match
+    imports:
+      - 'child_process'
+    imported_symbols:
+      - exec
+      - execSync
+    no_shadow: true
+
+  - id: ts/child-process-string-member
+    language: typescript
+    dimension: security
+    severity: warning
+    message: 通过 child_process 成员调用以字符串命令执行外部进程
+    pattern: |
+      (call_expression
+        function: (member_expression
+          object: (identifier) @obj
+          property: (property_identifier) @fn)
+        arguments: (arguments . (_))) @match
+    metavariables:
+      - capture: obj
+        regex: "^child_process$"
+      - capture: fn
+        regex: "^(exec|execSync)$"
+    imports:
+      - 'child_process'
+    imported_symbols:
+      - child_process
+      - exec
+      - execSync
+    no_shadow: true

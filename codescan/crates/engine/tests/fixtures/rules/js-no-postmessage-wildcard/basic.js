@@ -5,3 +5,4 @@ window.postMessage(data, "*");
 frame.contentWindow.postMessage(payload, "*");
 
 window.postMessage(data, targetOrigin);
+window.postMessage("*", "https://example.com");

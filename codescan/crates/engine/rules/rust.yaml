@@ -14,8 +14,12 @@ rules:
         function: (scoped_identifier
           path: (_) @path
           name: (identifier) @name
-          (#eq? @name "new")
-          (#match? @path "^(std::)?process::Command$"))) @match
+          (#eq? @name "new"))) @match
+    metavariables:
+      - capture: path
+        regex: '^(std::)?process::Command$'
+    imported_symbols:
+      - std::process::Command
 
   # 公共函数内直接解包：unwrap/expect 在带 pub 可见性的函数体内即命中
   #（返回路径需数据流，v1 以「pub fn 体内」为保守近似）。
@@ -47,8 +51,12 @@ rules:
         function: (scoped_identifier
           path: (_) @path
           name: (identifier) @name
-          (#match? @name "^(read|read_to_string)$")
-          (#match? @path "^(std::)?fs$"))) @match
+          (#match? @name "^(read|read_to_string)$"))) @match
+    metavariables:
+      - capture: path
+        regex: '^(std::)?fs$'
+    imported_symbols:
+      - std::fs
 
   # transmute：含 turbofish（generic_function 包装）与普通两种调用形态。
   - id: rust/mem-transmute
@@ -68,8 +76,12 @@ rules:
               path: (_) @path
               name: (identifier) @name
               (#eq? @name "transmute")))
-        ]
-        (#match? @path "^(std::)?mem$")) @match
+        ]) @match
+    metavariables:
+      - capture: path
+        regex: '^(std::)?mem$'
+    imported_symbols:
+      - std::mem
 
   - id: rust/mem-forget
     language: rust
@@ -81,8 +93,12 @@ rules:
         function: (scoped_identifier
           path: (_) @path
           name: (identifier) @name
-          (#eq? @name "forget")
-          (#match? @path "^(std::)?mem$"))) @match
+          (#eq? @name "forget"))) @match
+    metavariables:
+      - capture: path
+        regex: '^(std::)?mem$'
+    imported_symbols:
+      - std::mem
 
   # 库代码中终止性宏：main 入口内视为可接受的失败退出，用 not 过滤。
   - id: rust/panic-in-library
@@ -112,7 +128,7 @@ rules:
     language: rust
     dimension: security
     severity: warning
-    message: 通过字符串拼接构造 SQL 语句
+    message: 通过字符串拼接或 format! 插值构造 SQL 语句
     pattern: |
       (binary_expression
         (string_literal) @sql
@@ -134,6 +150,34 @@ rules:
     metavariables:
       - capture: sql
         regex: '(?i)\b(select|insert|update|delete)\b'
+
+  # format! 具名插值构造 SQL：字符串同时含 SQL 关键字与 `{name}` 占位。
+  # 带逗号参数的 format! 仍由 rust/sql-string-concat 覆盖；本规则只补
+  # 不带逗号参数的具名插值（如 format!("... {id}")），避免旧规则 id 语义变化。
+  - id: rust/sql-format-interpolation
+    language: rust
+    dimension: security
+    severity: warning
+    message: 通过 format! 具名插值构造 SQL 语句
+    pattern: |
+      (macro_invocation
+        macro: (identifier) @name
+        (#eq? @name "format")
+        (token_tree
+          (string_literal) @sql)) @match
+    filters:
+      - not:
+          pattern: |
+            (macro_invocation
+              macro: (identifier) @name
+              (#eq? @name "format")
+              (token_tree
+                (string_literal) @sql
+                ","
+                (_))) @match
+    metavariables:
+      - capture: sql
+        regex: '(?is)(?:.*\b(select|insert|update|delete)\b.*\{[A-Za-z_][A-Za-z0-9_]*\}.*|\{[A-Za-z_][A-Za-z0-9_]*\}.*\b(select|insert|update|delete)\b.*)'
 
   # let _ = 丢弃调用结果：调用表达式或结果宏（write!/writeln! 等返回
   # io::Result 的宏）被整体丢弃。`_` 为匿名节点，需按字面量匹配。
@@ -197,7 +241,7 @@ rules:
         - |
           (call_expression
             function: (scoped_identifier
-              path: (identifier) @path (#eq? @path "fs")
+              path: (_) @path (#match? @path "^(std::)?fs$")
               name: (identifier) @name (#eq? @name "write"))) @match
       sanitizers:
         - |
@@ -236,3 +280,148 @@ rules:
             function: (generic_function
               function: (field_expression
                 field: (field_identifier) @fn (#eq? @fn "parse")))) @match
+
+  # ---------- Rust 高价值补充（规则库质量批次 2） ----------
+  - id: rust/unsafe-block
+    language: rust
+    dimension: quality
+    severity: warning
+    message: 使用 unsafe 块（需人工审计内存/外部不变量）
+    pattern: |
+      (unsafe_block) @match
+
+  # ---------- 通配导入（use path::*） ----------
+  - id: rust/fs-read-unbounded-glob
+    language: rust
+    dimension: security
+    severity: warning
+    message: 通配导入的 std::fs::read/read_to_string 整读文件且未限制大小
+    pattern: |
+      (call_expression
+        function: (identifier) @fn
+        arguments: (_)) @match
+    metavariables:
+      - capture: fn
+        regex: '^(read|read_to_string)$'
+    imports:
+      - 'use\s+std::fs::\*'
+
+  - id: rust/mem-transmute-glob
+    language: rust
+    dimension: security
+    severity: warning
+    message: 通配导入的 std::mem::transmute 重新解释内存
+    pattern: |
+      (call_expression
+        function: (identifier) @fn
+        arguments: (_)) @match
+
+      (call_expression
+        function: (generic_function
+          function: (identifier) @fn)
+        arguments: (_)) @match
+    metavariables:
+      - capture: fn
+        regex: '^transmute$'
+    imports:
+      - 'use\s+std::mem::\*'
+
+  - id: rust/mem-forget-glob
+    language: rust
+    dimension: quality
+    severity: warning
+    message: 通配导入的 std::mem::forget 跳过 Drop 主动泄漏资源
+    pattern: |
+      (call_expression
+        function: (identifier) @fn
+        arguments: (_)) @match
+    metavariables:
+      - capture: fn
+        regex: '^forget$'
+    imports:
+      - 'use\s+std::mem::\*'
+
+  - id: rust/process-command-new-glob
+    language: rust
+    dimension: security
+    severity: warning
+    message: 通配导入的 std::process::Command::new 启动外部进程
+    pattern: |
+      (call_expression
+        function: (scoped_identifier
+          path: (identifier) @path
+          name: (identifier) @name (#eq? @name "new"))
+        arguments: (_)) @match
+    metavariables:
+      - capture: path
+        regex: '^Command$'
+    imports:
+      - 'use\s+std::process::\*'
+
+  # ---------- 污点别名/通配导入 ----------
+  - id: rust/taint-command-param-alias
+    language: rust
+    dimension: security
+    severity: error
+    message: 不可信参数可能经 use 别名流入 Command::new（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (function_item
+            parameters: (parameters
+              (parameter pattern: (identifier) @match))) @match
+      sinks:
+        - |
+          (call_expression
+            function: (scoped_identifier
+              path: (identifier) @path
+              name: (identifier) @name (#eq? @name "new"))) @match
+      sanitizers:
+        - |
+          (call_expression
+            function: (field_expression
+              field: (field_identifier) @fn (#eq? @fn "parse"))) @match
+        - |
+          (call_expression
+            function: (generic_function
+              function: (field_expression
+                field: (field_identifier) @fn (#eq? @fn "parse")))) @match
+    imports:
+      - 'use\s+std::process::Command\s+as\s+'
+      - 'use\s+std::\{[^}]*process::Command\s+as\s+'
+
+  - id: rust/taint-fs-write-param-alias
+    language: rust
+    dimension: security
+    severity: warning
+    message: 不可信参数可能经别名/通配导入流入 fs::write（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (function_item
+            parameters: (parameters
+              (parameter pattern: (identifier) @match))) @match
+      sinks:
+        - |
+          (call_expression
+            function: (scoped_identifier
+              path: (identifier) @path
+              name: (identifier) @name (#eq? @name "write"))) @match
+        - |
+          (call_expression
+            function: (identifier) @name (#eq? @name "write")) @match
+      sanitizers:
+        - |
+          (call_expression
+            function: (field_expression
+              field: (field_identifier) @fn (#eq? @fn "parse"))) @match
+        - |
+          (call_expression
+            function: (generic_function
+              function: (field_expression
+                field: (field_identifier) @fn (#eq? @fn "parse")))) @match
+    imports:
+      - 'use\s+std::fs\s+as\s+'
+      - 'use\s+std::\{[^}]*fs\s+as\s+'
+      - 'use\s+std::fs::\*'
+      - 'use\s+std::\{[^}]*fs::\*'

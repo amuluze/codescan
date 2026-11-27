@@ -1,5 +1,5 @@
 /** 维度/严重级/置信度的展示文案（发现页与 LLM 审查共用）。 */
-import type { Finding } from "./types";
+import type { Finding, ScanEvent } from "./types";
 
 export type ReviewSeverity = "error" | "warning" | "info";
 export type ReviewCategory = Finding["dimension"];
@@ -22,3 +22,21 @@ export const CONFIDENCE_LABEL: Record<ReviewConfidence, string> = {
   medium: "中",
   low: "低",
 };
+
+export function formatScanEvent(event: ScanEvent): string {
+  switch (event.kind) {
+    case "parse_error":
+      return `解析失败：${event.path}（${event.error_nodes} 个错误节点，命中标记 degraded）`;
+    case "io_error":
+      return `读取失败：${event.path}（${event.message}）`;
+    case "binary":
+      return `二进制跳过：${event.path}`;
+    case "oversize":
+      return `超限跳过：${event.path}（${event.size} 字节）`;
+    case "ignored_summary":
+      return `已忽略 ${event.count} 个文件`;
+    case "unknown_language_summary":
+      return `未知语言 ${event.count} 个文件（仅执行文本规则）`;
+  }
+  return "未知扫描事件";
+}

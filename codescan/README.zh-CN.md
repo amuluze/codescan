@@ -36,14 +36,14 @@ CodeScan 走确定性路线，并把这些边界写进代码：
 
 | 能力 | 说明 |
 |---|---|
-| 确定性 AST 引擎 | 73 条内置规则：tree-sitter 模式、文本模式、度量阈值、污点 source→sink |
+| 确定性 AST 引擎 | 113 条内置规则：tree-sitter 模式、文本模式、度量阈值、污点/数据流、Java 继承规则 |
 | 三维分类 | 每条发现唯一归属 `security` / `business-logic` / `quality` |
 | 质量度量 | 圈复杂度、函数长度、嵌套深度、重复块、不可达代码 |
 | 污点分析 | 同文件过程间近似 + 显式导入的跨文件传播（TS/JS、Python、Go 同包、Java 类/静态导入、Rust `use` 路径），含 points-to 对象集合与字段敏感 |
 | 基线与门禁 | 冻结一次扫描为基线，仅按指纹拦截**新增**发现 |
 | SARIF 2.1.0 | 与内部发现一一对应，携带 `degraded` 标记 |
 | 桌面应用 | 扫描 / 发现 / 规则 / 历史 / 设置，本地 SQLite 与本地数据根 |
-| CLI | `codescan scan` 用于本地检查与 CI 门禁，`codescan github-upload` 上传 SARIF |
+| CLI | `codescan scan` 用于本地检查与 CI 门禁，`codescan pack`（install/list/remove/sign/trust）管理本地规则包，`codescan github-upload` 上传 SARIF |
 | LLM 辅助（自带 Key） | 分诊、流式分诊、批量分诊、工作区源码审查、候选规则生成——仅供参考 |
 | 隐私 | 扫描只读、无遥测（唯一出站请求是 GitHub Releases 更新检查）、密钥存于 Rust 独占的 secrets 表 |
 
@@ -51,15 +51,15 @@ CodeScan 走确定性路线，并把这些边界写进代码：
 
 | 语言 | 规则数 |
 |---|---|
-| TypeScript / TSX | 12 |
-| JavaScript / JSX | 6 |
-| Python | 12 |
-| Java | 11 |
-| Go | 10 |
-| Rust | 11 |
+| TypeScript / TSX | 25 |
+| JavaScript / JSX | 11 |
+| Python | 16 |
+| Java | 15 |
+| Go | 16 |
+| Rust | 19 |
 | 语言无关（`*`） | 11（5 条度量 + 6 条文本规则） |
 
-按维度：`security` 59 · `business-logic` 3 · `quality` 11。
+按维度：`security` 97 · `business-logic` 3 · `quality` 13。
 
 规则位于 [`crates/engine/rules/`](crates/engine/rules/)（YAML）。把项目自己的不变量写成规则是一等公民工作流，见 [docs/rules.md](docs/rules.md)。
 
@@ -200,8 +200,8 @@ task check          # 完整门禁：typecheck + vitest + 构建 + clippy -D war
 
 - Windows / Linux 打包对齐。
 - 各语言更大的规则库，更多项目不变量示例。
-- 以版本化 YAML 包形式分发的规则包。
-- 桌面端内的规则编写体验。
+- 规则包注册表与远程更新（本地版本化规则包、完整性校验与 Ed25519 签名/信任已可用）。
+- 进阶规则编写：结构化提示、多文件规则包与完整 fixture 回归。
 
 ## 贡献
 

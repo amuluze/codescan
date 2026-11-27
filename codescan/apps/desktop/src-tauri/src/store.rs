@@ -67,7 +67,9 @@ impl Store {
                engine_version TEXT NOT NULL,
                started_at_ms INTEGER NOT NULL,
                duration_ms INTEGER NOT NULL,
-               stats_json TEXT NOT NULL
+               stats_json TEXT NOT NULL,
+               events_json TEXT NOT NULL DEFAULT '[]',
+               ruleset_json TEXT NOT NULL DEFAULT '{}'
              );
              CREATE TABLE IF NOT EXISTS findings(
                scan_id INTEGER NOT NULL REFERENCES scans(id) ON DELETE CASCADE,
@@ -116,6 +118,15 @@ impl Store {
             "ALTER TABLE findings ADD COLUMN flows_json TEXT NOT NULL DEFAULT '[]'",
             [],
         );
+        // 历史事件与规则集快照（Domain §6.1）；旧库按空值升级。
+        let _ = self.conn.execute(
+            "ALTER TABLE scans ADD COLUMN events_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        );
+        let _ = self.conn.execute(
+            "ALTER TABLE scans ADD COLUMN ruleset_json TEXT NOT NULL DEFAULT '{}'",
+            [],
+        );
         Ok(())
     }
 
@@ -125,14 +136,27 @@ impl Store {
         report: &ScanReport,
         duration_ms: i64,
         started_at_ms: i64,
+        ruleset_json: &str,
     ) -> Result<i64> {
         let stats_json = serde_json::to_string(&report.stats).map_err(|e| {
             StoreError::Db(rusqlite::Error::ToSqlConversionFailure(e.into()))
         })?;
+        let events_json = serde_json::to_string(&report.events).map_err(|e| {
+            StoreError::Db(rusqlite::Error::ToSqlConversionFailure(e.into()))
+        })?;
         self.conn.execute(
-            "INSERT INTO scans(root, engine_version, started_at_ms, duration_ms, stats_json)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![root, report.engine_version, started_at_ms, duration_ms, stats_json],
+            "INSERT INTO scans(root, engine_version, started_at_ms, duration_ms, stats_json,
+                events_json, ruleset_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                root,
+                report.engine_version,
+                started_at_ms,
+                duration_ms,
+                stats_json,
+                events_json,
+                ruleset_json
+            ],
         )?;
         let scan_id = self.conn.last_insert_rowid();
         let mut stmt = self.conn.prepare(
@@ -295,18 +319,42 @@ impl Store {
     }
 
     pub fn get_events(&self, scan_id: i64) -> Result<Vec<ScanEvent>> {
-        let stats_json: Option<String> = self
+        let events_json: Option<String> = self
             .conn
             .query_row(
-                "SELECT stats_json FROM scans WHERE id = ?1",
+                "SELECT events_json FROM scans WHERE id = ?1",
                 [scan_id],
                 |row| row.get(0),
             )
             .optional()?;
-        let _ = stats_json;
-        // 事件不单独落表（与发现同源的扫描事件在报告中）；v1 通过 stats 复述，
-        // 完整事件列表由扫描完成时直接返回前端并随 scans.stats_json 存档。
-        Ok(Vec::new())
+        match events_json {
+            Some(events_json) => serde_json::from_str(&events_json).map_err(|e| {
+                StoreError::Db(rusqlite::Error::ToSqlConversionFailure(e.into()))
+            }),
+            None => Err(StoreError::NotFound("该扫描记录")),
+        }
+    }
+
+    pub fn scan_engine_version(&self, scan_id: i64) -> Result<String> {
+        self.conn
+            .query_row(
+                "SELECT engine_version FROM scans WHERE id = ?1",
+                [scan_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound("该扫描记录"))
+    }
+
+    pub fn scan_ruleset_json(&self, scan_id: i64) -> Result<String> {
+        self.conn
+            .query_row(
+                "SELECT ruleset_json FROM scans WHERE id = ?1",
+                [scan_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound("该扫描记录"))
     }
 
     pub fn set_rule_enabled(&self, rule_id: &str, enabled: bool) -> Result<()> {

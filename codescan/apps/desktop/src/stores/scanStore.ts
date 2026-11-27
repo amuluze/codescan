@@ -6,7 +6,7 @@ import {
   type ProgressPayload,
   type ScanSummary,
 } from "../platform";
-import type { Finding, ScanStats } from "../types";
+import type { Finding, ScanEvent, ScanStats } from "../types";
 
 /** 历史工作区快捷下拉的最大条目数。 */
 const RECENT_WORKSPACE_LIMIT = 8;
@@ -67,6 +67,8 @@ type ScanState = {
   lastScanId: number | null;
   stats: ScanStats | null;
   findings: Finding[];
+  /** 扫描事件（解析/IO/二进制/超限/忽略/未知语言），来自持久化历史。 */
+  events: ScanEvent[];
   filter: FindingFilter;
   selected: Finding | null;
   initListeners: () => Promise<void>;
@@ -96,6 +98,7 @@ export const useScanStore = create<ScanState>((set, get) => ({
   lastScanId: null,
   stats: null,
   findings: [],
+  events: [],
   filter: { dimension: "all", severity: "all", query: "" },
   selected: null,
 
@@ -129,6 +132,7 @@ export const useScanStore = create<ScanState>((set, get) => ({
       progress: null,
       error: null,
       findings: [],
+      events: [],
       selected: null,
       stats: null,
     });
@@ -158,12 +162,16 @@ export const useScanStore = create<ScanState>((set, get) => ({
 
   async loadScan(scanId, stats) {
     try {
-      const findings = await api.getScan(scanId);
+      const [findings, events] = await Promise.all([
+        api.getScan(scanId),
+        api.getScanEvents(scanId).catch(() => [] as ScanEvent[]),
+      ]);
       set({
         phase: "finished",
         progress: null,
         lastScanId: scanId,
         findings,
+        events,
         stats: { ...emptyStats(), ...stats, findings: findings.length },
       });
     } catch (e) {

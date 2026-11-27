@@ -5,4 +5,12 @@ public class ReadObject {
         int size = in.available();
         return value + size;
     }
+
+    void local() {
+        readObject();
+    }
+
+    void custom(ReadObject other) {
+        other.readObject();
+    }
 }

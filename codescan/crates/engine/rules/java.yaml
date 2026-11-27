@@ -46,11 +46,41 @@ rules:
   - id: java/read-object
     language: java
     dimension: security
-    severity: error
-    message: 调用 readObject() 反序列化对象
+    severity: warning
+    message: 显式接收者调用 readObject()（需确认接收者为 ObjectInputStream）
     pattern: |
       (method_invocation
+        object: (identifier) @obj
         name: (identifier) @name (#eq? @name "readObject")) @match
+    metavariables:
+      - capture: obj
+        regex: '^(in|input|ois|objectInput|objectInputStream)$'
+    filters:
+      - inside:
+          pattern: |
+            [
+              (method_declaration
+                parameters: (formal_parameters
+                  (formal_parameter
+                    type: [(type_identifier) (scoped_type_identifier)] @type
+                    (#match? @type "ObjectInputStream$"))))
+              (method_declaration
+                body: (block
+                  (local_variable_declaration
+                    type: [(type_identifier) (scoped_type_identifier)] @type
+                    (#match? @type "ObjectInputStream$"))))
+            ] @match
+
+  - id: java/read-object-field
+    language: java
+    dimension: security
+    severity: warning
+    message: 显式接收者调用 readObject()（接收者为 ObjectInputStream 字段）
+    pattern: |
+      (method_invocation
+        object: (identifier) @obj
+        name: (identifier) @name (#eq? @name "readObject")) @match
+    field_receiver: true
 
   - id: java/weak-message-digest
     language: java
@@ -59,13 +89,13 @@ rules:
     message: MessageDigest 使用弱哈希算法（MD5/SHA-1）
     pattern: |
       (method_invocation
-        object: (identifier) @digest
+        object: (_) @digest
         name: (identifier) @name
         arguments: (argument_list
           (string_literal) @alg)) @match
     metavariables:
       - capture: digest
-        regex: '^MessageDigest$'
+        regex: '(^|\.)MessageDigest$'
       - capture: name
         regex: '^getInstance$'
       - capture: alg
@@ -87,10 +117,38 @@ rules:
     language: java
     dimension: security
     severity: error
-    message: 覆写 X509TrustManager 的 checkClientTrusted/checkServerTrusted（信任所有证书模式）
+    message: 在实现 X509TrustManager 的类中声明 checkClientTrusted/checkServerTrusted 方法（需确认是否空实现）
     pattern: |
       (method_declaration
         name: (identifier) @name (#match? @name "^check(Client|Server)Trusted$")) @match
+    filters:
+      - inside:
+          pattern: |
+            [
+              (class_declaration
+                interfaces: (super_interfaces
+                  (type_list
+                    [(type_identifier) (scoped_type_identifier)] @iface
+                    (#match? @iface "(^|[.])X509TrustManager$"))))
+              (object_creation_expression
+                type: [(type_identifier) (scoped_type_identifier)] @iface
+                (#match? @iface "(^|[.])X509TrustManager$"))
+            ] @match
+
+  # v2 类型层：解析 extends/implements 闭包，覆盖间接继承 X509TrustManager。
+  # 直接实现仍由 java/trust-all-certs 负责，本规则只报非直接实现类，避免重复。
+  - id: java/trust-all-certs-inherited
+    language: java
+    dimension: security
+    severity: warning
+    message: 通过继承间接实现 X509TrustManager 的空 checkClientTrusted/checkServerTrusted（需人工确认）
+    inheritance:
+      target: X509TrustManager
+      methods:
+        - checkClientTrusted
+        - checkServerTrusted
+      empty_only: true
+      indirect_only: true
 
   - id: java/junit-assert
     language: java
@@ -168,3 +226,30 @@ rules:
           (method_invocation
             object: (identifier) @obj (#eq? @obj "Integer")
             name: (identifier) @name (#eq? @name "parseInt")) @match
+
+  # ---------- Java 高价值补充（规则库质量批次 2） ----------
+  - id: java/xml-decoder
+    language: java
+    dimension: security
+    severity: warning
+    message: 创建 XMLDecoder（反序列化 XML 可执行构造，需确认输入可信）
+    pattern: |
+      (object_creation_expression
+        type: [(type_identifier) (scoped_type_identifier)] @type) @match
+    metavariables:
+      - capture: type
+        regex: '(^|\.)XMLDecoder$'
+
+  - id: java/url-open-connection
+    language: java
+    dimension: security
+    severity: warning
+    message: 对 URL 发起 openConnection（目标由输入决定时需确认 SSRF）
+    pattern: |
+      (method_invocation
+        object: (object_creation_expression
+          type: [(type_identifier) (scoped_type_identifier)] @type)
+        name: (identifier) @name (#eq? @name "openConnection")) @match
+    metavariables:
+      - capture: type
+        regex: '(^|\.)URL$'

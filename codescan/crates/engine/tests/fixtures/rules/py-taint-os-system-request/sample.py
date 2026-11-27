@@ -10,3 +10,8 @@ def handler(request):
 def static_handler(request):
     # ruleid: py/os-system
     os.system("echo ok")
+
+
+def unrelated_args(config):
+    # ruleid: py/os-system
+    os.system(config.args)
