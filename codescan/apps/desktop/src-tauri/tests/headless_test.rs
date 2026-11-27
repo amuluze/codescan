@@ -46,7 +46,7 @@ fn store_roundtrip_and_baseline_gate() {
     let f1 = finding("r/a", "src/a.ts", 1, "fp-a");
     let f2 = finding("r/b", "src/b.py", 5, "fp-b");
     let scan_id = store
-        .insert_scan("/tmp/ws", &report(vec![f1.clone(), f2.clone()]), 12, 1_000)
+        .insert_scan("/tmp/ws", &report(vec![f1.clone(), f2.clone()]), 12, 1_000, "{}")
         .unwrap();
 
     let summaries = store.list_scans().unwrap();
@@ -76,6 +76,7 @@ fn store_roundtrip_and_baseline_gate() {
             ]),
             9,
             3_000,
+            "{}",
         )
         .unwrap();
     let gate = store.gate_new(scan_id2).unwrap().unwrap();
@@ -118,7 +119,7 @@ fn a11_cancelled_scan_leaves_no_history() {
 
     let cancel = codescan_engine::CancelToken::new();
     cancel.cancel();
-    let outcome = manager.run_scan_with_token(&ws, None, &cancel, &|_| {});
+    let outcome = manager.run_scan_with_token(&ws, None, &[], &cancel, &|_| {});
     assert!(matches!(
         outcome,
         Err(codescan_lib::manager::ManagerError::Scan(
@@ -135,19 +136,31 @@ fn successful_scan_persists() {
     let ws = dir.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
     std::fs::write(ws.join("a.ts"), "// TODO: debt\nconst a = 1;\n").unwrap();
+    std::fs::write(ws.join("readme.md"), "text\n").unwrap();
 
     let store = Arc::new(Mutex::new(
         Store::open(&dir.path().join("test.db")).unwrap(),
     ));
     let manager = ScanManager::new(store.clone());
-    let outcome = manager.run_scan(&ws, None, &|_| {}).unwrap();
-    assert_eq!(outcome.report.stats.files_scanned, 1);
+    let outcome = manager.run_scan(&ws, None, &[], &|_| {}).unwrap();
+    assert_eq!(outcome.report.stats.files_scanned, 2);
     assert!(outcome
         .report
         .findings
         .iter()
         .any(|f| f.rule_id == "text/todo-debt"));
-    assert_eq!(store.lock().unwrap().list_scans().unwrap().len(), 1);
+    let store = store.lock().unwrap();
+    assert_eq!(store.list_scans().unwrap().len(), 1);
+    let events = store.get_events(outcome.scan_id).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, codescan_engine::ScanEvent::UnknownLanguageSummary { .. })),
+        "{events:?}"
+    );
+    let ruleset = store.scan_ruleset_json(outcome.scan_id).unwrap();
+    assert!(ruleset.contains("\"enabled_rules\""));
+    assert!(ruleset.contains("\"packs\":[]"));
 }
 
 /// 删除历史记录：findings 与由该扫描派生的 baseline 级联清理；重复删除报错。
@@ -161,6 +174,7 @@ fn delete_scan_cascades_findings_and_baseline() {
             &report(vec![finding("r/a", "a.ts", 1, "fp-a")]),
             1,
             1,
+            "{}",
         )
         .unwrap();
     store.set_baseline(scan_id, 2).unwrap();
@@ -236,7 +250,7 @@ fn c2_provider_profiles_roundtrip_and_missing_key() {
 
     // 无密钥 → 可读错误，且不发起任何请求（错误在 prepare 阶段返回）。
     let scan_id = store
-        .insert_scan("/tmp/ws", &report(vec![finding("r/a", "a.ts", 1, "fp-a")]), 1, 1)
+        .insert_scan("/tmp/ws", &report(vec![finding("r/a", "a.ts", 1, "fp-a")]), 1, 1, "{}")
         .unwrap();
     let err = prepare_llm_call(&store, None, scan_id, "fp-a").unwrap_err();
     assert!(err.contains("API Key"), "错误应提示未配置密钥：{err}");
@@ -266,7 +280,7 @@ fn c7_llm_failure_is_recoverable() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("test.db")).unwrap();
     let scan_id = store
-        .insert_scan("/tmp/ws", &report(vec![finding("r/a", "a.ts", 1, "fp-a")]), 1, 1)
+        .insert_scan("/tmp/ws", &report(vec![finding("r/a", "a.ts", 1, "fp-a")]), 1, 1, "{}")
         .unwrap();
     store
         .set_secret(&llm::ProviderProfile::secret_id("main"), "sk-test")
@@ -328,6 +342,7 @@ fn c8_batch_triage_prepare_and_parse_are_read_only() {
             ]),
             2,
             1,
+            "{}",
         )
         .unwrap();
     store.set_baseline(scan_id, 2).unwrap();
@@ -419,6 +434,7 @@ fn regression_fixture() -> (tempfile::TempDir, Store, i64) {
             &report(vec![finding("ts/no-eval", "src/a.ts", 2, "fp-eval")]),
             5,
             1,
+            "{}",
         )
         .unwrap();
     (dir, store, scan_id)
@@ -515,6 +531,7 @@ fn v33_regression_rejects_invalid_candidate_and_missing_source() {
             &report(vec![finding("ts/x", "src/missing.ts", 1, "fp-missing")]),
             1,
             2,
+            "{}",
         )
         .unwrap();
     let err = run_from_store(
@@ -988,4 +1005,27 @@ fn review_skill_override_ignores_corrupt_and_builtin_identical() {
     let saved = save_review_skill_override(&path, "SKILL.md", builtin).unwrap();
     assert!(!saved.customized, "与内置一致不应标记为覆写");
     assert!(!path.exists(), "等价内置的保存不应生成覆写文件");
+}
+
+#[test]
+fn rule_editor_test_command_runs_only_candidate() {
+    let yaml = "rules:\n  - id: custom/eval\n    language: typescript\n    dimension: security\n    severity: warning\n    message: custom eval\n    pattern: |\n      (call_expression\n        function: (identifier) @fn) @match\n    metavariables:\n      - capture: fn\n        regex: '^eval$'\n";
+    let hits = codescan_lib::commands::test_custom_rule(
+        yaml.to_string(),
+        "eval(userInput);\n".to_string(),
+        "typescript".to_string(),
+    )
+    .unwrap();
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].rule_id, "custom/eval");
+    assert_eq!(hits[0].line, 1);
+    assert_eq!(hits[0].match_text, "eval(userInput)");
+
+    let error = codescan_lib::commands::test_custom_rule(
+        yaml.to_string(),
+        "eval(userInput);\n".to_string(),
+        "text".to_string(),
+    )
+    .unwrap_err();
+    assert!(error.contains("不支持的语言"), "{error}");
 }

@@ -22,12 +22,17 @@ export const useRulesStore = create<RulesState>((set, get) => ({
     try {
       const [rules, custom] = await Promise.all([
         api.listRules(),
-        api.customRulesStatus().catch((err) => {
-          set({ customError: String(err) });
-          return null;
-        }),
+        api.customRulesStatus().then(
+          (value) => ({ value, error: null as string | null }),
+          (err) => ({ value: null, error: String(err) }),
+        ),
       ]);
-      set({ rules, customYaml: custom, loading: false });
+      set({
+        rules,
+        customYaml: custom.value,
+        customError: custom.error,
+        loading: false,
+      });
     } catch (e) {
       set({ loading: false, customError: String(e) });
     }

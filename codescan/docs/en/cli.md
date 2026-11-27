@@ -15,17 +15,58 @@ cargo run -p codescan-cli -- scan <root>
 
 ```text
 codescan scan <root> [OPTIONS]
+codescan pack install <source> [--json]
+codescan pack list [--json]
+codescan pack remove <id> <version> [--json]
+codescan pack keygen --out <dir> [--json]
+codescan pack sign <source> --key <private.key> [--json]
+codescan pack trust add <public.key> [--json]
+codescan pack trust list [--json]
+codescan pack trust remove <key-id> [--json]
+codescan github-upload --sarif <path> [OPTIONS]
 ```
+
+The rule-pack data root defaults to `~/.codescan`; set `CODESCAN_DATA_DIR` to override it for all CLI commands. See [rules.md](rules.md#rule-packs-local-mvp) for the pack layout.
 
 | Option | Meaning |
 | --- | --- |
 | `--format text\|json\|sarif` | Output format, default `text`. `json` is the `ScanReport`; `sarif` is SARIF 2.1.0. |
 | `--out <path>` | Write the selected format to a file; stdout then prints a single summary line `files=X findings=Y events=Z`. Without it the output goes to stdout (for `text`, the first line is the summary). |
-| `--rules <path>` | Custom rule YAML layered on top of the built-ins; a missing or non-compiling file exits with code `2`. |
+| `--rules <path>` | Custom rule YAML layered on top of the built-ins and installed packs; a missing or non-compiling file exits with code `2`. |
+| Installed packs | Packs under `CODESCAN_DATA_DIR/packs` are loaded automatically; an invalid or tampered pack exits with code `2`. |
 | `--global-ignore <path>` | Additional global ignore file (gitignore syntax), combined with `.gitignore`, `.codescanignore`, and the built-in default directories. |
 | `--baseline <path>` | Baseline JSON (`Baseline`); a missing or unparsable file exits with code `2`. |
 | `--save-baseline <path>` | Write the fingerprint snapshot of the current findings as pretty JSON. |
 | `--fail-on new\|error\|warning\|none` | Gate condition, default `none`. `new` requires `--baseline`, otherwise exit code `2`. |
+
+### Rule packs
+
+```bash
+codescan pack install ./my-pack
+codescan pack list
+codescan pack list --json
+codescan pack remove com.example.rules 1.0.0
+```
+
+- `pack install` expects a source directory containing `pack.yaml`; it validates the manifest, path safety, engine range, rule compilation, and id conflicts, then writes `.integrity`.
+- `pack list` prints id@version, rule count, and integrity; an invalid pack shows `error=...` and still exits `0` for inspection.
+- `--json` emits the `RulePackInfo` array or the install/remove result for scripts.
+- Pack command failures (missing source, invalid pack, duplicate install, illegal id/version, signature/trust failure) exit with code `2`.
+
+### Signatures and trust
+
+```bash
+codescan pack keygen --out ./pack-keys
+codescan pack trust add ./pack-keys/public.key
+codescan pack sign ./my-pack --key ./pack-keys/private.key
+codescan pack install ./my-pack
+```
+
+- `keygen` writes `private.key` (Ed25519 PKCS#8 base64, Unix mode 0600) and `public.key`; it refuses to overwrite existing files.
+- `sign` writes `.signature` over the pack content hash; the algorithm is Ed25519.
+- Trusted public keys live at `<data_root>/trusted-keys/<sha256>.pub`; `trust list` prints key ids.
+- With no trusted keys, unsigned packs are allowed. Once trusted keys exist, every pack must be signed by a trusted key; install and scan fail otherwise.
+- `key_id` is the SHA-256 of the public key (hex); `list --json` reports it as `signed_by`.
 
 ### text output
 

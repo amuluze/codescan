@@ -6,7 +6,7 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import { check as updaterCheck, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import type { Finding } from "./types";
+import type { Finding, ScanEvent } from "./types";
 
 export type ProgressPayload = {
   stage: "walking" | "scanning" | "finalizing";
@@ -24,6 +24,41 @@ export type RuleInfo = {
   message: string;
   enabled: boolean;
   source: string;
+  error?: string | null;
+  editable?: boolean;
+  origin?: string;
+};
+
+export type RulePackInfo = {
+  id: string;
+  version: string;
+  engine_min?: string | null;
+  engine_max?: string | null;
+  description?: string | null;
+  rules: number;
+  path: string;
+  integrity?: string;
+  signed_by?: string | null;
+  error?: string | null;
+};
+
+export type RuleTestHit = {
+  rule_id: string;
+  line: number;
+  column: number;
+  message: string;
+  match_text: string;
+};
+
+export type ScanRuleset = {
+  enabled_rules?: string[];
+  custom_rules_sha256?: string | null;
+  packs?: {
+    id: string;
+    version: string;
+    integrity?: string;
+    signed_by?: string | null;
+  }[];
 };
 
 export type ScanSummary = {
@@ -206,10 +241,26 @@ export const api = {
   setRuleEnabled: (ruleId: string, enabled: boolean) =>
     platform.invoke<void>("set_rule_enabled", { ruleId, enabled }),
   customRulesStatus: () => platform.invoke<string | null>("custom_rules_status"),
+  getCustomRules: () => platform.invoke<string | null>("get_custom_rules"),
+  validateCustomRules: (yaml: string) =>
+    platform.invoke<string[]>("validate_custom_rules", { yaml }),
+  saveCustomRules: (yaml: string) =>
+    platform.invoke<void>("save_custom_rules", { yaml }),
+  testCustomRule: (yaml: string, sample: string, language: string) =>
+    platform.invoke<RuleTestHit[]>("test_custom_rule", { candidateYaml: yaml, sample, language }),
+  listRulePacks: () => platform.invoke<RulePackInfo[]>("list_rule_packs"),
+  installRulePack: (sourceDir: string) =>
+    platform.invoke<RulePackInfo>("install_rule_pack", { sourceDir }),
+  removeRulePack: (id: string, version: string) =>
+    platform.invoke<void>("remove_rule_pack", { id, version }),
   startScan: (root: string) => platform.invoke<void>("start_scan", { root }),
   cancelScan: () => platform.invoke<void>("cancel_scan"),
   listScans: () => platform.invoke<ScanSummary[]>("list_scans"),
   getScan: (scanId: number) => platform.invoke<Finding[]>("get_scan", { scanId }),
+  getScanEvents: (scanId: number) =>
+    platform.invoke<ScanEvent[]>("get_scan_events", { scanId }),
+  getScanRuleset: (scanId: number) =>
+    platform.invoke<ScanRuleset>("get_scan_ruleset", { scanId }),
   deleteScan: (scanId: number) => platform.invoke<void>("delete_scan", { scanId }),
   setBaseline: (scanId: number) => platform.invoke<number>("set_baseline", { scanId }),
   gateDiff: (scanId: number) =>

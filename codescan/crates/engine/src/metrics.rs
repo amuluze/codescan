@@ -1,14 +1,12 @@
 //! 五项内置度量（quality 维度，走统一发现管线与指纹规则）。
 //! 语义均为 v1 近似（启发式），消息不声称超出结构匹配的证明力。
 
-use crate::compile::MetricKind;
+use crate::compile::{MetricKind, MetricRule};
 use crate::language::Language;
-use crate::model::{Dimension, Finding, Position, Severity, Span};
+use crate::model::{Finding, Position, Span};
+use crate::rules::RuleSpec;
 use std::collections::HashMap;
 use tree_sitter::Node;
-
-const METRIC_SEVERITY: Severity = Severity::Warning;
-const METRIC_DIMENSION: Dimension = Dimension::Quality;
 
 /// 各语法 node 名档位。未知 node 类型不计数（宁少报不误报）。
 pub(crate) struct Profile {
@@ -124,6 +122,8 @@ pub(crate) fn profile(lang: Language) -> Profile {
             assignments: &[
                 ("assignment_statement", "left", "right"),
                 ("short_var_declaration", "left", "right"),
+                ("const_spec", "name", "value"),
+                ("var_spec", "name", "value"),
             ],
         },
         Language::Rust => Profile {
@@ -161,14 +161,31 @@ fn option(options: &[(String, f64)], name: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
-fn finding(rule_id: &str, message: String, path: &str, span: Span, match_text: &str, degraded: bool) -> Finding {
+fn metric_message(spec: &RuleSpec, detail: &str) -> String {
+    if detail.is_empty() {
+        spec.message.clone()
+    } else if spec.message.trim().is_empty() {
+        detail.to_string()
+    } else {
+        format!("{}：{detail}", spec.message)
+    }
+}
+
+fn finding_for(
+    rule: &MetricRule,
+    detail: String,
+    path: &str,
+    span: Span,
+    match_text: &str,
+    degraded: bool,
+) -> Finding {
     Finding {
-        rule_id: rule_id.into(),
-        dimension: METRIC_DIMENSION,
-        severity: METRIC_SEVERITY,
+        rule_id: rule.spec.id.clone(),
+        dimension: rule.spec.dimension,
+        severity: rule.spec.severity,
         path: path.into(),
         span,
-        message,
+        message: metric_message(&rule.spec, &detail),
         match_text: match_text.into(),
         captures: Vec::new(),
         degraded,
@@ -270,38 +287,25 @@ pub fn file_metrics(
     source: &str,
     path: &str,
     degraded: bool,
-    configs: &[(MetricKind, Vec<(String, f64)>)],
+    metric_rules: &[MetricRule],
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     let root = tree.root_node();
     let prof = profile(lang);
 
-    let cyclomatic_threshold = configs
+    let function_rules: Vec<&MetricRule> = metric_rules
         .iter()
-        .find(|(k, _)| *k == MetricKind::CyclomaticComplexity)
-        .map(|(_, o)| option(o, "threshold", 15.0))
-        .unwrap_or(15.0);
-    let length_threshold = configs
-        .iter()
-        .find(|(k, _)| *k == MetricKind::FunctionLength)
-        .map(|(_, o)| option(o, "threshold", 80.0))
-        .unwrap_or(80.0);
-    let nesting_threshold = configs
-        .iter()
-        .find(|(k, _)| *k == MetricKind::NestingDepth)
-        .map(|(_, o)| option(o, "threshold", 5.0))
-        .unwrap_or(5.0);
+        .filter(|rule| {
+            matches!(
+                rule.kind,
+                MetricKind::CyclomaticComplexity
+                    | MetricKind::FunctionLength
+                    | MetricKind::NestingDepth
+            )
+        })
+        .collect();
 
-    // 函数级度量。
-    let has_length = configs
-        .iter()
-        .any(|(k, _)| *k == MetricKind::FunctionLength);
-    let has_cyclomatic = configs
-        .iter()
-        .any(|(k, _)| *k == MetricKind::CyclomaticComplexity);
-    let has_nesting = configs.iter().any(|(k, _)| *k == MetricKind::NestingDepth);
-
-    if has_length || has_cyclomatic || has_nesting {
+    if !function_rules.is_empty() {
         let mut functions = Vec::new();
         walk_all(root, &mut |node| {
             if prof.functions.contains(&node.kind()) {
@@ -319,57 +323,68 @@ pub fn file_metrics(
             let name = function_name(func, source);
             let text = node_text(func, source).to_string();
 
-            if has_length && lines as f64 > length_threshold {
-                findings.push(finding(
-                    "metric/function-length",
-                    format!("函数 {name} 长度 {lines} 行，超过阈值 {length_threshold}"),
-                    path,
-                    span,
-                    &text,
-                    degraded,
-                ));
-            }
-            if has_cyclomatic {
-                let mut decisions = 0usize;
-                walk_own_subtree(func, prof.functions, &mut |node| {
-                    if prof.decisions.contains(&node.kind())
-                        || is_logic_operator_node(node, source, lang)
-                    {
-                        decisions += 1;
+            for rule in &function_rules {
+                match rule.kind {
+                    MetricKind::FunctionLength => {
+                        let threshold = option(&rule.options, "threshold", 80.0);
+                        if lines as f64 > threshold {
+                            findings.push(finding_for(
+                                rule,
+                                format!("函数 {name} 长度 {lines} 行，超过阈值 {threshold}"),
+                                path,
+                                span,
+                                &text,
+                                degraded,
+                            ));
+                        }
                     }
-                });
-                let complexity = 1 + decisions;
-                if complexity as f64 > cyclomatic_threshold {
-                    findings.push(finding(
-                        "metric/cyclomatic-complexity",
-                        format!(
-                            "函数 {name} 圈复杂度 {complexity}，超过阈值 {cyclomatic_threshold}"
-                        ),
-                        path,
-                        span,
-                        &text,
-                        degraded,
-                    ));
-                }
-            }
-            if has_nesting {
-                let depth = max_block_depth(func, prof.blocks, prof.functions) - 1; // 函数体自身为 0 层
-                if depth as f64 > nesting_threshold {
-                    findings.push(finding(
-                        "metric/nesting-depth",
-                        format!("函数 {name} 最大嵌套深度 {depth}，超过阈值 {nesting_threshold}"),
-                        path,
-                        span,
-                        &text,
-                        degraded,
-                    ));
+                    MetricKind::CyclomaticComplexity => {
+                        let threshold = option(&rule.options, "threshold", 15.0);
+                        let mut decisions = 0usize;
+                        walk_own_subtree(func, prof.functions, &mut |node| {
+                            if prof.decisions.contains(&node.kind())
+                                || is_logic_operator_node(node, source, lang)
+                            {
+                                decisions += 1;
+                            }
+                        });
+                        let complexity = 1 + decisions;
+                        if complexity as f64 > threshold {
+                            findings.push(finding_for(
+                                rule,
+                                format!("函数 {name} 圈复杂度 {complexity}，超过阈值 {threshold}"),
+                                path,
+                                span,
+                                &text,
+                                degraded,
+                            ));
+                        }
+                    }
+                    MetricKind::NestingDepth => {
+                        let threshold = option(&rule.options, "threshold", 5.0);
+                        let depth = max_block_depth(func, prof.blocks, prof.functions) - 1; // 函数体自身为 0 层
+                        if depth as f64 > threshold {
+                            findings.push(finding_for(
+                                rule,
+                                format!("函数 {name} 最大嵌套深度 {depth}，超过阈值 {threshold}"),
+                                path,
+                                span,
+                                &text,
+                                degraded,
+                            ));
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
     }
 
-    if configs.iter().any(|(k, _)| *k == MetricKind::UnreachableCode) {
-        findings.extend(unreachable_findings(lang, root, source, path, degraded, &prof));
+    for rule in metric_rules
+        .iter()
+        .filter(|rule| rule.kind == MetricKind::UnreachableCode)
+    {
+        findings.extend(unreachable_findings(rule, lang, root, source, path, degraded, &prof));
     }
 
     findings
@@ -473,14 +488,14 @@ fn is_terminal_statement(node: Node<'_>, prof: &Profile, source: &str, lang: Lan
 }
 
 fn unreachable_findings(
+    rule: &MetricRule,
     lang: Language,
     root: Node<'_>,
-    _source: &str,
+    source: &str,
     path: &str,
     degraded: bool,
     prof: &Profile,
 ) -> Vec<Finding> {
-    let _ = lang;
     let mut findings = Vec::new();
     let mut blocks = Vec::new();
     walk_all(root, &mut |node| {
@@ -513,17 +528,17 @@ fn unreachable_findings(
             };
             if terminal_seen {
                 let span = span_of(child);
-                findings.push(finding(
-                    "metric/unreachable-code",
-                    "终止语句后存在不可达代码".into(),
+                findings.push(finding_for(
+                    rule,
+                    String::new(),
                     path,
                     span,
-                    "",
+                    node_text(child, source),
                     degraded,
                 ));
                 break; // 每个块只报第一条不可达区域
             }
-            if is_terminal_statement(stmt, prof, _source, lang_for_terminal(prof)) {
+            if is_terminal_statement(stmt, prof, source, lang) {
                 terminal_seen = true;
             }
         }
@@ -531,61 +546,51 @@ fn unreachable_findings(
     findings
 }
 
-fn lang_for_terminal(prof: &Profile) -> Language {
-    // 由 terminal 集合反推语言（避免再传参数）；仅用于 panic 特判。
-    if prof.terminal.contains(&"raise_statement") {
-        Language::Python
-    } else if prof.terminal.contains(&"throw_expression") {
-        Language::Rust
-    } else if prof.decisions.contains(&"enhanced_for_statement") {
-        Language::Java
-    } else if prof.decisions.contains(&"communication_case") {
-        Language::Go
-    } else {
-        Language::TypeScript
-    }
-}
-
 /// 跨文件重复块（语料级）。每处副本各发一条发现（Domain §1 多位置度量）。
+/// 只有启用（已编译）的 `duplicate-block` 规则参与；规则禁用时不执行任何默认检测。
 pub fn duplicate_blocks(
     corpus: &[(String, Vec<(String, usize)>)], // (path, [(normalized_line, original_line)])
-    configs: &[(MetricKind, Vec<(String, f64)>)],
+    metric_rules: &[MetricRule],
 ) -> Vec<Finding> {
-    let window = configs
+    let mut findings = Vec::new();
+    for rule in metric_rules
         .iter()
-        .find(|(k, _)| *k == MetricKind::DuplicateBlock)
-        .map(|(_, o)| option(o, "window", 10.0))
-        .unwrap_or(10.0) as usize;
-    let min_occurrences = configs
-        .iter()
-        .find(|(k, _)| *k == MetricKind::DuplicateBlock)
-        .map(|(_, o)| option(o, "min_occurrences", 2.0))
-        .unwrap_or(2.0) as usize;
+        .filter(|rule| rule.kind == MetricKind::DuplicateBlock)
+    {
+        findings.extend(duplicate_blocks_for_rule(corpus, rule));
+    }
+    findings
+}
+
+fn duplicate_blocks_for_rule(
+    corpus: &[(String, Vec<(String, usize)>)],
+    rule: &MetricRule,
+) -> Vec<Finding> {
+    let window = option(&rule.options, "window", 10.0) as usize;
+    let min_occurrences = option(&rule.options, "min_occurrences", 2.0) as usize;
     if window == 0 {
         return Vec::new();
     }
 
-    // 窗口哈希 → 出现位置列表。
-    let mut groups: HashMap<u64, Vec<(usize, usize)>> = HashMap::new(); // hash -> [(file_idx, seq_idx)]
+    // 窗口内容哈希 → 出现位置列表；SHA-256 避免短哈希碰撞合并无关块。
+    let mut groups: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     for (file_idx, (_, lines)) in corpus.iter().enumerate() {
         if lines.len() < window {
             continue;
         }
         for seq_idx in 0..=(lines.len() - window) {
-            let mut hasher = Sha256Hasher::default();
-            for (text, _) in &lines[seq_idx..seq_idx + window] {
-                hasher.update(text.as_bytes());
-                    hasher.update(&[0xFF]);
-            }
-            groups
-                .entry(hasher.finalize64())
-                .or_default()
-                .push((file_idx, seq_idx));
+            let signature = lines[seq_idx..seq_idx + window]
+                .iter()
+                .map(|(text, _)| text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let hash = crate::fingerprint::content_hash(&signature);
+            groups.entry(hash).or_default().push((file_idx, seq_idx));
         }
     }
 
-    let mut groups_vec: Vec<(&u64, &Vec<(usize, usize)>)> = groups.iter().collect();
-    groups_vec.sort_by_key(|(hash, _)| **hash); // 确定性：按哈希排序
+    let mut groups_vec: Vec<(&String, &Vec<(usize, usize)>)> = groups.iter().collect();
+    groups_vec.sort_by(|a, b| a.0.cmp(b.0)); // 确定性：按内容哈希排序
 
     // Pass 2：每组先做文件内相邻窗口合并；合格组（≥min_occurrences 个副本）
     // 的区间再按文件做跨组重叠合并，消除同一重复区域的错位多报。
@@ -634,8 +639,8 @@ pub fn duplicate_blocks(
                 .map(|(t, _)| t.as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
-            findings.push(finding(
-                "metric/duplicate-block",
+            findings.push(finding_for(
+                rule,
                 format!("重复代码块：约 {} 行（出现于多个位置，启发式）", end - start),
                 path,
                 Span {
@@ -656,29 +661,45 @@ pub fn duplicate_blocks(
     findings
 }
 
-/// FNV-1a 64 位（窗口去重的快速哈希；碰撞再由内容哈希兜底不敏感：仅提示性度量）。
-#[derive(Default)]
-struct Sha256Hasher {
-    state: u64,
-}
-
-impl Sha256Hasher {
-    fn update(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.state ^= b as u64;
-            self.state = self.state.wrapping_mul(0x100000001b3);
-        }
-    }
-
-    fn finalize64(&self) -> u64 {
-        self.state
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::language::{parse, Language};
+    use crate::model::{Dimension, Severity};
+    use crate::rules::{RuleLanguage, RuleSpec};
+
+    fn metric_rule(kind: MetricKind, options: &[(&str, f64)]) -> MetricRule {
+        MetricRule {
+            spec: RuleSpec {
+                id: "metric/test".into(),
+                language: RuleLanguage::All,
+                dimension: Dimension::Quality,
+                severity: Severity::Warning,
+                message: String::new(),
+                pattern: None,
+                text: None,
+                metric: Some("test".into()),
+                taint: None,
+                inheritance: None,
+                options: options
+                    .iter()
+                    .map(|(k, v)| ((*k).to_string(), *v))
+                    .collect(),
+                filters_not: Vec::new(),
+                filters_inside: Vec::new(),
+                metavariables: Vec::new(),
+                imports: Vec::new(),
+                imported_symbols: Vec::new(),
+                no_shadow: false,
+                field_receiver: false,
+            },
+            kind,
+            options: options
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), *v))
+                .collect(),
+        }
+    }
 
     fn run(
         lang: Language,
@@ -687,13 +708,7 @@ mod tests {
         options: &[(&str, f64)],
     ) -> Vec<Finding> {
         let parsed = parse(lang, source.as_bytes());
-        let configs = vec![(
-            kind,
-            options
-                .iter()
-                .map(|(k, v)| ((*k).to_string(), *v))
-                .collect(),
-        )];
+        let configs = vec![metric_rule(kind, options)];
         file_metrics(lang, &parsed.tree, &parsed.source, "t", false, &configs)
     }
 
@@ -703,6 +718,33 @@ mod tests {
             "未找到包含 {needle:?} 的度量发现：{:?}",
             findings.iter().map(|f| &f.message).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn finding_uses_declared_rule_metadata() {
+        let parsed = parse(
+            Language::Python,
+            b"def f():\n    a = 1\n    b = 2\n    c = 3\n    return a\n",
+        );
+        let mut rule = metric_rule(MetricKind::FunctionLength, &[("threshold", 3.0)]);
+        rule.spec.id = "custom/long".into();
+        rule.spec.dimension = Dimension::Security;
+        rule.spec.severity = Severity::Info;
+        rule.spec.message = "自定义长度规则".into();
+        let findings = file_metrics(
+            Language::Python,
+            &parsed.tree,
+            &parsed.source,
+            "t",
+            false,
+            &[rule],
+        );
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        let finding = &findings[0];
+        assert_eq!(finding.rule_id, "custom/long");
+        assert_eq!(finding.dimension, Dimension::Security);
+        assert_eq!(finding.severity, Severity::Info);
+        assert!(finding.message.contains("自定义长度规则"), "{finding:?}");
     }
 
     #[test]

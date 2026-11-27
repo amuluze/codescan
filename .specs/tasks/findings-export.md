@@ -1,3 +1,7 @@
+---
+status: done
+---
+
 # Task Spec: 发现页导出（展示层）
 
 ## 目标

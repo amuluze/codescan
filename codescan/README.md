@@ -36,14 +36,14 @@ CodeScan takes the deterministic path and makes it explicit:
 
 | Capability | Notes |
 |---|---|
-| Deterministic AST engine | 73 built-in rules: tree-sitter patterns, text patterns, metric thresholds, taint source→sink rules |
+| Deterministic AST engine | 113 built-in rules: tree-sitter patterns, text patterns, metric thresholds, taint/dataflow rules, Java inheritance rules |
 | Three dimensions | Every finding belongs to exactly one of `security`, `business-logic`, `quality` |
 | Quality metrics | Cyclomatic complexity, function length, nesting depth, duplicate blocks, unreachable code |
 | Taint analysis | Intra-procedural approximation plus cross-file propagation for explicit imports (TS/JS, Python, Go same-package, Java class/static imports, Rust `use` paths), with points-to object sets and field sensitivity |
 | Baseline & gate | Freeze a scan as a baseline; gate on *new* findings only, by fingerprint equality |
 | SARIF 2.1.0 | One-to-one mapping with internal findings, including the `degraded` marker |
 | Desktop app | Scan, findings, rules, history, settings — local SQLite, local data root |
-| CLI | `codescan scan` for local checks and CI gating, `codescan github-upload` for SARIF upload |
+| CLI | `codescan scan` for local checks and CI gating, `codescan pack` (install/list/remove/sign/trust) for local rule packs, `codescan github-upload` for SARIF upload |
 | LLM assist (BYO key) | Triage, streaming triage, batch triage, workspace source review, candidate rule generation — advisory only |
 | Privacy | Scanning is read-only; no telemetry (the only outbound request is the GitHub Releases update check); API keys live in a Rust-owned secrets table |
 
@@ -51,15 +51,15 @@ CodeScan takes the deterministic path and makes it explicit:
 
 | Language | Rules |
 |---|---|
-| TypeScript / TSX | 12 |
-| JavaScript / JSX | 6 |
-| Python | 12 |
-| Java | 11 |
-| Go | 10 |
-| Rust | 11 |
+| TypeScript / TSX | 25 |
+| JavaScript / JSX | 11 |
+| Python | 16 |
+| Java | 15 |
+| Go | 16 |
+| Rust | 19 |
 | Language-agnostic (`*`) | 11 (5 metrics + 6 text patterns) |
 
-By dimension: `security` 59 · `business-logic` 3 · `quality` 11.
+By dimension: `security` 97 · `business-logic` 3 · `quality` 13.
 
 Rules live in [`crates/engine/rules/`](crates/engine/rules/) as YAML. Adding your own invariants is a first-class workflow — see [docs/rules.md](docs/rules.md).
 
@@ -94,6 +94,10 @@ cargo run --manifest-path codescan/Cargo.toml -p codescan-cli -- scan <repo>
 cargo run --manifest-path codescan/Cargo.toml -p codescan-cli -- scan <repo> \
   --baseline codescan-baseline.json --fail-on new \
   --format sarif --out codescan.sarif
+
+# manage local rule packs (default data root ~/.codescan)
+cargo run --manifest-path codescan/Cargo.toml -p codescan-cli -- pack install ./my-pack
+cargo run --manifest-path codescan/Cargo.toml -p codescan-cli -- pack list --json
 ```
 
 Exit codes: `0` clean · `1` gate hit · `2` usage/runtime error. Full reference: [docs/cli.md](docs/cli.md).
@@ -200,8 +204,8 @@ task check          # full gate: typecheck + vitest + build + clippy -D warnings
 
 - Windows / Linux packaging parity.
 - Larger rule library per language, more project-invariant examples.
-- Rule packs shared as versioned YAML bundles.
-- Rule authoring UX in the desktop app.
+- Rule pack registry and remote updates (local versioned packs with integrity checks and Ed25519 signatures/trust are available).
+- Advanced rule authoring: schema-assisted editing, multi-file rule packs, and full fixture regression.
 
 ## Contributing
 

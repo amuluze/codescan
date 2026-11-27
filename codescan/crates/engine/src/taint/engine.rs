@@ -1,7 +1,7 @@
 //! 项目级污点分析：模块解析（同文件/显式导入/Go 同包）、布尔摘要不动点、
 //! 字段敏感访问路径与对象组别名近似。语义见 Domain §4a/4b。
 
-use super::facts::{AccessPath, CallFact, ExprFact, FileFacts, FnFact, StmtFact};
+use super::facts::{AccessPath, CallFact, ExprFact, FileFacts, FnFact, GuardFact, StmtFact};
 use crate::compile::TaintRule;
 use crate::model::{Finding, Position};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -16,6 +16,22 @@ struct Summary {
     ret_from_param: HashSet<usize>,
     /// 返回值的内部 source 污点位置（与形参无关）。
     ret_internal: Option<Position>,
+}
+
+type ReturnAlias = (usize, Vec<String>, Vec<GuardFact>);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WriteEffect {
+    target_param: usize,
+    target_fields: Vec<String>,
+    source: EffectSource,
+    guards: Vec<GuardFact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EffectSource {
+    Param { index: usize, fields: Vec<String> },
+    Internal(Position),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -33,6 +49,10 @@ struct Project<'a> {
     /// 每文件：本地名 → 全局函数 id（本地 + 显式导入 + Go 同包）。
     resolution: Vec<HashMap<String, Vec<usize>>>,
     summaries: Vec<Summary>,
+    /// 每个函数的“写形参字段 ← 形参/内部污点”效果，供调用点回放。
+    effects: Vec<Vec<WriteEffect>>,
+    /// 每个函数的返回值对象身份：可直接回指某个形参的字段路径。
+    ret_aliases: Vec<Vec<ReturnAlias>>,
 }
 
 impl<'a> Project<'a> {
@@ -80,6 +100,7 @@ impl<'a> Project<'a> {
         let mut merged: BTreeMap<(String, usize, usize, usize, usize), Finding> = BTreeMap::new();
         for gid in 0..self.globals.len() {
             let mut state = PointsToState::default();
+            self.apply_globals(gid, &mut state, &self.summaries);
             let f = self.fn_fact(gid);
             for (idx, pos) in f.param_sources.iter().enumerate() {
                 if let (Some(pos), Some(name)) = (pos, f.params.get(idx)) {
@@ -112,7 +133,8 @@ impl<'a> Project<'a> {
                 // 返回值内部污点。
                 if next_summary.ret_internal.is_none() {
                     let f = self.fn_fact(gid);
-                    let state = PointsToState::default();
+                    let mut state = PointsToState::default();
+                    self.apply_globals(gid, &mut state, &old);
                     if let Some(flow) = self.eval_returns(f, &state, &old) {
                         next_summary.ret_internal = Some(flow);
                     }
@@ -132,9 +154,10 @@ impl<'a> Project<'a> {
                         continue;
                     }
                     let mut state = PointsToState::default();
+                    self.apply_globals(gid, &mut state, &old);
                     state.set_whole(&name, Position { line: 1, column: 1 });
                     let f = self.fn_fact(gid);
-                    self.apply_stmts(f, &mut state, &old);
+                    self.apply_stmts(f, &mut state, &old, self.globals[gid].file_idx);
                     if needs_sink && self.any_sink_flow(f, &state, &old) {
                         next_summary.sink_from_param.insert(p);
                     }
@@ -156,6 +179,58 @@ impl<'a> Project<'a> {
         }
     }
 
+    fn apply_call_effects(
+        &self,
+        file_idx: usize,
+        calls: &[CallFact],
+        state: &mut PointsToState,
+    ) {
+        for call in calls {
+            if call.sanitized {
+                continue;
+            }
+            for callee in self.resolve_call(file_idx, call) {
+                for effect in &self.effects[callee] {
+                    if !guards_pass(&effect.guards, call) {
+                        continue;
+                    }
+                    let Some(target_arg) = call.args.get(effect.target_param) else {
+                        continue;
+                    };
+                    let Some(target_path) = target_arg.paths.first() else {
+                        continue;
+                    };
+                    let flow = match &effect.source {
+                        EffectSource::Param { index, fields } => {
+                            let Some(source_arg) = call.args.get(*index) else {
+                                continue;
+                            };
+                            if fields.is_empty() {
+                                self.expr_flows(source_arg, state)
+                                    .first()
+                                    .copied()
+                            } else {
+                                let Some(source_path) = source_arg.paths.first() else {
+                                    continue;
+                                };
+                                let mut path = source_path.clone();
+                                path.fields.extend(fields.iter().cloned());
+                                state.read_flow(&path)
+                            }
+                        }
+                        EffectSource::Internal(position) => Some(*position),
+                    };
+                    let Some(flow) = flow else {
+                        continue;
+                    };
+                    let mut target = target_path.clone();
+                    target.fields.extend(effect.target_fields.iter().cloned());
+                    state.strong_write(&target, Some(flow));
+                }
+            }
+        }
+    }
+
     fn collect_fn(
         &self,
         gid: usize,
@@ -166,10 +241,18 @@ impl<'a> Project<'a> {
         merged: &mut BTreeMap<(String, usize, usize, usize, usize), Finding>,
     ) {
         let f = self.fn_fact(gid);
-        self.apply_stmts(f, state, &self.summaries);
+        self.apply_stmts(f, state, &self.summaries, file_idx);
+
+        let calls: Vec<CallFact> = f
+            .guarded_calls
+            .iter()
+            .map(|guarded| guarded.call.clone())
+            .collect();
+        self.apply_call_effects(file_idx, &calls, state);
 
         // sink 命中：state 为语句处理后的最终状态（存在性近似，Domain §4a.3）。
-        for sink in &f.sinks {
+        for guarded_sink in &f.guarded_sinks {
+            let sink = &guarded_sink.sink;
             let flows = self.expr_flows(&sink.expr, state);
             if flows.is_empty() {
                 continue;
@@ -214,16 +297,6 @@ impl<'a> Project<'a> {
         if depth >= MAX_CALL_DEPTH {
             return;
         }
-        let mut calls: Vec<CallFact> = Vec::new();
-        for stmt in &f.stmts {
-            gather_stmt_calls(stmt, &mut calls);
-        }
-        for ret in &f.returns {
-            gather_expr_calls(ret, &mut calls);
-        }
-        for sink in &f.sinks {
-            gather_expr_calls(&sink.expr, &mut calls);
-        }
         for call in calls {
             if call.sanitized {
                 continue;
@@ -251,6 +324,7 @@ impl<'a> Project<'a> {
                         continue;
                     }
                     let mut callee_state = PointsToState::default();
+                    self.apply_globals(*callee, &mut callee_state, &self.summaries);
                     callee_state.set_whole(name, flow);
                     stack.push((*callee, arg_idx));
                     let callee_file = self.globals[*callee].file_idx;
@@ -268,13 +342,39 @@ impl<'a> Project<'a> {
         }
     }
 
-    fn apply_stmts(&self, f: &FnFact, state: &mut PointsToState, summaries: &[Summary]) {
-        for stmt in &f.stmts {
+    fn apply_globals(&self, gid: usize, state: &mut PointsToState, summaries: &[Summary]) {
+        let file_idx = self.globals[gid].file_idx;
+        let file = &self.files[file_idx];
+        self.apply_assignments(&file.globals, state, summaries, file_idx);
+    }
+
+    fn apply_stmts(
+        &self,
+        f: &FnFact,
+        state: &mut PointsToState,
+        summaries: &[Summary],
+        file_idx: usize,
+    ) {
+        for assignment in &f.guarded_assignments {
+            for target in &assignment.targets {
+                self.assign(target, &assignment.rhs, state, summaries, file_idx);
+            }
+        }
+    }
+
+    fn apply_assignments(
+        &self,
+        stmts: &[StmtFact],
+        state: &mut PointsToState,
+        summaries: &[Summary],
+        file_idx: usize,
+    ) {
+        for stmt in stmts {
             let StmtFact::Assign { targets, rhs } = stmt else {
                 continue;
             };
             for target in targets {
-                self.assign(target, rhs, state, summaries);
+                self.assign(target, rhs, state, summaries, file_idx);
             }
         }
     }
@@ -285,6 +385,7 @@ impl<'a> Project<'a> {
         rhs: &ExprFact,
         state: &mut PointsToState,
         summaries: &[Summary],
+        file_idx: usize,
     ) {
         if rhs.sanitized {
             state.strong_write(target, None);
@@ -293,6 +394,17 @@ impl<'a> Project<'a> {
         if let Some(source_var) = &rhs.alias {
             state.alias_assign(target, source_var);
             return;
+        }
+        if rhs.call_only {
+            if let Some(call) = rhs.calls.first() {
+                let aliases = self.call_return_aliases(file_idx, call, state);
+                if !aliases.is_empty() {
+                    for source in aliases {
+                        state.alias_assign_path(target, &source);
+                    }
+                    return;
+                }
+            }
         }
         if let Some(fields) = &rhs.fields {
             // 形状敏感初始化：目标得到一个新对象，字段递归展开。
@@ -316,6 +428,34 @@ impl<'a> Project<'a> {
             .first()
             .copied();
         state.strong_write(target, flow);
+    }
+
+    fn call_return_aliases(
+        &self,
+        file_idx: usize,
+        call: &CallFact,
+        _state: &PointsToState,
+    ) -> Vec<AccessPath> {
+        let mut aliases = Vec::new();
+        for callee in self.resolve_call(file_idx, call) {
+            for (index, fields, guards) in &self.ret_aliases[callee] {
+                if !guards_pass(guards, call) {
+                    continue;
+                }
+                let Some(arg) = call.args.get(*index) else {
+                    continue;
+                };
+                let Some(path) = arg.paths.first() else {
+                    continue;
+                };
+                let mut path = path.clone();
+                path.fields.extend(fields.iter().cloned());
+                aliases.push(path);
+            }
+        }
+        aliases.sort();
+        aliases.dedup();
+        aliases
     }
 
     fn init_shape(
@@ -439,9 +579,9 @@ impl<'a> Project<'a> {
     }
 
     fn any_sink_flow(&self, f: &FnFact, state: &PointsToState, summaries: &[Summary]) -> bool {
-        f.sinks
+        f.guarded_sinks
             .iter()
-            .any(|sink| !self.expr_flows_with(&sink.expr, state, summaries).is_empty())
+            .any(|sink| !self.expr_flows_with(&sink.sink.expr, state, summaries).is_empty())
     }
 }
 
@@ -581,6 +721,47 @@ impl PointsToState {
         entry.ptrs.extend(ptrs.iter().copied());
     }
 
+    fn objects_for_path(&mut self, path: &AccessPath) -> std::collections::BTreeSet<usize> {
+        let mut current = self.objects_for_alias(&path.base);
+        for segment in &path.fields {
+            let mut next = std::collections::BTreeSet::new();
+            for obj in current {
+                if let Some(fields) = self.obj_fields.get(&obj) {
+                    if let Some(value) = fields.get(segment) {
+                        next.extend(value.ptrs.iter().copied());
+                    } else if let Some(value) = fields.get("*") {
+                        next.extend(value.ptrs.iter().copied());
+                    }
+                }
+            }
+            current = next;
+            if current.is_empty() {
+                break;
+            }
+        }
+        current
+    }
+
+    fn alias_assign_path(&mut self, target: &AccessPath, source: &AccessPath) -> bool {
+        let set = self.objects_for_path(source);
+        if set.is_empty() {
+            return false;
+        }
+        if target.fields.is_empty() {
+            self.var_ptrs
+                .entry(target.base.clone())
+                .or_default()
+                .extend(set);
+            return true;
+        }
+        let parents = self.objects_for_write_parent(target);
+        let field = target.fields.last().cloned().unwrap_or_default();
+        for parent in parents {
+            self.write_field_ptr(parent, &field, &set);
+        }
+        true
+    }
+
     fn read_flow(&self, path: &AccessPath) -> Option<Position> {
         let set = self.var_ptrs.get(&path.base)?;
         if path.fields.is_empty() {
@@ -660,6 +841,21 @@ impl PointsToState {
     }
 }
 
+fn guards_pass(guards: &[GuardFact], call: &CallFact) -> bool {
+    guards.iter().all(|guard| {
+        let Some(arg) = call.args.get(guard.param) else {
+            return true;
+        };
+        if let Some(value) = &guard.equals {
+            return arg
+                .constant_text
+                .as_deref()
+                .is_none_or(|actual| actual == value);
+        }
+        arg.constant.is_none_or(|constant| constant == guard.truthy)
+    })
+}
+
 fn pick_min(current: Option<Position>, candidate: Position) -> Option<Position> {
     match current {
         Some(pos)
@@ -671,25 +867,133 @@ fn pick_min(current: Option<Position>, candidate: Position) -> Option<Position> 
     }
 }
 
-fn gather_expr_calls(expr: &ExprFact, out: &mut Vec<CallFact>) {
-    for call in &expr.calls {
-        out.push(call.clone());
-        for arg in &call.args {
-            gather_expr_calls(arg, out);
+fn compute_effects(f: &FnFact) -> Vec<WriteEffect> {
+    let mut aliases: HashMap<String, (usize, Vec<String>)> = HashMap::new();
+    for (index, name) in f.params.iter().enumerate() {
+        if !name.is_empty() {
+            aliases.insert(name.clone(), (index, Vec::new()));
         }
     }
+    let mut effects = Vec::new();
+    for assignment in &f.guarded_assignments {
+        let source = resolve_effect_source(&assignment.rhs, &aliases);
+        for target in &assignment.targets {
+            if target.fields.is_empty() {
+                if let Some(EffectSource::Param { index, fields }) = &source {
+                    aliases.insert(target.base.clone(), (*index, fields.clone()));
+                } else {
+                    aliases.remove(&target.base);
+                }
+                continue;
+            }
+            let Some((param, alias_fields)) = aliases.get(&target.base).cloned() else {
+                continue;
+            };
+            let Some(source) = &source else {
+                continue;
+            };
+            let mut target_fields = alias_fields;
+            target_fields.extend(target.fields.iter().cloned());
+            effects.push(WriteEffect {
+                target_param: param,
+                target_fields,
+                source: source.clone(),
+                guards: assignment.guards.clone(),
+            });
+        }
+    }
+    effects.sort_by(|a, b| {
+        (a.target_param, &a.target_fields).cmp(&(b.target_param, &b.target_fields))
+    });
+    effects.dedup();
+    effects
 }
 
-fn gather_stmt_calls(stmt: &StmtFact, out: &mut Vec<CallFact>) {
-    match stmt {
-        StmtFact::Assign { rhs, .. } => gather_expr_calls(rhs, out),
-        StmtFact::Call(call) => {
-            out.push(call.clone());
-            for arg in &call.args {
-                gather_expr_calls(arg, out);
+fn compute_return_aliases(f: &FnFact) -> Vec<ReturnAlias> {
+    let mut aliases: HashMap<String, (usize, Vec<String>)> = HashMap::new();
+    for (index, name) in f.params.iter().enumerate() {
+        if !name.is_empty() {
+            aliases.insert(name.clone(), (index, Vec::new()));
+        }
+    }
+    for assignment in &f.guarded_assignments {
+        for target in &assignment.targets {
+            if !target.fields.is_empty() {
+                continue;
+            }
+            if let Some(EffectSource::Param { index, fields }) =
+                resolve_effect_source(&assignment.rhs, &aliases)
+            {
+                aliases.insert(target.base.clone(), (index, fields));
+            } else {
+                aliases.remove(&target.base);
             }
         }
     }
+    let mut aliases_out = Vec::new();
+    for guarded_ret in &f.guarded_returns {
+        let guards = guarded_ret.guards.clone();
+        let ret = &guarded_ret.expr;
+        if ret.fields.is_some() || !ret.calls.is_empty() {
+            continue;
+        }
+        let paths = if !ret.identity_paths.is_empty() {
+            ret.identity_paths.clone()
+        } else if ret.paths.len() == 1 {
+            ret.paths.clone()
+        } else {
+            Vec::new()
+        };
+        for path in paths {
+            if let Some((index, fields)) = aliases.get(&path.base) {
+                let mut fields = fields.clone();
+                fields.extend(path.fields.iter().cloned());
+                aliases_out.push((*index, fields, guards.clone()));
+            }
+        }
+        if ret.identity_paths.is_empty() && ret.paths.is_empty() {
+            if let Some(var) = &ret.alias {
+                if let Some((index, fields)) = aliases.get(var) {
+                    aliases_out.push((*index, fields.clone(), guards.clone()));
+                }
+            }
+        }
+    }
+    aliases_out.sort();
+    aliases_out.dedup();
+    aliases_out
+}
+
+fn resolve_effect_source(
+    expr: &ExprFact,
+    aliases: &HashMap<String, (usize, Vec<String>)>,
+) -> Option<EffectSource> {
+    if expr.sanitized {
+        return None;
+    }
+    if let Some(var) = &expr.alias {
+        if let Some((index, fields)) = aliases.get(var) {
+            return Some(EffectSource::Param {
+                index: *index,
+                fields: fields.clone(),
+            });
+        }
+    }
+    for path in &expr.paths {
+        if let Some((index, fields)) = aliases.get(&path.base) {
+            let mut fields = fields.clone();
+            fields.extend(path.fields.iter().cloned());
+            return Some(EffectSource::Param {
+                index: *index,
+                fields,
+            });
+        }
+    }
+    expr.sources
+        .iter()
+        .min()
+        .copied()
+        .map(EffectSource::Internal)
 }
 
 /// 项目分析入口：规则 + 全部文件事实（按路径排序后传入以保证确定性）。
@@ -767,6 +1071,18 @@ pub fn analyze_project(rule: &TaintRule, files: &[FileFacts]) -> Vec<Finding> {
         resolution.push(map);
     }
 
+    let effects: Vec<Vec<WriteEffect>> = (0..globals.len())
+        .map(|gid| {
+            let g = globals[gid];
+            compute_effects(&files[g.file_idx].functions[g.func_idx])
+        })
+        .collect();
+    let ret_aliases: Vec<Vec<ReturnAlias>> = (0..globals.len())
+        .map(|gid| {
+            let g = globals[gid];
+            compute_return_aliases(&files[g.file_idx].functions[g.func_idx])
+        })
+        .collect();
     let mut project = Project {
         rule,
         files,
@@ -774,6 +1090,8 @@ pub fn analyze_project(rule: &TaintRule, files: &[FileFacts]) -> Vec<Finding> {
         module_index,
         resolution,
         summaries: Vec::new(),
+        effects,
+        ret_aliases,
     };
     project.analyze()
 }

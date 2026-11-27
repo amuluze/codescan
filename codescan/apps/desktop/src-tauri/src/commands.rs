@@ -25,6 +25,12 @@ pub struct RuleInfo {
     pub message: String,
     pub enabled: bool,
     pub source: String,
+    /// 解析/编译错误；规则目录里的正常规则为 null。
+    pub error: Option<String>,
+    /// 自定义规则可在规则页编辑；内置/规则包规则只读。
+    pub editable: bool,
+    /// builtin / custom / 规则包 "id@version"。
+    pub origin: String,
 }
 
 #[derive(Serialize)]
@@ -47,6 +53,11 @@ fn custom_rules_path() -> PathBuf {
 
 fn read_custom_rules() -> Option<String> {
     std::fs::read_to_string(custom_rules_path()).ok()
+}
+
+fn read_effective_rules() -> Result<Option<String>, String> {
+    let custom = read_custom_rules();
+    codescan_engine::packs::combined_rules(&data_root(), custom.as_deref())
 }
 
 /// 内置技能覆写（设置页编辑）：Rust 独占写入数据根，审查时按名覆盖内置正文。
@@ -248,9 +259,6 @@ pub fn list_directory(path: Option<String>) -> Result<DirListing, String> {
 
 #[tauri::command]
 pub fn list_rules(state: State<'_, AppState>) -> Result<Vec<RuleInfo>, String> {
-    let engine = Engine::with_rules(read_custom_rules().as_deref(), &HashSet::new())
-        .map_err(|errs| errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))?;
-    let mut infos = Vec::new();
     let disabled: HashSet<String> = state
         .store
         .lock()
@@ -259,17 +267,109 @@ pub fn list_rules(state: State<'_, AppState>) -> Result<Vec<RuleInfo>, String> {
         .unwrap_or_default()
         .into_iter()
         .collect();
+    let custom = match read_effective_rules() {
+        Ok(custom) => custom,
+        Err(_) => read_custom_rules(),
+    };
+    let pack_origins = codescan_engine::packs::rule_origins(&data_root()).unwrap_or_default();
+    let custom_ids: HashSet<String> = custom
+        .as_deref()
+        .map(|yaml| {
+            let (specs, errors) = codescan_engine::rules::parse_rule_set_lenient(yaml);
+            specs
+                .into_iter()
+                .map(|spec| spec.id)
+                .chain(errors.into_iter().map(|error| error.rule_id))
+                .collect()
+        })
+        .unwrap_or_default();
+    // 禁用规则不参与编译校验（Domain §3.3）；目录仍包含它们以支持重新启用。
+    let mut build_errors = Vec::new();
+    let engine = match Engine::with_rules(custom.as_deref(), &disabled) {
+        Ok(engine) => engine,
+        Err(errors) => {
+            build_errors = errors;
+            // 启用中的坏规则不能清空整个规则页：用“全部禁用”重建目录，
+            // 有效规则照常列出，坏规则错误在下面作为 error 行展示。
+            let mut all_disabled: HashSet<String> = Engine::with_builtin(&HashSet::new())
+                .map_err(|errs| errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))?
+                .all_rule_ids()
+                .into_iter()
+                .collect();
+            if let Some(yaml) = custom.as_deref() {
+                let (specs, errors) = codescan_engine::rules::parse_rule_set_lenient(yaml);
+                all_disabled.extend(specs.into_iter().map(|spec| spec.id));
+                all_disabled.extend(errors.into_iter().map(|error| error.rule_id));
+            }
+            all_disabled.insert("<file>".into());
+            all_disabled.insert("<unknown>".into());
+            match Engine::with_rules(custom.as_deref(), &all_disabled) {
+                Ok(engine) => engine,
+                Err(more) => {
+                    // id 冲突等目录级错误：至少保留内置规则列表。
+                    build_errors.extend(more);
+                    Engine::with_builtin(&disabled).map_err(|errs| {
+                        errs.iter()
+                            .map(|e| e.to_string())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    })?
+                }
+            }
+        }
+    };
+    let mut errors_by_rule: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for error in engine.rule_errors().iter().chain(build_errors.iter()) {
+        errors_by_rule
+            .entry(error.rule_id.clone())
+            .or_default()
+            .push(error.to_string());
+    }
+
+    let mut infos = Vec::new();
     for (id, language, dimension, severity, message, source) in engine.rule_catalog() {
+        let error = errors_by_rule.remove(&id).map(|errors| errors.join("；"));
         infos.push(RuleInfo {
             id: id.clone(),
             language,
             dimension,
             severity,
-            message,
-            enabled: !disabled.contains(&id),
+            message: match &error {
+                Some(detail) => format!("规则错误：{detail}"),
+                None => message,
+            },
+            enabled: error.is_none() && !disabled.contains(&id),
             source,
+            error,
+            editable: custom_ids.contains(&id),
+            origin: if custom_ids.contains(&id) {
+                "custom".into()
+            } else {
+                pack_origins
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| "builtin".into())
+            },
         });
     }
+
+    for (id, errors) in errors_by_rule {
+        let detail = errors.join("；");
+        infos.push(RuleInfo {
+            id,
+            language: "*".into(),
+            dimension: "quality".into(),
+            severity: "info".into(),
+            message: format!("规则错误：{detail}"),
+            enabled: false,
+            source: detail.clone(),
+            error: Some(detail),
+            editable: true,
+            origin: "custom".into(),
+        });
+    }
+    infos.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(infos)
 }
 
@@ -288,11 +388,19 @@ pub fn set_rule_enabled(
 }
 
 #[tauri::command]
-pub fn custom_rules_status() -> Result<Option<String>, String> {
+pub fn custom_rules_status(state: State<'_, AppState>) -> Result<Option<String>, String> {
     match std::fs::read_to_string(custom_rules_path()) {
         Ok(content) => {
-            // 编译校验（启停无关）；错误以文本返回供规则管理页展示。
-            match Engine::with_rules(Some(&content), &HashSet::new()) {
+            let disabled: HashSet<String> = state
+                .store
+                .lock()
+                .unwrap()
+                .disabled_rules()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            // 校验范围 = 启用集；禁用规则的错误由 list_rules 的 error 行展示。
+            match Engine::with_rules(Some(&content), &disabled) {
                 Ok(_) => Ok(Some(content)),
                 Err(errs) => Err(errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n")),
             }
@@ -311,11 +419,18 @@ pub async fn start_scan(
     let manager = state.manager.clone();
     let app = app.clone();
     let root_path = PathBuf::from(root);
+    let effective_rules = read_effective_rules()?;
+    let pack_snapshot = codescan_engine::packs::snapshots(&data_root());
     tauri::async_runtime::spawn_blocking(move || {
         let progress_app = app.clone();
-        let outcome = manager.run_scan(&root_path, read_custom_rules().as_deref(), &move |p| {
-            let _ = progress_app.emit("scan://progress", &p);
-        });
+        let outcome = manager.run_scan(
+            &root_path,
+            effective_rules.as_deref(),
+            &pack_snapshot,
+            &move |p| {
+                let _ = progress_app.emit("scan://progress", &p);
+            },
+        );
         match outcome {
             Ok(result) => {
                 let _ = app.emit(
@@ -359,6 +474,33 @@ pub fn get_scan(
         .unwrap()
         .get_findings(scan_id)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_scan_events(
+    state: State<'_, AppState>,
+    scan_id: i64,
+) -> Result<Vec<codescan_engine::ScanEvent>, String> {
+    state
+        .store
+        .lock()
+        .unwrap()
+        .get_events(scan_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_scan_ruleset(
+    state: State<'_, AppState>,
+    scan_id: i64,
+) -> Result<serde_json::Value, String> {
+    let text = state
+        .store
+        .lock()
+        .unwrap()
+        .scan_ruleset_json(scan_id)
+        .map_err(|error| error.to_string())?;
+    serde_json::from_str(&text).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -409,15 +551,15 @@ pub fn baseline_info(state: State<'_, AppState>) -> Result<Option<serde_json::Va
 
 #[tauri::command]
 pub fn export_sarif(state: State<'_, AppState>, scan_id: i64, dest: String) -> Result<(), String> {
-    let findings = state
-        .store
-        .lock()
-        .unwrap()
-        .get_findings(scan_id)
+    let store = state.store.lock().unwrap();
+    let findings = store.get_findings(scan_id).map_err(|e| e.to_string())?;
+    let engine_version = store
+        .scan_engine_version(scan_id)
         .map_err(|e| e.to_string())?;
+    drop(store);
     // 从持久化发现重建报告骨架（SARIF 仅消费这些字段）。
     let report = codescan_engine::model::ScanReport {
-        engine_version: "persisted".into(),
+        engine_version,
         findings,
         events: Vec::new(),
         stats: Default::default(),
@@ -1226,4 +1368,159 @@ pub fn save_custom_rule(state: State<'_, AppState>, yaml: String) -> Result<(), 
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     std::fs::write(custom_rules_path(), merged).map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuleTestHit {
+    pub rule_id: String,
+    pub line: usize,
+    pub column: usize,
+    pub message: String,
+    pub match_text: String,
+}
+
+#[tauri::command]
+pub fn list_rule_packs() -> Vec<codescan_engine::packs::RulePackInfo> {
+    codescan_engine::packs::list(&data_root())
+}
+
+#[tauri::command]
+pub fn install_rule_pack(source_dir: String) -> Result<codescan_engine::packs::RulePackInfo, String> {
+    codescan_engine::packs::install(&data_root(), std::path::Path::new(&source_dir))
+}
+
+#[tauri::command]
+pub fn remove_rule_pack(id: String, version: String) -> Result<(), String> {
+    codescan_engine::packs::remove(&data_root(), &id, &version)
+}
+
+#[tauri::command]
+pub fn get_custom_rules() -> Result<Option<String>, String> {
+    match std::fs::read_to_string(custom_rules_path()) {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn validate_custom_yaml(
+    data_root: &std::path::Path,
+    yaml: &str,
+    disabled: &HashSet<String>,
+) -> Vec<String> {
+    if yaml.len() > 1024 * 1024 {
+        return vec!["自定义规则文件超过 1 MiB 上限".into()];
+    }
+    let combined = match codescan_engine::packs::combined_rules(data_root, Some(yaml)) {
+        Ok(combined) => combined,
+        Err(error) => return vec![error],
+    };
+    match Engine::with_rules(combined.as_deref(), disabled) {
+        Ok(_) => Vec::new(),
+        Err(errors) => errors.iter().map(|error| error.to_string()).collect(),
+    }
+}
+
+#[tauri::command]
+pub fn validate_custom_rules(
+    state: State<'_, AppState>,
+    yaml: String,
+) -> Result<Vec<String>, String> {
+    let disabled: HashSet<String> = state
+        .store
+        .lock()
+        .unwrap()
+        .disabled_rules()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    Ok(validate_custom_yaml(&data_root(), &yaml, &disabled))
+}
+
+#[tauri::command]
+pub fn save_custom_rules(state: State<'_, AppState>, yaml: String) -> Result<(), String> {
+    let disabled: HashSet<String> = state
+        .store
+        .lock()
+        .unwrap()
+        .disabled_rules()
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let errors = validate_custom_yaml(&data_root(), &yaml, &disabled);
+    if !errors.is_empty() {
+        return Err(errors.join("\n"));
+    }
+    let path = custom_rules_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let temp = path.with_extension("yaml.tmp");
+    std::fs::write(&temp, yaml).map_err(|e| e.to_string())?;
+    if let Err(error) = std::fs::rename(&temp, &path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn test_custom_rule(
+    candidate_yaml: String,
+    sample: String,
+    language: String,
+) -> Result<Vec<RuleTestHit>, String> {
+    if candidate_yaml.len() > 1024 * 1024 {
+        return Err("测试规则超过 1 MiB 上限".into());
+    }
+    if sample.len() > 64 * 1024 {
+        return Err("测试样例超过 64 KiB 上限".into());
+    }
+    let extension = match language.as_str() {
+        "typescript" => "ts",
+        "tsx" => "tsx",
+        "javascript" => "js",
+        "jsx" => "jsx",
+        "python" => "py",
+        "java" => "java",
+        "go" => "go",
+        "rust" => "rs",
+        _ => return Err(format!("不支持的语言：{language}")),
+    };
+    let builtin_ids: HashSet<String> = Engine::with_builtin(&HashSet::new())
+        .map_err(|errs| errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))?
+        .all_rule_ids()
+        .into_iter()
+        .collect();
+    let engine = Engine::with_rules(Some(&candidate_yaml), &builtin_ids)
+        .map_err(|errs| errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n"))?;
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or_default();
+    let workspace = std::env::temp_dir().join(format!(
+        "codescan-rule-test-{}-{unique}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&workspace).map_err(|e| e.to_string())?;
+    let sample_path = workspace.join(format!("sample.{extension}"));
+    let result = (|| -> Result<Vec<RuleTestHit>, String> {
+        std::fs::write(&sample_path, sample).map_err(|e| e.to_string())?;
+        let report = engine
+            .scan(&workspace, &codescan_engine::CancelToken::new(), &|_| {})
+            .map_err(|e| e.to_string())?;
+        Ok(report
+            .findings
+            .into_iter()
+            .map(|finding| RuleTestHit {
+                rule_id: finding.rule_id,
+                line: finding.span.start.line,
+                column: finding.span.start.column,
+                message: finding.message,
+                match_text: finding.match_text,
+            })
+            .collect())
+    })();
+    let _ = std::fs::remove_dir_all(&workspace);
+    result
 }

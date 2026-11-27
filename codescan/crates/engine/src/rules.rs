@@ -4,7 +4,8 @@
 use crate::model::{Dimension, Severity};
 use std::collections::HashSet;
 
-/// 单条规则声明。三种形态互斥：`pattern`（AST query）/ `text`（正则）/ `metric`。
+/// 单条规则声明。五种形态互斥：`pattern`（AST query）/ `text`（正则）/
+/// `metric` / `taint`（数据流）/ `inheritance`（Java 类型继承）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuleSpec {
     pub id: String,
@@ -16,10 +17,19 @@ pub struct RuleSpec {
     pub text: Option<String>,
     pub metric: Option<String>,
     pub taint: Option<TaintSpec>,
+    pub inheritance: Option<InheritanceSpec>,
     pub options: Vec<(String, f64)>,
     pub filters_not: Vec<String>,
     pub filters_inside: Vec<String>,
     pub metavariables: Vec<(String, String)>,
+    /// 可选导入条件（正则）：文件至少一条 import 声明匹配任一正则时才应用该规则。
+    pub imports: Vec<String>,
+    /// 允许通过导入别名满足 metavariable 的原始符号名。
+    pub imported_symbols: Vec<String>,
+    /// 同名本地定义存在时丢弃该规则的命中（用于 bare 导入规则）。
+    pub no_shadow: bool,
+    /// Java：接收者名必须匹配同类中的 ObjectInputStream 字段。
+    pub field_receiver: bool,
 }
 
 /// 污点端点声明（Domain §4a）：source/sink 必填，sanitizer 可选，均为该语言 query。
@@ -28,6 +38,16 @@ pub struct TaintSpec {
     pub sources: Vec<String>,
     pub sinks: Vec<String>,
     pub sanitizers: Vec<String>,
+}
+
+/// 类型继承规则（Domain §4c）：在继承闭包包含 target 的类中检查方法。
+#[derive(Debug, Clone, PartialEq)]
+pub struct InheritanceSpec {
+    pub target: String,
+    pub methods: Vec<String>,
+    pub empty_only: bool,
+    /// 仅报告“非直接实现、经继承可达 target”的类；用于与直接实现 AST 规则分工。
+    pub indirect_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +71,7 @@ impl std::fmt::Display for RuleError {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawRule {
     id: String,
     language: String,
@@ -66,14 +87,25 @@ struct RawRule {
     #[serde(default)]
     taint: Option<RawTaint>,
     #[serde(default)]
+    inheritance: Option<RawInheritance>,
+    #[serde(default)]
     options: std::collections::BTreeMap<String, serde_yaml::Value>,
     #[serde(default)]
     filters: Vec<RawFilter>,
     #[serde(default)]
     metavariables: Vec<RawMetaVar>,
+    #[serde(default)]
+    imports: Vec<String>,
+    #[serde(default)]
+    imported_symbols: Vec<String>,
+    #[serde(default)]
+    no_shadow: bool,
+    #[serde(default)]
+    field_receiver: bool,
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawTaint {
     sources: Vec<String>,
     sinks: Vec<String>,
@@ -82,23 +114,38 @@ struct RawTaint {
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawInheritance {
+    target: String,
+    methods: Vec<String>,
+    #[serde(default)]
+    empty_only: bool,
+    #[serde(default)]
+    indirect_only: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawFilter {
     not: Option<RawPattern>,
     inside: Option<RawPattern>,
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawPattern {
     pattern: String,
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawMetaVar {
     capture: String,
     regex: String,
 }
 
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawRuleSet {
     rules: Vec<RawRule>,
 }
@@ -178,14 +225,15 @@ pub fn parse_rule_set(yaml: &str) -> Result<Vec<RuleSpec>, Vec<RuleError>> {
             raw_rule.text.is_some(),
             raw_rule.metric.is_some(),
             raw_rule.taint.is_some(),
+            raw_rule.inheritance.is_some(),
         ]
         .iter()
         .filter(|b| **b)
         .count();
         if body_kinds != 1 {
             push_error(
-                "pattern|text|metric|taint",
-                "pattern / text / metric / taint 必须且只能提供其一".into(),
+                "pattern|text|metric|taint|inheritance",
+                "pattern / text / metric / taint / inheritance 必须且只能提供其一".into(),
             );
         }
         if raw_rule.pattern.is_some() && language == RuleLanguage::All {
@@ -208,10 +256,48 @@ pub fn parse_rule_set(yaml: &str) -> Result<Vec<RuleSpec>, Vec<RuleError>> {
                 push_error("taint.sinks", "污点规则至少需要一个 sink".into());
             }
         }
+        if let Some(inheritance) = &raw_rule.inheritance {
+            if language != RuleLanguage::One(crate::language::Language::Java) {
+                push_error("language", "继承规则当前仅支持 java".into());
+            }
+            if inheritance.target.trim().is_empty() {
+                push_error("inheritance.target", "必须提供 target 类型".into());
+            }
+            if inheritance.methods.is_empty() {
+                push_error("inheritance.methods", "至少需要一个方法名".into());
+            }
+            if inheritance
+                .methods
+                .iter()
+                .any(|method| method.trim().is_empty())
+            {
+                push_error("inheritance.methods", "方法名不能为空".into());
+            }
+        }
+        if raw_rule.pattern.is_none() {
+            if !raw_rule.filters.is_empty() {
+                push_error("filters", "filters 仅适用于 pattern 规则".into());
+            }
+            if !raw_rule.metavariables.is_empty() {
+                push_error("metavariables", "metavariables 仅适用于 pattern 规则".into());
+            }
+            if !raw_rule.imports.is_empty() && raw_rule.taint.is_none() {
+                push_error("imports", "imports 仅适用于 pattern 或 taint 规则".into());
+            }
+            if !raw_rule.imported_symbols.is_empty() && raw_rule.taint.is_none() {
+                push_error("imported_symbols", "imported_symbols 仅适用于 pattern 或 taint 规则".into());
+            }
+        }
+        if raw_rule.metric.is_none() && !raw_rule.options.is_empty() {
+            push_error("options", "options 仅适用于 metric 规则".into());
+        }
 
         let mut filters_not = Vec::new();
         let mut filters_inside = Vec::new();
         for filter in &raw_rule.filters {
+            if filter.not.is_none() && filter.inside.is_none() {
+                push_error("filters", "filters 条目必须提供 not 或 inside".into());
+            }
             if let Some(not) = &filter.not {
                 filters_not.push(not.pattern.clone());
             }
@@ -220,14 +306,16 @@ pub fn parse_rule_set(yaml: &str) -> Result<Vec<RuleSpec>, Vec<RuleError>> {
             }
         }
 
-        let options = raw_rule
-            .options
-            .iter()
-            .filter_map(|(k, v)| match v {
-                serde_yaml::Value::Number(n) => Some((k.clone(), n.as_f64().unwrap_or(0.0))),
-                _ => None,
-            })
-            .collect();
+        let mut options = Vec::new();
+        for (key, value) in &raw_rule.options {
+            match value {
+                serde_yaml::Value::Number(number) => match number.as_f64() {
+                    Some(number) => options.push((key.clone(), number)),
+                    None => push_error("options", format!("option {key} 不是可表示的数值")),
+                },
+                _ => push_error("options", format!("option {key} 必须是数字")),
+            }
+        }
 
         specs.push(RuleSpec {
             id,
@@ -243,6 +331,12 @@ pub fn parse_rule_set(yaml: &str) -> Result<Vec<RuleSpec>, Vec<RuleError>> {
                 sinks: t.sinks,
                 sanitizers: t.sanitizers,
             }),
+            inheritance: raw_rule.inheritance.map(|i| InheritanceSpec {
+                target: i.target,
+                methods: i.methods,
+                empty_only: i.empty_only,
+                indirect_only: i.indirect_only,
+            }),
             options,
             filters_not,
             filters_inside,
@@ -251,6 +345,10 @@ pub fn parse_rule_set(yaml: &str) -> Result<Vec<RuleSpec>, Vec<RuleError>> {
                 .iter()
                 .map(|m| (m.capture.clone(), m.regex.clone()))
                 .collect(),
+            imports: raw_rule.imports,
+            imported_symbols: raw_rule.imported_symbols,
+            no_shadow: raw_rule.no_shadow,
+            field_receiver: raw_rule.field_receiver,
         });
     }
 
@@ -259,6 +357,107 @@ pub fn parse_rule_set(yaml: &str) -> Result<Vec<RuleSpec>, Vec<RuleError>> {
     } else {
         Err(errors)
     }
+}
+
+/// 逐条解析规则集：单条规则的 YAML/字段错误不会拖垮整份文件。
+/// 返回 (有效规则, 错误)；调用方按 disabled 集决定错误是否致命。
+pub fn parse_rule_set_lenient(yaml: &str) -> (Vec<RuleSpec>, Vec<RuleError>) {
+    let value: serde_yaml::Value = match serde_yaml::from_str(yaml) {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                Vec::new(),
+                vec![RuleError {
+                    rule_id: "<file>".into(),
+                    field: "yaml".into(),
+                    message: error.to_string(),
+                }],
+            )
+        }
+    };
+    let Some(mapping) = value.as_mapping() else {
+        return (
+            Vec::new(),
+            vec![RuleError {
+                rule_id: "<file>".into(),
+                field: "yaml".into(),
+                message: "规则文件根节点必须是 mapping".into(),
+            }],
+        );
+    };
+    if mapping
+        .keys()
+        .any(|key| key.as_str() != Some("rules"))
+    {
+        return (
+            Vec::new(),
+            vec![RuleError {
+                rule_id: "<file>".into(),
+                field: "yaml".into(),
+                message: "规则文件只允许顶层字段 rules".into(),
+            }],
+        );
+    }
+    let Some(rules_value) = mapping.get(serde_yaml::Value::String("rules".into())) else {
+        return (
+            Vec::new(),
+            vec![RuleError {
+                rule_id: "<file>".into(),
+                field: "yaml".into(),
+                message: "缺少顶层字段 rules".into(),
+            }],
+        );
+    };
+    let Some(rules) = rules_value.as_sequence() else {
+        return (
+            Vec::new(),
+            vec![RuleError {
+                rule_id: "<file>".into(),
+                field: "yaml".into(),
+                message: "rules 必须是序列".into(),
+            }],
+        );
+    };
+
+    let mut specs = Vec::new();
+    let mut errors = Vec::new();
+    for rule_value in rules {
+        let rule_id = rule_value
+            .as_mapping()
+            .and_then(|rule| rule.get(serde_yaml::Value::String("id".into())))
+            .and_then(|id| id.as_str())
+            .unwrap_or("<unknown>")
+            .to_string();
+        let mut one = serde_yaml::Mapping::new();
+        one.insert(
+            serde_yaml::Value::String("rules".into()),
+            serde_yaml::Value::Sequence(vec![rule_value.clone()]),
+        );
+        let document = serde_yaml::Value::Mapping(one);
+        let yaml = match serde_yaml::to_string(&document) {
+            Ok(yaml) => yaml,
+            Err(error) => {
+                errors.push(RuleError {
+                    rule_id,
+                    field: "yaml".into(),
+                    message: error.to_string(),
+                });
+                continue;
+            }
+        };
+        match parse_rule_set(&yaml) {
+            Ok(mut parsed) => specs.append(&mut parsed),
+            Err(mut rule_errors) => {
+                for error in &mut rule_errors {
+                    if error.rule_id == "<file>" {
+                        error.rule_id = rule_id.clone();
+                    }
+                }
+                errors.append(&mut rule_errors);
+            }
+        }
+    }
+    (specs, errors)
 }
 
 /// 合并内置与自定义规则集：id 冲突即整体拒绝（Domain §4.4）。

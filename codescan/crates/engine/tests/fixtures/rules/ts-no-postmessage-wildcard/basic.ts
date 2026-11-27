@@ -6,3 +6,4 @@ frame.contentWindow.postMessage(payload, "*");
 
 window.postMessage(data, targetOrigin);
 worker.postMessage(data);
+window.postMessage("*", "https://example.com");

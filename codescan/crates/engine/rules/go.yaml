@@ -22,17 +22,28 @@ rules:
         regex: '^"(ba|z|da)?sh"$'
       - capture: flag
         regex: '^"-c"$'
+    imports:
+      - 'os/exec'
+    imported_symbols:
+      - exec
 
+  # v2 数据流：http:// 字面量经变量/参数/拼接到达 net/http 客户端函数。
+  # 只报告可证明的明文来源；https 或无法证明的变量不产生发现。
   - id: go/plaintext-http
     language: go
     dimension: security
     severity: warning
-    message: 调用 net/http 明文请求函数（http.Get/Head/Post/PostForm）
-    pattern: |
-      (call_expression
-        function: (selector_expression
-          operand: (identifier) @pkg (#eq? @pkg "http")
-          field: (field_identifier) @fn (#match? @fn "^(Get|Head|Post|PostForm)$"))) @match
+    message: 明文 http:// URL 可能到达 net/http 客户端函数
+    taint:
+      sources:
+        - |
+          ((interpreted_string_literal) @match (#match? @match "http://"))
+      sinks:
+        - |
+          (call_expression
+            function: (selector_expression
+              operand: (identifier) @pkg (#eq? @pkg "http")
+              field: (field_identifier) @fn (#match? @fn "^(Get|Head|Post|PostForm)$"))) @match
 
   - id: go/weak-hash
     language: go
@@ -42,8 +53,16 @@ rules:
     pattern: |
       (call_expression
         function: (selector_expression
-          operand: (identifier) @pkg (#match? @pkg "^(md5|sha1)$")
+          operand: (identifier) @pkg
           field: (field_identifier) @fn (#match? @fn "^(Sum|New)$"))) @match
+    metavariables:
+      - capture: pkg
+        regex: '^(md5|sha1)$'
+    imports:
+      - 'crypto/(md5|sha1)'
+    imported_symbols:
+      - md5
+      - sha1
 
   - id: go/insecure-random
     language: go
@@ -53,34 +72,54 @@ rules:
     pattern: |
       (call_expression
         function: (selector_expression
-          operand: (identifier) @pkg (#eq? @pkg "rand")
+          operand: (identifier) @pkg
           field: (field_identifier) @fn (#match? @fn "^(Int|Intn|Int31|Int31n|Int63|Int63n|IntN|Int32|Int32N|Int64|Int64N|Uint|UintN|Uint32|Uint64|Float32|Float64|NormFloat64|Perm|Shuffle)$"))) @match
+    metavariables:
+      - capture: pkg
+        regex: '^rand$'
+    imports:
+      - 'math/rand'
+    imported_symbols:
+      - rand
 
   - id: go/ignored-error
     language: go
     dimension: quality
     severity: warning
-    message: 用空白标识符 _ 丢弃 error 返回值
+    message: 用空白标识符 _ 丢弃调用返回值（可能是 error）
     pattern: |
       [
         (short_var_declaration
           left: (expression_list
-            (identifier) @blank (#eq? @blank "_")))
+            . (identifier) @blank (#eq? @blank "_") .)
+          right: (expression_list (call_expression)))
         (assignment_statement
           left: (expression_list
-            (identifier) @blank (#eq? @blank "_")))
+            . (identifier) @blank (#eq? @blank "_") .)
+          right: (expression_list (call_expression)))
+        (short_var_declaration
+          left: (expression_list
+            (identifier) @prev (#match? @prev "^[^_]")
+            (identifier) @blank (#eq? @blank "_") .)
+          right: (expression_list (call_expression)))
+        (assignment_statement
+          left: (expression_list
+            (identifier) @prev (#match? @prev "^[^_]")
+            (identifier) @blank (#eq? @blank "_") .)
+          right: (expression_list (call_expression)))
       ] @match
 
   - id: go/unsafe-template
     language: go
     dimension: security
     severity: warning
-    message: 调用 template.New/Parse*（HTML 输出应使用自动转义的 html/template）
+    message: 引入 text/template（不自动转义；HTML 输出应使用 html/template）
     pattern: |
-      (call_expression
-        function: (selector_expression
-          operand: (identifier) @pkg (#eq? @pkg "template")
-          field: (field_identifier) @fn (#match? @fn "^(New|ParseFiles|ParseGlob|Must|HTML|JS|JSStr|URL)$"))) @match
+      (import_spec
+        path: (interpreted_string_literal) @path) @match
+    metavariables:
+      - capture: path
+        regex: '^"text/template"$'
 
   - id: go/tls-insecure-skip-verify
     language: go
@@ -88,14 +127,27 @@ rules:
     severity: error
     message: tls.Config 设置 InsecureSkipVerify=true 跳过证书校验
     pattern: |
-      (keyed_element
-        key: (literal_element) @key
-        value: (literal_element) @value) @match
+      (composite_literal
+        type: (qualified_type
+          package: (package_identifier) @pkg
+          name: (type_identifier) @type)
+        body: (literal_value
+          (keyed_element
+            key: (literal_element) @key
+            value: (literal_element) @value))) @match
     metavariables:
+      - capture: pkg
+        regex: '^tls$'
+      - capture: type
+        regex: '^Config$'
       - capture: key
         regex: '^InsecureSkipVerify$'
       - capture: value
         regex: '^true$'
+    imports:
+      - 'crypto/tls'
+    imported_symbols:
+      - tls
 
   # ---------- 污点（v2.2，过程内近似，Domain §4a） ----------
   - id: go/taint-exec-param
@@ -119,8 +171,10 @@ rules:
         - |
           (call_expression
             function: (selector_expression
-              operand: (identifier) @pkg (#eq? @pkg "strconv")
               field: (field_identifier) @fn (#eq? @fn "Atoi"))) @match
+        - |
+          (call_expression
+            function: (identifier) @fn (#eq? @fn "Atoi")) @match
 
   - id: go/taint-sql-param
     language: go
@@ -146,8 +200,10 @@ rules:
         - |
           (call_expression
             function: (selector_expression
-              operand: (identifier) @pkg (#eq? @pkg "strconv")
               field: (field_identifier) @fn (#eq? @fn "Atoi"))) @match
+        - |
+          (call_expression
+            function: (identifier) @fn (#eq? @fn "Atoi")) @match
 
   - id: go/taint-open-param
     language: go
@@ -170,5 +226,144 @@ rules:
         - |
           (call_expression
             function: (selector_expression
-              operand: (identifier) @pkg (#eq? @pkg "filepath")
               field: (field_identifier) @fn (#eq? @fn "Clean"))) @match
+        - |
+          (call_expression
+            function: (identifier) @fn (#eq? @fn "Clean")) @match
+
+  # ---------- 点导入（import . "pkg"） ----------
+  - id: go/exec-shell-command-dot
+    language: go
+    dimension: security
+    severity: error
+    message: 通过点导入的 exec.Command 以 sh -c 拼接执行 shell 命令
+    pattern: |
+      (call_expression
+        function: (identifier) @fn
+        arguments: (argument_list
+          . (interpreted_string_literal) @shell
+          . (interpreted_string_literal) @flag)) @match
+    metavariables:
+      - capture: fn
+        regex: '^Command(Context)?$'
+      - capture: shell
+        regex: '^"(ba|z|da)?sh"$'
+      - capture: flag
+        regex: '^"-c"$'
+    imports:
+      - '\.\s*"os/exec"'
+
+  - id: go/weak-hash-dot
+    language: go
+    dimension: security
+    severity: error
+    message: 点导入的 md5/sha1 弱哈希（Sum/New）
+    pattern: |
+      (call_expression
+        function: (identifier) @fn) @match
+    metavariables:
+      - capture: fn
+        regex: '^(Sum|New)$'
+    imports:
+      - '\.\s*"crypto/(md5|sha1)"'
+
+  - id: go/insecure-random-dot
+    language: go
+    dimension: security
+    severity: warning
+    message: 点导入的 math/rand 非加密随机数
+    pattern: |
+      (call_expression
+        function: (identifier) @fn) @match
+    metavariables:
+      - capture: fn
+        regex: '^(Int|Intn|Int31|Int31n|Int63|Int63n|IntN|Int32|Int32N|Int64|Int64N|Uint|UintN|Uint32|Uint64|Float32|Float64|NormFloat64|Perm|Shuffle)$'
+    imports:
+      - '\.\s*"math/rand(/v2)?"'
+
+  # ---------- 污点别名/点导入 ----------
+  - id: go/taint-exec-param-alias
+    language: go
+    dimension: security
+    severity: error
+    message: 不可信参数可能经别名/点导入流入 exec.Command（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (function_declaration
+            parameters: (parameter_list
+              (parameter_declaration name: (identifier) @match))) @match
+      sinks:
+        - |
+          (call_expression
+            function: (selector_expression
+              operand: (identifier) @pkg
+              field: (field_identifier) @fn (#eq? @fn "Command"))) @match
+        - |
+          (call_expression
+            function: (identifier) @fn (#eq? @fn "Command")) @match
+      sanitizers:
+        - |
+          (call_expression
+            function: (selector_expression
+              field: (field_identifier) @fn (#eq? @fn "Atoi"))) @match
+        - |
+          (call_expression
+            function: (identifier) @fn (#eq? @fn "Atoi")) @match
+    imports:
+      - '[A-Za-z_][A-Za-z0-9_]*\s+"os/exec"'
+      - '\.\s*"os/exec"'
+
+  - id: go/taint-open-param-alias
+    language: go
+    dimension: security
+    severity: warning
+    message: 不可信参数可能经别名/点导入流入 os.Open（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (function_declaration
+            parameters: (parameter_list
+              (parameter_declaration name: (identifier) @match))) @match
+      sinks:
+        - |
+          (call_expression
+            function: (selector_expression
+              operand: (identifier) @pkg
+              field: (field_identifier) @fn (#eq? @fn "Open"))) @match
+        - |
+          (call_expression
+            function: (identifier) @fn (#eq? @fn "Open")) @match
+      sanitizers:
+        - |
+          (call_expression
+            function: (selector_expression
+              field: (field_identifier) @fn (#eq? @fn "Clean"))) @match
+        - |
+          (call_expression
+            function: (identifier) @fn (#eq? @fn "Clean")) @match
+    imports:
+      - '[A-Za-z_][A-Za-z0-9_]*\s+"os"'
+      - '\.\s*"os"'
+
+  - id: go/plaintext-http-alias
+    language: go
+    dimension: security
+    severity: warning
+    message: 明文 http:// URL 可能经别名/点导入到达 net/http 客户端函数
+    taint:
+      sources:
+        - |
+          ((interpreted_string_literal) @match (#match? @match "http://"))
+      sinks:
+        - |
+          (call_expression
+            function: (selector_expression
+              operand: (identifier) @pkg
+              field: (field_identifier) @fn (#match? @fn "^(Get|Head|Post|PostForm)$"))) @match
+        - |
+          (call_expression
+            function: (identifier) @fn (#match? @fn "^(Get|Head|Post|PostForm)$")) @match
+    imports:
+      - '[A-Za-z_][A-Za-z0-9_]*\s+"net/http"'
+      - '\.\s*"net/http"'

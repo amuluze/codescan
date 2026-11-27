@@ -26,7 +26,7 @@ rules:
     language: python
     dimension: security
     severity: error
-    message: yaml.load 未通过 Loader= 指定安全加载器
+    message: yaml.load 未指定 SafeLoader/CSafeLoader
     pattern: |
       (call
         function: (attribute
@@ -34,6 +34,8 @@ rules:
           attribute: (identifier) @fn (#eq? @fn "load")) @match)
     filters:
       - not:
+          # 仅排除显式安全加载器（SafeLoader/CSafeLoader）；Loader=None、
+          # UnsafeLoader 等仍视为未通过安全加载器校验。
           pattern: |
             (call
               function: (attribute
@@ -41,7 +43,20 @@ rules:
                 attribute: (identifier) @nfn (#eq? @nfn "load"))
               arguments: (argument_list
                 (keyword_argument
-                  name: (identifier) @loader (#eq? @loader "Loader")))) @match
+                  name: (identifier) @loader (#eq? @loader "Loader")
+                  value: [(identifier) (attribute)] @loader_value
+                  (#match? @loader_value "SafeLoader$")))) @match
+      - not:
+          # 位置参数形式：yaml.load(text, yaml.SafeLoader)
+          pattern: |
+            (call
+              function: (attribute
+                object: (identifier) @nmod (#eq? @nmod "yaml")
+                attribute: (identifier) @nfn (#eq? @nfn "load"))
+              arguments: (argument_list
+                . (_)
+                . [(identifier) (attribute)] @loader_value
+                (#match? @loader_value "SafeLoader$"))) @match
 
   - id: py/subprocess-shell-true
     language: python
@@ -66,8 +81,18 @@ rules:
     pattern: |
       (call
         function: (attribute
-          object: (identifier) @mod (#eq? @mod "os")
-          attribute: (identifier) @match (#match? @match "^(system|popen)$")))
+          attribute: (identifier) @fn)) @match
+
+      (call
+        function: (identifier) @fn) @match
+    metavariables:
+      - capture: fn
+        regex: '^(system|popen)$'
+    imports:
+      - '\bos\b'
+    imported_symbols:
+      - system
+      - popen
 
   - id: py/weak-hash
     language: python
@@ -77,8 +102,18 @@ rules:
     pattern: |
       (call
         function: (attribute
-          object: (identifier) @mod (#eq? @mod "hashlib")
-          attribute: (identifier) @match (#match? @match "^(md5|sha1)$")))
+          attribute: (identifier) @fn)) @match
+
+      (call
+        function: (identifier) @fn) @match
+    metavariables:
+      - capture: fn
+        regex: '^(md5|sha1)$'
+    imports:
+      - '\bhashlib\b'
+    imported_symbols:
+      - md5
+      - sha1
 
   # assert 用于鉴权/加密类逻辑：生产环境可被 -O 移除，绕过校验。
   # 引擎 v1 无数据流，按语句文本中的敏感关键词启发式判定。
@@ -158,12 +193,36 @@ rules:
       sources:
         - |
           (attribute
+            object: (identifier) @obj (#eq? @obj "request")
             attribute: (identifier) @attr (#eq? @attr "args")) @match
       sinks:
         - |
           (call
             function: (attribute
               attribute: (identifier) @attr (#eq? @attr "system"))) @match
+
+  - id: py/taint-os-system-request-alias
+    language: python
+    dimension: security
+    severity: error
+    message: 别名导入的 request.args 可能流入 os.system（过程内污点近似）
+    taint:
+      sources:
+        - |
+          (attribute
+            object: (_) @obj
+            attribute: (identifier) @attr (#eq? @attr "args")) @match
+      sinks:
+        - |
+          (call
+            function: (attribute
+              attribute: (identifier) @attr (#eq? @attr "system"))) @match
+    imports:
+      - 'from\s+flask\s+import\s+request\s+as\s+'
+      - 'import\s+flask\s+as\s+'
+    imported_symbols:
+      - request
+      - flask.request
 
   - id: py/taint-exec-param
     language: python
@@ -183,3 +242,48 @@ rules:
         - |
           (call
             function: (identifier) @fn (#eq? @fn "int")) @match
+
+  # ---------- Python 高价值补充（v1 规则库扩展） ----------
+  - id: py/requests-verify-false
+    language: python
+    dimension: security
+    severity: warning
+    message: requests 调用显式关闭 TLS 证书校验（verify=False）
+    pattern: |
+      (call
+        function: (attribute
+          object: (identifier) @mod (#eq? @mod "requests")
+          attribute: (identifier) @fn (#match? @fn "^(get|post|put|delete|patch|head|options|request)$"))
+        arguments: (argument_list
+          (keyword_argument
+            name: (identifier) @kw (#eq? @kw "verify")
+            value: (false)))) @match
+
+  - id: py/mark-safe
+    language: python
+    dimension: security
+    severity: warning
+    message: 调用 mark_safe 跳过 HTML 转义（需确认输入可信）
+    pattern: |
+      (call
+        function: (identifier) @fn (#eq? @fn "mark_safe")) @match
+
+      (call
+        function: (attribute
+          attribute: (identifier) @fn (#eq? @fn "mark_safe"))) @match
+
+  # ---------- Python 高价值补充（规则库质量批次 2） ----------
+  - id: py/flask-debug-run
+    language: python
+    dimension: security
+    severity: warning
+    message: Flask 应用以 debug=True 启动（生产环境应关闭调试器）
+    pattern: |
+      (call
+        function: (attribute
+          object: (identifier) @obj (#match? @obj "^(app|application)$")
+          attribute: (identifier) @fn (#eq? @fn "run"))
+        arguments: (argument_list
+          (keyword_argument
+            name: (identifier) @kw (#eq? @kw "debug")
+            value: (true)))) @match

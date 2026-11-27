@@ -625,6 +625,14 @@ pub fn validate_candidate(yaml_text: &str) -> Vec<String> {
         if !spec.id.starts_with("custom/") {
             errors.push(format!("规则 id {} 必须以 custom/ 开头", spec.id));
         }
+        if let Some(pattern) = &spec.pattern {
+            if !has_match_capture(pattern) {
+                errors.push(format!(
+                    "规则 id {} 的 pattern 必须包含 @match 捕获",
+                    spec.id
+                ));
+            }
+        }
         if let Some(taint) = &spec.taint {
             let groups = [
                 ("taint.sources", &taint.sources),

@@ -8,7 +8,12 @@ fn codescan() -> Command {
 }
 
 fn run(args: &[&str]) -> Output {
-    codescan().args(args).output().expect("启动 codescan 失败")
+    let data = tempfile::tempdir().unwrap();
+    codescan()
+        .env("CODESCAN_DATA_DIR", data.path())
+        .args(args)
+        .output()
+        .expect("启动 codescan 失败")
 }
 
 fn stdout(output: &Output) -> String {
@@ -137,6 +142,209 @@ fn global_ignore_excludes_todo_findings() {
     let out = stdout(&output);
     assert!(!out.contains("text/todo-debt"), "stdout: {out}");
     assert!(!out.contains("generated/"), "stdout: {out}");
+}
+
+// ---------- 本地规则包 ----------
+
+#[test]
+fn pack_install_list_scan_and_remove() {
+    let data = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    write_file(
+        source.path(),
+        "pack.yaml",
+        "id: com.example.cli\nversion: 1.0.0\nrules:\n  - rules.yaml\n",
+    );
+    write_file(
+        source.path(),
+        "rules.yaml",
+        "rules:\n  - id: pack/cli-marker\n    language: \"*\"\n    dimension: quality\n    severity: warning\n    message: CLI pack marker\n    text: PACK_CLI_MARKER\n",
+    );
+    let data_dir = data.path().to_str().unwrap();
+
+    let output = codescan()
+        .env("CODESCAN_DATA_DIR", data_dir)
+        .args(["pack", "install", source.path().to_str().unwrap()])
+        .output()
+        .expect("启动 codescan 失败");
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains("installed com.example.cli@1.0.0"), "{}", stdout(&output));
+
+    let output = codescan()
+        .env("CODESCAN_DATA_DIR", data_dir)
+        .args(["pack", "list", "--json"])
+        .output()
+        .expect("启动 codescan 失败");
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let packs: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let pack = &packs.as_array().unwrap()[0];
+    assert_eq!(pack["id"], "com.example.cli");
+    assert_eq!(pack["version"], "1.0.0");
+    assert_eq!(pack["error"], serde_json::Value::Null);
+    assert_eq!(pack["integrity"].as_str().unwrap().len(), 64);
+
+    let workspace = tempfile::tempdir().unwrap();
+    write_file(workspace.path(), "src/a.ts", "// PACK_CLI_MARKER\nconst a = 1;\n");
+    let root = workspace.path().to_str().unwrap();
+    let output = codescan()
+        .env("CODESCAN_DATA_DIR", data_dir)
+        .args(["scan", root])
+        .output()
+        .expect("启动 codescan 失败");
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains("pack/cli-marker"), "{}", stdout(&output));
+
+    let output = codescan()
+        .env("CODESCAN_DATA_DIR", data_dir)
+        .args(["pack", "remove", "com.example.cli", "1.0.0"])
+        .output()
+        .expect("启动 codescan 失败");
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+
+    let output = codescan()
+        .env("CODESCAN_DATA_DIR", data_dir)
+        .args(["scan", root])
+        .output()
+        .expect("启动 codescan 失败");
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(!stdout(&output).contains("pack/cli-marker"), "{}", stdout(&output));
+}
+
+#[test]
+fn pack_signing_trust_workflow() {
+    let data = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let keys = tempfile::tempdir().unwrap();
+    write_file(
+        source.path(),
+        "pack.yaml",
+        "id: com.example.signed\nversion: 1.0.0\nrules:\n  - rules.yaml\n",
+    );
+    write_file(
+        source.path(),
+        "rules.yaml",
+        "rules:\n  - id: pack/signed-marker\n    language: \"*\"\n    dimension: quality\n    severity: warning\n    message: Signed pack marker\n    text: SIGNED_PACK_MARKER\n",
+    );
+    let data_dir = data.path().to_str().unwrap();
+
+    let output = codescan()
+        .env("CODESCAN_DATA_DIR", data_dir)
+        .args(["pack", "keygen", "--out", keys.path().to_str().unwrap(), "--json"])
+        .output()
+        .expect("启动 codescan 失败");
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let generated: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    let key_id = generated["key_id"].as_str().unwrap();
+    assert!(keys.path().join("private.key").is_file());
+    assert!(keys.path().join("public.key").is_file());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(keys.path().join("private.key"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    let output = codescan()
+        .env("CODESCAN_DATA_DIR", data_dir)
+        .args([
+            "pack",
+            "trust",
+            "add",
+            keys.path().join("public.key").to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("启动 codescan 失败");
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+
+    let output = codescan()
+        .env("CODESCAN_DATA_DIR", data_dir)
+        .args([
+            "pack",
+            "sign",
+            source.path().to_str().unwrap(),
+            "--key",
+            keys.path().join("private.key").to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .expect("启动 codescan 失败");
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let signature: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(signature["key_id"], key_id);
+    assert!(source.path().join(".signature").is_file());
+
+    let output = codescan()
+        .env("CODESCAN_DATA_DIR", data_dir)
+        .args(["pack", "install", source.path().to_str().unwrap()])
+        .output()
+        .expect("启动 codescan 失败");
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+
+    let output = codescan()
+        .env("CODESCAN_DATA_DIR", data_dir)
+        .args(["pack", "list", "--json"])
+        .output()
+        .expect("启动 codescan 失败");
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    let packs: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+    assert_eq!(packs[0]["signed_by"], key_id);
+    assert_eq!(packs[0]["error"], serde_json::Value::Null);
+
+    let workspace = tempfile::tempdir().unwrap();
+    write_file(
+        workspace.path(),
+        "src/a.ts",
+        "// SIGNED_PACK_MARKER\nconst a = 1;\n",
+    );
+    let output = codescan()
+        .env("CODESCAN_DATA_DIR", data_dir)
+        .args(["scan", workspace.path().to_str().unwrap()])
+        .output()
+        .expect("启动 codescan 失败");
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(stdout(&output).contains("pack/signed-marker"), "{}", stdout(&output));
+
+    // 配置信任公钥后，未签名包被拒绝。
+    let unsigned = tempfile::tempdir().unwrap();
+    write_file(
+        unsigned.path(),
+        "pack.yaml",
+        "id: com.example.unsigned\nversion: 1.0.0\nrules:\n  - rules.yaml\n",
+    );
+    write_file(
+        unsigned.path(),
+        "rules.yaml",
+        "rules:\n  - id: pack/unsigned-marker\n    language: \"*\"\n    dimension: quality\n    severity: warning\n    message: Unsigned marker\n    text: UNSIGNED_PACK_MARKER\n",
+    );
+    let output = codescan()
+        .env("CODESCAN_DATA_DIR", data_dir)
+        .args(["pack", "install", unsigned.path().to_str().unwrap()])
+        .output()
+        .expect("启动 codescan 失败");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("未签名"), "{}", stderr(&output));
+}
+
+#[test]
+fn pack_rejects_invalid_source() {
+    let data = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    write_file(
+        source.path(),
+        "pack.yaml",
+        "id: ../escape\nversion: 1.0.0\nrules:\n  - rules.yaml\n",
+    );
+    let output = codescan()
+        .env("CODESCAN_DATA_DIR", data.path())
+        .args(["pack", "install", source.path().to_str().unwrap()])
+        .output()
+        .expect("启动 codescan 失败");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("规则包"), "{}", stderr(&output));
 }
 
 // ---------- v6.1：GitHub Code Scanning 上传 ----------

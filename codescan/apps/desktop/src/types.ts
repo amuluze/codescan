@@ -21,6 +21,14 @@ export type Finding = {
   fingerprint: string;
 };
 
+export type ScanEvent =
+  | { kind: "parse_error"; path: string; error_nodes: number }
+  | { kind: "io_error"; path: string; message: string }
+  | { kind: "binary"; path: string }
+  | { kind: "oversize"; path: string; size: number }
+  | { kind: "ignored_summary"; count: number }
+  | { kind: "unknown_language_summary"; count: number };
+
 export type ScanStats = {
   files_total: number;
   files_scanned: number;

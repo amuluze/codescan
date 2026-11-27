@@ -1375,6 +1375,39 @@ pre {
   background: var(--surface-2);
 }
 
+.rules-table tbody tr.selected,
+.rules-table tbody tr.selected:hover {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.rule-editor {
+  width: 100%;
+  min-height: 260px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font: 12px/1.55 var(--mono, monospace);
+}
+
+.rule-sample {
+  min-height: 100px;
+}
+
+.rule-errors {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--error);
+  font-size: 12px;
+}
+
+.rule-errors li + li {
+  margin-top: 4px;
+}
+
 /* 正在编辑的行：左侧强调条 + 底色，避免编辑器与表格行失去对应关系。 */
 .provider-table tbody tr.editing,
 .provider-table tbody tr.editing:hover {

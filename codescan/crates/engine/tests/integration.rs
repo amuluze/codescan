@@ -95,10 +95,10 @@ fn a3_fail_closed_events() {
     assert!(has(&|e| matches!(e, ScanEvent::Binary { path } if path == "assets/blob.bin")) == 1);
     assert!(has(&|e| matches!(e, ScanEvent::Oversize { path, size, .. } if path == "src/huge.ts" && *size > 1024 * 1024)) == 1);
     assert!(
-        has(&|e| matches!(e, ScanEvent::UnknownLanguageSummary { count } if *count == 1)) == 1,
+        has(&|e| matches!(e, ScanEvent::UnknownLanguageSummary { count } if *count == 2)) == 1,
         "事件清单：{:#?}",
         report.events
-    ); // 仅 readme.md；.gitignore 属隐藏文件计入 Ignored
+    ); // readme.md + .gitignore（隐藏文本文件仍进入文本规则扫描，但不进入 AST 管线）
     // 被忽略文件计入汇总且不出现在发现中。
     assert!(has(&|e| matches!(e, ScanEvent::IgnoredSummary { count } if *count >= 1)) == 1);
     assert!(report.findings.iter().all(|f| f.path != "ignored-dir/skip.ts"));
@@ -356,6 +356,36 @@ fn ignore_sources_and_defaults() {
         .any(|f| f.path == "local-only/scratch.ts"));
 }
 
+/// 文本规则覆盖隐藏文件与未知扩展名；`.git` 始终排除。
+#[test]
+fn text_rules_scan_hidden_and_unknown_text_files() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        ".env",
+        "AWS_ACCESS_KEY_ID=AKIAABCDEFGHIJKLMNOP\n",
+    );
+    write_file(dir.path(), ".hidden/app.ts", "// TODO: hidden debt\n");
+    write_file(dir.path(), "config.yaml", "token: AKIAABCDEFGHIJKLMNOP\n");
+    write_file(dir.path(), ".git/secret.ts", "// TODO: vcs metadata\n");
+
+    let report = scan_root(dir.path());
+    let has = |rule: &str, path: &str| {
+        report
+            .findings
+            .iter()
+            .any(|f| f.rule_id == rule && f.path == path)
+    };
+    assert!(has("text/aws-access-key", ".env"), "{:?}", report.findings);
+    assert!(has("text/todo-debt", ".hidden/app.ts"), "{:?}", report.findings);
+    assert!(has("text/aws-access-key", "config.yaml"), "{:?}", report.findings);
+    assert!(
+        report.findings.iter().all(|f| !f.path.starts_with(".git/")),
+        "{:?}",
+        report.findings
+    );
+}
+
 /// D5：跨文件流不追踪（同文件过程间边界的负例）。
 #[test]
 fn d5_cross_file_flow_not_tracked() {
@@ -386,4 +416,161 @@ fn d5_cross_file_flow_not_tracked() {
         cross.is_empty(),
         "跨文件流不应被追踪：{cross:?}"
     );
+}
+
+fn compile_error(yaml: &str) -> Vec<codescan_engine::rules::RuleError> {
+    let builtin_yaml =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/rules/builtin.yaml")).unwrap();
+    match Engine::build(&builtin_yaml, Some(yaml), &HashSet::new()) {
+        Ok(_) => panic!("应拒绝非法规则：{yaml}"),
+        Err(errors) => errors,
+    }
+}
+
+#[test]
+fn missing_match_capture_is_rejected() {
+    let pattern = "rules:\n  - id: custom/no-match\n    language: typescript\n    dimension: quality\n    severity: info\n    message: m\n    pattern: |\n      (return_statement) @stmt\n";
+    let errors = compile_error(pattern);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.field == "pattern" && error.message.contains("@match")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn taint_query_without_match_capture_is_rejected() {
+    let taint = "rules:\n  - id: custom/no-match-taint\n    language: typescript\n    dimension: security\n    severity: info\n    message: m\n    taint:\n      sources:\n        - |\n          (function_declaration) @decl\n      sinks:\n        - |\n          (call_expression function: (identifier) @fn (#eq? @fn \"eval\")) @match\n";
+    let errors = compile_error(taint);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.field == "taint.sources" && error.message.contains("@match")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn unknown_rule_fields_and_bad_options_are_rejected() {
+    let typo = "rules:\n  - id: custom/typo\n    language: typescript\n    dimension: quality\n    severity: info\n    message: m\n    pattern: |\n      (return_statement) @match\n    metavariable:\n      - capture: match\n        regex: '1'\n";
+    let errors = compile_error(typo);
+    assert!(
+        errors.iter().any(|error| error.field == "yaml"),
+        "{errors:?}"
+    );
+
+    let bad_option = "rules:\n  - id: custom/bad-option\n    language: \"*\"\n    dimension: quality\n    severity: info\n    message: m\n    metric: function-length\n    options:\n      treshold: 3\n";
+    let errors = compile_error(bad_option);
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.field == "options" && error.message.contains("treshold")),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn custom_metric_rule_uses_declared_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "a.py",
+        "def f():\n    a = 1\n    b = 2\n    c = 3\n    return a\n",
+    );
+    let custom = "rules:\n  - id: custom/long\n    language: \"*\"\n    dimension: security\n    severity: error\n    message: 自定义长度规则\n    metric: function-length\n    options:\n      threshold: 3\n";
+    let engine = Engine::with_rules(Some(custom), &HashSet::new()).expect("自定义规则编译失败");
+    let report = engine
+        .scan(dir.path(), &CancelToken::new(), &|_| {})
+        .expect("扫描失败");
+    let finding = report
+        .findings
+        .iter()
+        .find(|finding| finding.rule_id == "custom/long")
+        .unwrap_or_else(|| panic!("{:?}", report.findings));
+    assert_eq!(finding.dimension, codescan_engine::Dimension::Security);
+    assert_eq!(finding.severity, codescan_engine::Severity::Error);
+    assert!(finding.message.contains("自定义长度规则"), "{finding:?}");
+}
+
+#[test]
+fn disabled_invalid_custom_rule_does_not_block_scan() {
+    let custom = "rules:\n  - id: custom/ok\n    language: typescript\n    dimension: quality\n    severity: info\n    message: ok\n    pattern: |\n      (return_statement) @match\n  - id: custom/broken\n    language: typescript\n    dimension: quality\n    severity: info\n    message: broken\n    pattern: |\n      (return_statement) @match\n    metavariable:\n      - capture: match\n        regex: '1'\n";
+    let disabled: HashSet<String> = ["custom/broken".to_string()].into();
+    let engine = Engine::with_rules(Some(custom), &disabled).expect("禁用坏规则不应阻断");
+    assert!(engine.enabled_rule_ids().iter().any(|id| id == "custom/ok"));
+    assert!(engine
+        .rule_errors()
+        .iter()
+        .any(|error| error.rule_id == "custom/broken"));
+    assert!(
+        Engine::with_rules(Some(custom), &HashSet::new()).is_err(),
+        "启用坏规则必须拒绝"
+    );
+}
+
+#[test]
+fn disabled_duplicate_block_rule_is_honored() {
+    let dir = tempfile::tempdir().unwrap();
+    let block: String = (1..=12)
+        .map(|index| format!("const a{index} = {index};\n"))
+        .collect();
+    write_file(dir.path(), "a.ts", &block);
+    write_file(dir.path(), "b.ts", &block);
+
+    let disabled: HashSet<String> = ["metric/duplicate-block".to_string()].into();
+    let engine = Engine::with_builtin(&disabled).unwrap();
+    let report = engine
+        .scan(dir.path(), &CancelToken::new(), &|_| {})
+        .expect("扫描失败");
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding.rule_id != "metric/duplicate-block"),
+        "{:?}",
+        report.findings
+    );
+
+    let enabled = Engine::with_builtin(&HashSet::new()).unwrap();
+    let report = enabled
+        .scan(dir.path(), &CancelToken::new(), &|_| {})
+        .expect("扫描失败");
+    assert!(report
+        .findings
+        .iter()
+        .any(|finding| finding.rule_id == "metric/duplicate-block"));
+}
+
+#[test]
+fn rule_catalog_includes_disabled_rules() {
+    let disabled: HashSet<String> = ["text/todo-debt".to_string()].into();
+    let engine = Engine::with_builtin(&disabled).unwrap();
+    assert!(engine.all_rule_ids().iter().any(|id| id == "text/todo-debt"));
+    assert!(!engine
+        .enabled_rule_ids()
+        .iter()
+        .any(|id| id == "text/todo-debt"));
+    assert!(engine
+        .rule_catalog()
+        .iter()
+        .any(|(id, ..)| id == "text/todo-debt"));
+}
+
+#[test]
+fn non_utf8_source_keeps_ast_offsets_aligned() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut bytes = b"// ".to_vec();
+    bytes.push(0xff);
+    bytes.extend_from_slice(b"\neval(x);\n");
+    std::fs::write(dir.path().join("a.ts"), bytes).unwrap();
+
+    let report = scan_root(dir.path());
+    let finding = report
+        .findings
+        .iter()
+        .find(|finding| finding.rule_id == "ts/no-eval")
+        .unwrap_or_else(|| panic!("{:?}", report.findings));
+    assert_eq!(finding.match_text, "eval(x)");
+    assert_eq!(finding.span.start.line, 2);
 }

@@ -28,10 +28,26 @@ vi.mock("./platform", () => {
     setRuleEnabled: (ruleId: string, enabled: boolean) =>
       platform.invoke("set_rule_enabled", { ruleId, enabled }),
     customRulesStatus: () => platform.invoke("custom_rules_status"),
+    getCustomRules: () => platform.invoke("get_custom_rules"),
+    validateCustomRules: (yaml: string) =>
+      platform.invoke("validate_custom_rules", { yaml }),
+    saveCustomRules: (yaml: string) =>
+      platform.invoke("save_custom_rules", { yaml }),
+    testCustomRule: (candidateYaml: string, sample: string, language: string) =>
+      platform.invoke("test_custom_rule", { candidateYaml, sample, language }),
+    listRulePacks: () => platform.invoke("list_rule_packs"),
+    installRulePack: (sourceDir: string) =>
+      platform.invoke("install_rule_pack", { sourceDir }),
+    removeRulePack: (id: string, version: string) =>
+      platform.invoke("remove_rule_pack", { id, version }),
     startScan: (root: string) => platform.invoke("start_scan", { root }),
     cancelScan: () => platform.invoke("cancel_scan"),
     listScans: () => platform.invoke("list_scans"),
     getScan: (scanId: number) => platform.invoke("get_scan", { scanId }),
+    getScanEvents: (scanId: number) =>
+      platform.invoke("get_scan_events", { scanId }),
+    getScanRuleset: (scanId: number) =>
+      platform.invoke("get_scan_ruleset", { scanId }),
     deleteScan: (scanId: number) => platform.invoke("delete_scan", { scanId }),
     setBaseline: (scanId: number) => platform.invoke("set_baseline", { scanId }),
     gateDiff: (scanId: number) => platform.invoke("gate_diff", { scanId }),
@@ -199,9 +215,47 @@ beforeEach(() => {
             message: "调用 eval()",
             enabled: true,
             source: "(call_expression) @match",
+            editable: false,
+          },
+          {
+            id: "custom/eval",
+            language: "typescript",
+            dimension: "security",
+            severity: "warning",
+            message: "自定义 eval 规则",
+            enabled: true,
+            source: "(call_expression) @match",
+            editable: true,
           },
         ];
       case "custom_rules_status":
+        return null;
+      case "get_custom_rules":
+        return "rules:\n  - id: custom/eval\n    language: typescript\n";
+      case "validate_custom_rules":
+        return [];
+      case "save_custom_rules":
+        return null;
+      case "test_custom_rule":
+        return [
+          {
+            rule_id: "custom/eval",
+            line: 1,
+            column: 1,
+            message: "自定义 eval 规则",
+            match_text: "eval(x)",
+          },
+        ];
+      case "list_rule_packs":
+        return [];
+      case "install_rule_pack":
+        return {
+          id: "com.example.rules",
+          version: "1.0.0",
+          rules: 1,
+          path: "/tmp/pack",
+        };
+      case "remove_rule_pack":
         return null;
       case "list_scans":
         return [
@@ -219,6 +273,14 @@ beforeEach(() => {
         return null;
       case "get_scan":
         return findings;
+      case "get_scan_events":
+        return [];
+      case "get_scan_ruleset":
+        return {
+          enabled_rules: ["ts/no-eval"],
+          custom_rules_sha256: null,
+          packs: [],
+        };
       case "delete_scan":
         return null;
       case "list_directory": {
@@ -413,6 +475,42 @@ describe("App 主链路", () => {
         enabled: false,
       });
     });
+  });
+
+  it("规则页可编辑、校验、保存并测试自定义规则", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "规则" }));
+    const row = (await screen.findByText("custom/eval")).closest("tr");
+    expect(row).toBeTruthy();
+    await user.click(row!);
+
+    const editor = await screen.findByTestId("rule-editor");
+    expect(editor).toBeInTheDocument();
+    const textarea = screen.getByLabelText("自定义规则 YAML");
+    expect((textarea as HTMLTextAreaElement).value).toContain("custom/eval");
+    await user.type(textarea, "\n# edited");
+
+    await user.click(screen.getByRole("button", { name: "校验" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith(
+        "validate_custom_rules",
+        expect.objectContaining({ yaml: expect.stringContaining("custom/eval") }),
+      );
+    });
+
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith(
+        "save_custom_rules",
+        expect.objectContaining({ yaml: expect.stringContaining("custom/eval") }),
+      );
+    });
+
+    await user.click(screen.getByRole("button", { name: "运行测试" }));
+    const hits = await screen.findByTestId("rule-test-hits");
+    expect(hits.textContent).toContain("custom/eval");
   });
 
   it("点击选择工作区必定打开选择器；列表失败时在模态内呈现错误", async () => {

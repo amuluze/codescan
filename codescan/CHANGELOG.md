@@ -4,6 +4,52 @@ All notable changes to this project are documented in this file. The format is b
 
 
 
+## [1.6.0] - 2026-11-27
+
+### Added
+
+- Taint analysis now drops unreachable local sinks/assignments, carries `&&` condition guards across calls, and replays switch-case effects with case-value guards; Java field receivers use a dedicated `java/read-object-field` rule bound to `ObjectInputStream` fields, and child_process member calls ignore same-named local module objects.
+- Guarded cross-function field-write/return-alias summaries; child_process member calls now require the module receiver; Flask `request as req` sources are alias-bound.
+
+- Cross-function taint propagation now carries parameter field-write effects (`callee(o, v) { o.field = v }`) and parameter object identity sets (`id(o) { return o }`, `choose(a,b) { return flag ? a : b }`) back to caller state, pruning conditional branches when the condition is statically known or assigned from a local constant at the expression site, merging if/else, loop, switch (including fallthrough), and try/catch/finally branches, with break/continue and labeled break/continue-aware flow, replaying matching continue states through the next loop iteration; labels remain function-local, and following statically known if conditions, including local aliases and nested fields.
+
+- Go taint sanitizers now recognize aliased and dot imports for `strconv.Atoi` and `filepath.Clean`; Flask `request` aliases (`req.args`, `flask.request.args`) are recognized as taint sources.
+
+- Taint aliases for Go package aliases/dot imports (`exec.Command`, `os.Open`, `net/http`) and Rust `use ... as`/glob imports (`Command::new`, `fs::write`).
+
+- Go dot-import rules for `exec.Command`, `md5`/`sha1`, and `math/rand`; Rust glob-import rules for `std::fs::read*`, `std::mem::transmute`/`forget`, and `std::process::Command::new`.
+
+- Rule library batch 2: Java XMLDecoder and URL.openConnection heuristics, Rust unsafe-block visibility, and Flask debug=True detection, with fixtures and quality-gate coverage
+- Local rule packs: `pack.yaml` manifests, installed under the app data root with content-hash integrity checks, merged into scans and shown as read-only rules with `id@version` origin; scan history records pack id/version/integrity; CLI `pack install|list|remove` shares the same engine implementation and `scan` loads installed packs; optional Ed25519 pack signatures with trusted public keys (`pack keygen|sign|trust`)
+- Rule library batch 1: prototype pollution and string child-process execution for TypeScript, plus `requests verify=False` and Django `mark_safe` for Python; documented the rule quality gates
+- Rule page now edits custom rules in-app: full YAML editor, compile validation, atomic save, and a smoke test that runs only the custom rules against a sample file
+- v2 type layer for Java: inheritance rules resolve `extends`/`implements` closures across files, interfaces, wildcard imports, and anonymous class bodies; `java/trust-all-certs-inherited` covers indirect trust managers without relying on empty-method heuristics
+- v2 dataflow for Go: `go/plaintext-http` is now a taint rule; `http://` literals are proven to reach `http.Get/Head/Post/PostForm` through variables, parameters, concatenation, function-local `const`/`var`, and same-file package-level initialization, while `https://` and unproven variables are not reported
+
+### Fixed
+
+- Taint call/effect flow now skips unreachable branches, applies loop-condition guards, and ignores unmodelled switch effects; child_process bare calls skip local shadowing; readObject field receivers are name-bounded; Flask module aliases (`flask.request.args`) resolve as sources.
+
+- `java/read-object` now recognizes classes that hold an `ObjectInputStream` field, covering field-based cross-method reads in addition to parameters and locals.
+
+- Go `tls-insecure-skip-verify` now resolves `crypto/tls` import aliases; `java/read-object` only reports inside methods that expose an `ObjectInputStream` parameter or local.
+
+- `postMessage` wildcard rules now inspect the target origin (second argument) instead of any string argument; `py/taint-os-system-request` only sources `request.args`; `go/tls-insecure-skip-verify` requires an enclosing `tls.Config`. Negative fixtures cover safe-origin, unrelated `.args`, and custom-struct cases.
+- `py/yaml-load-without-loader` accepts positional `SafeLoader`/`CSafeLoader`; `java/read-object` requires an explicit receiver and is warning-level; `go/unsafe-template` checks the `text/template` import so `html/template` is no longer reported. Negative fixtures cover all three.
+- Pattern rules support an optional `imports` regex gate and `imported_symbols` alias mapping; `ts/child-process-string`, `py/weak-hash`, and `py/os-system` cover aliased, destructured, and renamed imports. Go package aliases (`os/exec`, `crypto/md5`, `math/rand`) and Rust `use ... as` aliases (`Command`, `fs`, `mem`), including nested use trees, are resolved too. Also cover fully qualified `java.security.MessageDigest`, `window.eval`, and `std::fs::write` taint sinks.
+- Metric findings now use each rule's declared id/dimension/severity/message; disabling `metric/duplicate-block` no longer emits default duplicate-block findings, and custom metric rules apply their own thresholds and metadata
+- Pattern, filter, and taint queries without `@match` are rejected at compile time instead of silently producing no findings; multiple `@match` captures choose the smallest span
+- Non-UTF-8 source files are parsed from the same lossy text used for matching, preventing misplaced AST offsets and silent misses
+- Disabled custom rules with YAML schema/field errors no longer block the rest of the rule set; errors are retained on the engine and surfaced as rule rows in the rules page
+- Duplicate-block windows are keyed by SHA-256 content hashes instead of a 64-bit quick hash, eliminating collision-driven false duplicate groups
+- Scan history now persists scan events and the enabled rule set/custom-rule hash, exposes them through `get_scan_events`, and SARIF export uses the real engine version instead of `"persisted"`
+
+### Changed
+
+- TSX and JSX now have their own built-in rule declarations (15 new rules), so TypeScript/JavaScript AST and taint rules are no longer silently absent on React files
+- Text rules scan hidden files and unknown extensions (`.env`, YAML, JSON, etc.); `.git` remains excluded, and `files_scanned` counts every processed text file
+- Built-in precision: `py/yaml-load-without-loader` only accepts `SafeLoader`/`CSafeLoader`, `go/ignored-error` requires a call and avoids duplicate/`_ = literal` hits, `java/trust-all-certs` requires a direct/qualified/anonymous `X509TrustManager` implementation, and a new `rust/sql-format-interpolation` rule covers named `format!` interpolation without changing `rust/sql-string-concat` semantics
+
 ## [1.5.8] - 2026-11-25
 
 ### Fixed

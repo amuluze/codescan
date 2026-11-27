@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { useHistoryStore } from "../stores/historyStore";
 import { platform } from "../platform";
 import { DirectoryPicker } from "../components/DirectoryPicker";
+import { formatScanEvent } from "../labels";
 import type { Finding } from "../types";
 
 export function HistoryView() {
@@ -11,6 +12,8 @@ export function HistoryView() {
     baseline,
     openScanId,
     openFindings,
+    openEvents,
+    openRuleset,
     gateNew,
     load,
     openScan,
@@ -179,6 +182,33 @@ export function HistoryView() {
           <h3>
             扫描 #{openScanId} 的发现（{openFindings.length} 条）
           </h3>
+          {openRuleset && (
+            <details data-testid="history-ruleset">
+              <summary>
+                规则集（启用 {openRuleset.enabled_rules?.length ?? 0} 条，规则包{" "}
+                {openRuleset.packs?.length ?? 0} 个）
+              </summary>
+              {openRuleset.packs && openRuleset.packs.length > 0 && (
+                <ul>
+                  {openRuleset.packs.map((pack) => (
+                    <li key={`${pack.id}@${pack.version}`}>
+                      {pack.id}@{pack.version}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </details>
+          )}
+          {openEvents.length > 0 && (
+            <details data-testid="history-events">
+              <summary>扫描事件（{openEvents.length}）</summary>
+              <ul>
+                {openEvents.map((event, index) => (
+                  <li key={`${event.kind}-${index}`}>{formatScanEvent(event)}</li>
+                ))}
+              </ul>
+            </details>
+          )}
           <div className="findings-body">
             <ul className="finding-list">
               {openFindings.map((f) => (
