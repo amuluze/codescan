@@ -294,7 +294,7 @@ impl Engine {
                 FileOutcome::EventOnly(mut file_events) => {
                     events.append(&mut file_events);
                 }
-                FileOutcome::Cancelled => unreachable!("取消已在上方短路"),
+                FileOutcome::Cancelled => return Err(ScanError::Cancelled),
             }
         }
 
@@ -351,65 +351,30 @@ impl Engine {
         rel: &str,
         unknown_counter: &std::sync::atomic::AtomicU64,
     ) -> FileOutcome {
-        let metadata = match std::fs::metadata(abs) {
-            Ok(m) => m,
-            Err(e) => {
-                return FileOutcome::EventOnly(vec![ScanEvent::IoError {
-                    path: rel.to_string(),
-                    message: e.to_string(),
-                }])
-            }
-        };
-        if metadata.len() > MAX_FILE_BYTES {
-            return FileOutcome::EventOnly(vec![ScanEvent::Oversize {
-                path: rel.to_string(),
-                size: metadata.len(),
-            }]);
-        }
-        // 读内容 + 二进制检测先于语言识别：二进制证据比「未知扩展名」更具体。
-        let bytes = match std::fs::read(abs) {
+        let bytes = match read_source(abs, rel) {
             Ok(bytes) => bytes,
-            Err(e) => {
-                return FileOutcome::EventOnly(vec![ScanEvent::IoError {
-                    path: rel.to_string(),
-                    message: e.to_string(),
-                }])
-            }
+            Err(events) => return FileOutcome::EventOnly(events),
         };
-        if bytes.len() > MAX_FILE_BYTES as usize {
-            return FileOutcome::EventOnly(vec![ScanEvent::Oversize {
-                path: rel.to_string(),
-                size: bytes.len() as u64,
-            }]);
-        }
-        if bytes[..bytes.len().min(8192)].contains(&0) {
-            return FileOutcome::EventOnly(vec![ScanEvent::Binary {
-                path: rel.to_string(),
-            }]);
-        }
         let Some(lang) = Language::detect(abs) else {
-            // 未知扩展名不进入 AST/污点/度量管线，但文本规则（密钥、TODO 等）
+            // 未知扩展名不进入 AST/污点/度量管线，但文本规则（密钥、债务标记等）
             // 仍作用于所有非二进制文本文件（含 `.env`、YAML、JSON 等）。
             unknown_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let source = String::from_utf8_lossy(&bytes).into_owned();
-            let mut findings = Vec::new();
-            for rule in &self.text_rules {
-                if path_excluded(&rule.exclude_paths, rel) {
-                    continue;
-                }
-                findings.extend(run_text_rule(rule, &source, rel, false));
-            }
-            return FileOutcome::Scanned {
-                file_findings: findings,
-                file_events: Vec::new(),
-                normalized_lines: None,
-                test_ranges: Vec::new(),
-                taint_facts: Vec::new(),
-                type_facts: None,
-            };
+            return scan_text_only(&self.text_rules, &bytes, rel);
         };
+        self.analyze_source(lang, &bytes, rel)
+    }
 
-        let parsed = language::parse(lang, &bytes);
+    /// 已知语言的源文件：AST 规则 → 文本规则 → 污点事实 → 度量 → 类型事实。
+    fn analyze_source(&self, lang: Language, bytes: &[u8], rel: &str) -> FileOutcome {
+        let parsed = match language::parse(lang, bytes) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                return FileOutcome::EventOnly(vec![ScanEvent::IoError {
+                    path: rel.to_string(),
+                    message: error.to_string(),
+                }])
+            }
+        };
         let degraded = parsed.error_nodes > 0;
         let mut events = Vec::new();
         if degraded {
@@ -421,74 +386,24 @@ impl Engine {
 
         let source = &parsed.source;
         let tree = &parsed.tree;
-        let mut findings = Vec::new();
-        let file_imports = if self.ast_rules.iter().any(|rule| !rule.imports.is_empty())
-            || self.taint_rules.iter().any(|rule| !rule.imports.is_empty())
-        {
-            collect_import_texts(lang, tree, source)
-        } else {
-            Vec::new()
-        };
-        let file_aliases = if self
-            .ast_rules
-            .iter()
-            .any(|rule| !rule.imported_symbols.is_empty())
-            || self
-                .taint_rules
-                .iter()
-                .any(|rule| !rule.spec.imported_symbols.is_empty())
-        {
-            collect_import_aliases(lang, tree, source)
-        } else {
-            Vec::new()
-        };
-        let local_definitions = if self.ast_rules.iter().any(|rule| rule.no_shadow) {
-            collect_local_definitions(tree, source)
-        } else {
-            HashSet::new()
-        };
-
-        let ast_context = AstFileContext {
+        let imports = self.import_facts(lang, tree, source);
+        let context = AstFileContext {
             tree,
             source,
             path: rel,
             degraded,
-            imports: &file_imports,
-            aliases: &file_aliases,
-            definitions: &local_definitions,
+            imports: &imports.texts,
+            aliases: &imports.aliases,
+            definitions: &imports.definitions,
         };
-        for rule in &self.ast_rules {
-            if let RuleLanguage::One(l) = rule.spec.language {
-                if l != lang {
-                    continue;
-                }
-                if path_excluded(&rule.exclude_paths, rel) {
-                    continue;
-                }
-                findings.extend(run_ast_rule(rule, &ast_context));
-            }
-        }
+        let mut findings = self.run_ast_rules(lang, &context);
         for rule in &self.text_rules {
             if path_excluded(&rule.exclude_paths, rel) {
                 continue;
             }
             findings.extend(run_text_rule(rule, source, rel, degraded));
         }
-        let mut taint_facts: Vec<(String, crate::taint::FileFacts)> = Vec::new();
-        for rule in &self.taint_rules {
-            if let RuleLanguage::One(l) = rule.spec.language {
-                if l != lang {
-                    continue;
-                }
-                if !imports_match(&rule.imports, &file_imports) {
-                    continue;
-                }
-                taint_facts.push((
-                    rule.spec.id.clone(),
-                    crate::taint::extract_file(rule, lang, tree, source, rel, degraded, &file_aliases),
-                ));
-            }
-        }
+        let taint_facts = self.collect_taint_facts(lang, rel, degraded, &imports, tree, source);
         let test_ranges = test_code_ranges(lang, tree, rel, source);
         findings.extend(metrics::file_metrics_with_tests(
             lang,
@@ -499,18 +414,6 @@ impl Engine {
             &self.metric_rules,
             &test_ranges,
         ));
-
-        // 重复块语料输入：非空、非纯注释的规范化行（注释不算重复代码）。
-        let normalized_lines: Vec<(String, usize)> = source
-            .lines()
-            .enumerate()
-            .map(|(idx, line)| (line.trim(), idx + 1))
-            .filter(|(text, _)| {
-                !text.is_empty() && !text.starts_with("//") && !text.starts_with('#')
-            })
-            .map(|(text, line)| (text.to_string(), line))
-            .collect();
-
         let type_facts = if self.inheritance_rules.is_empty() {
             None
         } else {
@@ -520,12 +423,168 @@ impl Engine {
         FileOutcome::Scanned {
             file_findings: findings,
             file_events: events,
-            normalized_lines: Some(normalized_lines),
+            normalized_lines: Some(normalized_lines(source)),
             test_ranges,
             taint_facts,
             type_facts,
         }
     }
+
+    /// 导入相关事实按需计算：仅在存在依赖对应条件的启用规则时才遍历。
+    fn import_facts(
+        &self,
+        lang: Language,
+        tree: &tree_sitter::Tree,
+        source: &str,
+    ) -> ImportFacts {
+        let needs_texts = self.ast_rules.iter().any(|rule| !rule.imports.is_empty())
+            || self.taint_rules.iter().any(|rule| !rule.imports.is_empty());
+        let needs_aliases = self
+            .ast_rules
+            .iter()
+            .any(|rule| !rule.imported_symbols.is_empty())
+            || self
+                .taint_rules
+                .iter()
+                .any(|rule| !rule.spec.imported_symbols.is_empty());
+        let needs_definitions = self.ast_rules.iter().any(|rule| rule.no_shadow);
+        ImportFacts {
+            texts: if needs_texts {
+                collect_import_texts(lang, tree, source)
+            } else {
+                Vec::new()
+            },
+            aliases: if needs_aliases {
+                collect_import_aliases(lang, tree, source)
+            } else {
+                Vec::new()
+            },
+            definitions: if needs_definitions {
+                collect_local_definitions(tree, source)
+            } else {
+                HashSet::new()
+            },
+        }
+    }
+
+    /// 语言匹配的启用 AST 规则。
+    fn run_ast_rules(&self, lang: Language, context: &AstFileContext<'_>) -> Vec<Finding> {
+        let mut findings = Vec::new();
+        for rule in &self.ast_rules {
+            if let RuleLanguage::One(l) = rule.spec.language {
+                if l != lang {
+                    continue;
+                }
+                if path_excluded(&rule.exclude_paths, context.path) {
+                    continue;
+                }
+                findings.extend(run_ast_rule(rule, context));
+            }
+        }
+        findings
+    }
+
+    /// 语言与导入条件都匹配的污点规则各产出一份文件事实（项目级分析在汇总阶段进行）。
+    fn collect_taint_facts(
+        &self,
+        lang: Language,
+        rel: &str,
+        degraded: bool,
+        imports: &ImportFacts,
+        tree: &tree_sitter::Tree,
+        source: &str,
+    ) -> Vec<(String, crate::taint::FileFacts)> {
+        let mut facts = Vec::new();
+        for rule in &self.taint_rules {
+            if let RuleLanguage::One(l) = rule.spec.language {
+                if l != lang {
+                    continue;
+                }
+                if !imports_match(&rule.imports, &imports.texts) {
+                    continue;
+                }
+                facts.push((
+                    rule.spec.id.clone(),
+                    crate::taint::extract_file(
+                        rule,
+                        lang,
+                        tree,
+                        source,
+                        rel,
+                        degraded,
+                        &imports.aliases,
+                    ),
+                ));
+            }
+        }
+        facts
+    }
+}
+
+/// 按引擎上限读取文件；超限、二进制与读取失败分别产出对应事件（Domain §3.1）。
+fn read_source(abs: &Path, rel: &str) -> Result<Vec<u8>, Vec<ScanEvent>> {
+    let bytes = match crate::fsutil::read_bytes_limited(abs, MAX_FILE_BYTES) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::FileTooLarge => {
+            let size = std::fs::metadata(abs)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            return Err(vec![ScanEvent::Oversize {
+                path: rel.to_string(),
+                size,
+            }]);
+        }
+        Err(error) => {
+            return Err(vec![ScanEvent::IoError {
+                path: rel.to_string(),
+                message: error.to_string(),
+            }])
+        }
+    };
+    if bytes[..bytes.len().min(8192)].contains(&0) {
+        return Err(vec![ScanEvent::Binary {
+            path: rel.to_string(),
+        }]);
+    }
+    Ok(bytes)
+}
+
+/// 未知扩展名文件：只跑文本规则，其余管线跳过（计入已扫描文件）。
+fn scan_text_only(text_rules: &[TextRule], bytes: &[u8], rel: &str) -> FileOutcome {
+    let source = String::from_utf8_lossy(bytes).into_owned();
+    let file_findings = text_rules
+        .iter()
+        .filter(|rule| !path_excluded(&rule.exclude_paths, rel))
+        .flat_map(|rule| run_text_rule(rule, &source, rel, false))
+        .collect();
+    FileOutcome::Scanned {
+        file_findings,
+        file_events: Vec::new(),
+        normalized_lines: None,
+        test_ranges: Vec::new(),
+        taint_facts: Vec::new(),
+        type_facts: None,
+    }
+}
+
+/// 重复块语料输入：非空、非纯注释的规范化行（注释不算重复代码）。
+fn normalized_lines(source: &str) -> Vec<(String, usize)> {
+    source
+        .lines()
+        .enumerate()
+        .map(|(idx, line)| (line.trim(), idx + 1))
+        .filter(|(text, _)| {
+            !text.is_empty() && !text.starts_with("//") && !text.starts_with('#')
+        })
+        .map(|(text, line)| (text.to_string(), line))
+        .collect()
+}
+
+/// 单文件的导入事实；三个部分按需计算。
+struct ImportFacts {
+    texts: Vec<String>,
+    aliases: Vec<(String, String)>,
+    definitions: HashSet<String>,
 }
 
 
@@ -648,153 +707,219 @@ fn collect_import_aliases(
     let mut aliases = Vec::new();
     crate::metrics::walk_all_pub(tree.root_node(), &mut |node| match lang {
         Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Jsx => {
-            if node.kind() == "import_statement" {
-                let module = node
-                    .child_by_field_name("source")
-                    .and_then(|source_node| source.get(source_node.start_byte()..source_node.end_byte()))
-                    .map(|module| module.trim_matches(|c| c == '"' || c == '\'' || c == '`'));
-                if let Some(module) = module {
-                    if let Some(clause) = node
-                        .child_by_field_name("import_clause")
-                        .or_else(|| crate::taint::named_children(node).into_iter().find(|child| child.kind() == "import_clause"))
-                    {
-                        for child in crate::taint::named_children(clause) {
-                            if child.kind() == "namespace_import" {
-                                if let Some(local) = crate::taint::named_children(child)
-                                    .into_iter()
-                                    .find(|name| name.kind() == "identifier")
-                                    .and_then(|name| source.get(name.start_byte()..name.end_byte()))
-                                {
-                                    aliases.push((local.to_string(), module.to_string()));
-                                }
-                            } else if child.kind() == "identifier" {
-                                if let Some(local) = source.get(child.start_byte()..child.end_byte()) {
-                                    aliases.push((local.to_string(), module.to_string()));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            if node.kind() == "variable_declarator" {
-                let Some(name) = node
-                    .child_by_field_name("name")
-                    .filter(|name| name.kind() == "identifier")
-                    .and_then(|name| source.get(name.start_byte()..name.end_byte()))
-                else {
-                    return;
-                };
-                let Some(value) = node.child_by_field_name("value") else {
-                    return;
-                };
-                if value.kind() != "call_expression" {
-                    return;
-                }
-                let function = value
-                    .child_by_field_name("function")
-                    .and_then(|function| source.get(function.start_byte()..function.end_byte()));
-                if function != Some("require") {
-                    return;
-                }
-                let module = value
-                    .child_by_field_name("arguments")
-                    .and_then(|arguments| crate::taint::named_children(arguments).into_iter().next())
-                    .and_then(|argument| source.get(argument.start_byte()..argument.end_byte()))
-                    .map(|module| module.trim_matches(|c| c == '"' || c == '\'' || c == '`'));
-                if let Some(module) = module {
-                    aliases.push((name.to_string(), module.to_string()));
-                }
-            }
-            if node.kind() == "import_specifier" {
-                let Some(original) = node
-                    .child_by_field_name("name")
-                    .and_then(|name| source.get(name.start_byte()..name.end_byte()))
-                else {
-                    return;
-                };
-                let local = node
-                    .child_by_field_name("alias")
-                    .and_then(|alias| source.get(alias.start_byte()..alias.end_byte()))
-                    .unwrap_or(original);
-                if local != original {
-                    aliases.push((local.to_string(), original.to_string()));
-                }
-            }
-            if node.kind() == "pair_pattern" {
-                let Some(key) = node.child_by_field_name("key") else {
-                    return;
-                };
-                let Some(value) = node.child_by_field_name("value") else {
-                    return;
-                };
-                if !matches!(key.kind(), "property_identifier" | "identifier")
-                    || value.kind() != "identifier"
-                {
-                    return;
-                }
-                let (Some(original), Some(local)) = (
-                    source.get(key.start_byte()..key.end_byte()),
-                    source.get(value.start_byte()..value.end_byte()),
-                ) else {
-                    return;
-                };
-                if local != original {
-                    aliases.push((local.to_string(), original.to_string()));
-                }
-            }
+            collect_js_import_alias(node, source, &mut aliases)
         }
-        Language::Python => {
-            if node.kind() == "aliased_import" {
-                let Some(original) = node
-                    .child_by_field_name("name")
-                    .and_then(|name| source.get(name.start_byte()..name.end_byte()))
-                else {
-                    return;
-                };
-                let Some(local) = node
-                    .child_by_field_name("alias")
-                    .and_then(|alias| source.get(alias.start_byte()..alias.end_byte()))
-                else {
-                    return;
-                };
-                if local != original {
-                    aliases.push((local.to_string(), original.to_string()));
-                }
-            }
-        }
-        Language::Go => {
-            if node.kind() == "import_spec" {
-                let Some(path) = node
-                    .child_by_field_name("path")
-                    .and_then(|path| source.get(path.start_byte()..path.end_byte()))
-                else {
-                    return;
-                };
-                let original = go_package_name(path);
-                let Some(local) = node
-                    .child_by_field_name("name")
-                    .filter(|name| name.kind() == "package_identifier")
-                    .and_then(|name| source.get(name.start_byte()..name.end_byte()))
-                else {
-                    return;
-                };
-                if local != original {
-                    aliases.push((local.to_string(), original));
-                }
-            }
-        }
-        Language::Rust => {
-            if node.kind() == "use_declaration" {
-                if let Some(argument) = node.child_by_field_name("argument") {
-                    collect_rust_use_aliases(argument, source, &[], &mut aliases);
-                }
-            }
-        }
+        Language::Python => collect_python_import_alias(node, source, &mut aliases),
+        Language::Go => collect_go_import_alias(node, source, &mut aliases),
+        Language::Rust => collect_rust_import_alias(node, source, &mut aliases),
         Language::Java => {}
     });
     aliases.sort();
     aliases.dedup();
     aliases
+}
+
+/// 节点在源文本中的切片。
+fn text_of<'a>(node: tree_sitter::Node<'_>, source: &'a str) -> Option<&'a str> {
+    source.get(node.start_byte()..node.end_byte())
+}
+
+/// 去掉模块名字面量的引号（`"` / `'` / `` ` ``）。
+fn unquoted(text: &str) -> &str {
+    text.trim_matches(|c| c == '"' || c == '\'' || c == '`')
+}
+
+/// `name_field` 指向的原始名被 `alias_field` 改名时记录 (别名, 原名)；未改名不记录。
+fn push_renamed(
+    node: tree_sitter::Node<'_>,
+    name_field: &str,
+    alias_field: &str,
+    source: &str,
+    aliases: &mut Vec<(String, String)>,
+) {
+    let Some(original) = node
+        .child_by_field_name(name_field)
+        .and_then(|name| text_of(name, source))
+    else {
+        return;
+    };
+    let local = node
+        .child_by_field_name(alias_field)
+        .and_then(|alias| text_of(alias, source))
+        .unwrap_or(original);
+    if local != original {
+        aliases.push((local.to_string(), original.to_string()));
+    }
+}
+
+fn collect_js_import_alias(
+    node: tree_sitter::Node<'_>,
+    source: &str,
+    aliases: &mut Vec<(String, String)>,
+) {
+    match node.kind() {
+        "import_statement" => js_import_statement_aliases(node, source, aliases),
+        "variable_declarator" => js_require_alias(node, source, aliases),
+        "import_specifier" => push_renamed(node, "name", "alias", source, aliases),
+        "pair_pattern" => js_pair_pattern_alias(node, source, aliases),
+        _ => {}
+    }
+}
+
+/// `import * as local from "module"` / `import local from "module"`：本地名 → 模块名。
+fn js_import_statement_aliases(
+    node: tree_sitter::Node<'_>,
+    source: &str,
+    aliases: &mut Vec<(String, String)>,
+) {
+    let Some(module) = node
+        .child_by_field_name("source")
+        .and_then(|source_node| text_of(source_node, source))
+        .map(unquoted)
+    else {
+        return;
+    };
+    let Some(clause) = node.child_by_field_name("import_clause").or_else(|| {
+        crate::taint::named_children(node)
+            .into_iter()
+            .find(|child| child.kind() == "import_clause")
+    }) else {
+        return;
+    };
+    for child in crate::taint::named_children(clause) {
+        match child.kind() {
+            "namespace_import" => {
+                let local = crate::taint::named_children(child)
+                    .into_iter()
+                    .find(|name| name.kind() == "identifier")
+                    .and_then(|name| text_of(name, source));
+                if let Some(local) = local {
+                    aliases.push((local.to_string(), module.to_string()));
+                }
+            }
+            "identifier" => {
+                if let Some(local) = text_of(child, source) {
+                    aliases.push((local.to_string(), module.to_string()));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `const local = require("module")`：本地名 → 模块名。
+fn js_require_alias(
+    node: tree_sitter::Node<'_>,
+    source: &str,
+    aliases: &mut Vec<(String, String)>,
+) {
+    let Some(name) = node
+        .child_by_field_name("name")
+        .filter(|name| name.kind() == "identifier")
+        .and_then(|name| text_of(name, source))
+    else {
+        return;
+    };
+    let Some(value) = node.child_by_field_name("value") else {
+        return;
+    };
+    if value.kind() != "call_expression" {
+        return;
+    }
+    if value
+        .child_by_field_name("function")
+        .and_then(|function| text_of(function, source))
+        != Some("require")
+    {
+        return;
+    }
+    let module = value
+        .child_by_field_name("arguments")
+        .and_then(|arguments| crate::taint::named_children(arguments).into_iter().next())
+        .and_then(|argument| text_of(argument, source))
+        .map(unquoted);
+    if let Some(module) = module {
+        aliases.push((name.to_string(), module.to_string()));
+    }
+}
+
+/// `const { original: local } = require(...)`：本地名 → 原名。
+fn js_pair_pattern_alias(
+    node: tree_sitter::Node<'_>,
+    source: &str,
+    aliases: &mut Vec<(String, String)>,
+) {
+    let (Some(key), Some(value)) = (
+        node.child_by_field_name("key"),
+        node.child_by_field_name("value"),
+    ) else {
+        return;
+    };
+    if !matches!(key.kind(), "property_identifier" | "identifier")
+        || value.kind() != "identifier"
+    {
+        return;
+    }
+    let (Some(original), Some(local)) = (text_of(key, source), text_of(value, source)) else {
+        return;
+    };
+    if local != original {
+        aliases.push((local.to_string(), original.to_string()));
+    }
+}
+
+/// `import original as local`。
+fn collect_python_import_alias(
+    node: tree_sitter::Node<'_>,
+    source: &str,
+    aliases: &mut Vec<(String, String)>,
+) {
+    if node.kind() == "aliased_import" {
+        push_renamed(node, "name", "alias", source, aliases);
+    }
+}
+
+/// `import local "path"`：本地名与包名不同时记录 (本地名, 包名)。
+fn collect_go_import_alias(
+    node: tree_sitter::Node<'_>,
+    source: &str,
+    aliases: &mut Vec<(String, String)>,
+) {
+    if node.kind() != "import_spec" {
+        return;
+    }
+    let Some(path) = node
+        .child_by_field_name("path")
+        .and_then(|path| text_of(path, source))
+    else {
+        return;
+    };
+    let original = go_package_name(path);
+    let Some(local) = node
+        .child_by_field_name("name")
+        .filter(|name| name.kind() == "package_identifier")
+        .and_then(|name| text_of(name, source))
+    else {
+        return;
+    };
+    if local != original {
+        aliases.push((local.to_string(), original));
+    }
+}
+
+/// `use path::original as local`（含嵌套 use 列表）。
+fn collect_rust_import_alias(
+    node: tree_sitter::Node<'_>,
+    source: &str,
+    aliases: &mut Vec<(String, String)>,
+) {
+    if node.kind() != "use_declaration" {
+        return;
+    }
+    let Some(argument) = node.child_by_field_name("argument") else {
+        return;
+    };
+    collect_rust_use_aliases(argument, source, &[], aliases);
 }
 
 fn collect_rust_use_aliases(
@@ -928,142 +1053,43 @@ fn collect_local_definitions(tree: &tree_sitter::Tree, source: &str) -> HashSet<
 }
 
 fn run_ast_rule(rule: &AstRule, context: &AstFileContext<'_>) -> Vec<Finding> {
-    let tree = context.tree;
-    let source = context.source;
-    let path = context.path;
-    let degraded = context.degraded;
-    let file_imports = context.imports;
-    let file_aliases = context.aliases;
-    let local_definitions = context.definitions;
-    if !imports_match(&rule.imports, file_imports) {
+    if !imports_match(&rule.imports, context.imports) {
         return Vec::new();
     }
-    let root = tree.root_node();
+    let source = context.source;
+    let root = context.tree.root_node();
     let mut cursor = tree_sitter::QueryCursor::new();
-    let mut findings = Vec::new();
-
-    use tree_sitter::StreamingIterator as _;
-
-    let mut not_ranges: Vec<(usize, usize)> = Vec::new();
-    for neg in &rule.not_queries {
-        let mut it = cursor.matches(neg, root, source.as_bytes());
-        while let Some(m) = it.next() {
-            if let Some((s, e)) = match_range(m) {
-                not_ranges.push((s, e));
-            }
-        }
-    }
-    let mut inside_ranges: Vec<(usize, usize)> = Vec::new();
-    for ins in &rule.inside_queries {
-        let mut it = cursor.matches(ins, root, source.as_bytes());
-        while let Some(m) = it.next() {
-            if let Some((s, e)) = match_range(m) {
-                inside_ranges.push((s, e));
-            }
-        }
-    }
-
+    // not / inside 过滤范围。
+    let not_ranges = match_ranges(&mut cursor, &rule.not_queries, root, source);
+    let inside_ranges = match_ranges(&mut cursor, &rule.inside_queries, root, source);
     let names: Vec<String> = rule
         .query
         .capture_names()
         .iter()
         .map(|n| n.to_string())
         .collect();
+    let mut findings = Vec::new();
 
+    use tree_sitter::StreamingIterator as _;
     let mut it = cursor.matches(&rule.query, root, source.as_bytes());
     while let Some(m) = it.next() {
-        let mut captures: Vec<(String, String)> = Vec::new();
-        // (start_byte, end_byte, start_point, end_point)
-        let mut primary: Option<(usize, usize, tree_sitter::Point, tree_sitter::Point)> = None;
-        for cap in m.captures() {
-            let name = names
-                .get(cap.index as usize)
-                .cloned()
-                .unwrap_or_default();
-            let text = source
-                .get(cap.node.start_byte()..cap.node.end_byte())
-                .unwrap_or("")
-                .to_string();
-            if name == "match" {
-                let candidate = (
-                    cap.node.start_byte(),
-                    cap.node.end_byte(),
-                    cap.node.start_position(),
-                    cap.node.end_position(),
-                );
-                let replace = match primary {
-                    None => true,
-                    Some((start, end, _, _)) => {
-                        (candidate.1 - candidate.0, candidate.0) < (end - start, start)
-                    }
-                };
-                if replace {
-                    primary = Some(candidate);
-                }
-            }
-            captures.push((name, text));
-        }
-        let Some((start, end, sp, ep)) = primary else {
+        let RuleMatch { mut captures, primary } = capture_match(m, &names, source);
+        let Some((start, end, span)) = primary else {
             continue;
         };
-        if rule.spec.field_receiver {
-            let Some((_, receiver)) = captures.iter().find(|(name, _)| name == "obj") else {
-                continue;
-            };
-            if !receiver_is_ois_field(root, start, receiver, source) {
-                continue;
-            }
-        }
-        let match_text = source
-            .get(start..end.min(source.len()))
-            .unwrap_or("")
-            .to_string();
-
-        // not：同位或包含 → 排除。
-        if not_ranges
-            .iter()
-            .any(|(ns, ne)| *ns <= start && *ne >= end)
-        {
+        // field_receiver：接收者必须是同类 ObjectInputStream 字段。
+        if !field_receiver_allows(rule, root, start, &captures, source) {
             continue;
         }
-        // inside：必须被某命中包含。
-        if !rule.inside_queries.is_empty()
-            && !inside_ranges
-                .iter()
-                .any(|(ns, ne)| *ns <= start && *ne >= end)
-        {
+        // not：同位或包含 → 排除；inside：必须被某命中包含。
+        if covers(&not_ranges, start, end) {
+            continue;
+        }
+        if !rule.inside_queries.is_empty() && !covers(&inside_ranges, start, end) {
             continue;
         }
         // 元变量约束：捕获缺失或不匹配 → 排除。
-        let mut ok = true;
-        for (capture, regex) in &rule.metavariables {
-            let mut matched = false;
-            for (name, text) in &captures {
-                if name == capture {
-                    matched = true;
-                    let alias_match = rule.spec.imported_symbols.iter().any(|symbol| {
-                        file_aliases.iter().any(|(local, original)| {
-                            local == text
-                                && original == symbol
-                                && regex.is_match(original)
-                        })
-                    });
-                    if !regex.is_match(text) && !alias_match {
-                        ok = false;
-                        break;
-                    }
-                    if rule.no_shadow && local_definitions.contains(text) {
-                        ok = false;
-                        break;
-                    }
-                }
-            }
-            if !ok || !matched {
-                ok = false;
-                break;
-            }
-        }
-        if !ok {
+        if !metavariables_hold(rule, &captures, context.aliases, context.definitions) {
             continue;
         }
 
@@ -1072,26 +1098,136 @@ fn run_ast_rule(rule: &AstRule, context: &AstFileContext<'_>) -> Vec<Finding> {
             rule_id: rule.spec.id.clone(),
             dimension: rule.spec.dimension,
             severity: rule.spec.severity,
-            path: path.to_string(),
-            span: Span {
-                start: Position {
-                    line: sp.row + 1,
-                    column: sp.column + 1,
-                },
-                end: Position {
-                    line: ep.row + 1,
-                    column: ep.column + 1,
-                },
-            },
+            path: context.path.to_string(),
+            span,
             message: rule.spec.message.clone(),
-            match_text,
+            match_text: source
+                .get(start..end.min(source.len()))
+                .unwrap_or("")
+                .to_string(),
             captures,
-            degraded,
+            degraded: context.degraded,
             flows: Vec::new(),
             fingerprint: String::new(),
         });
     }
     findings
+}
+
+/// 收集一组查询的全部命中范围（各命中所有捕获节点的最小/最大字节范围）。
+fn match_ranges(
+    cursor: &mut tree_sitter::QueryCursor,
+    queries: &[tree_sitter::Query],
+    root: tree_sitter::Node<'_>,
+    source: &str,
+) -> Vec<(usize, usize)> {
+    use tree_sitter::StreamingIterator as _;
+    let mut ranges = Vec::new();
+    for query in queries {
+        let mut it = cursor.matches(query, root, source.as_bytes());
+        while let Some(m) = it.next() {
+            if let Some(range) = match_range(m) {
+                ranges.push(range);
+            }
+        }
+    }
+    ranges
+}
+
+/// 一条查询命中：各捕获的 (名, 文本)，以及主匹配 `(起始字节, 结束字节, span)`。
+struct RuleMatch {
+    captures: Vec<(String, String)>,
+    /// 名为 `match` 的捕获中最短、最先出现者。
+    primary: Option<(usize, usize, Span)>,
+}
+
+fn capture_match(
+    m: &tree_sitter::QueryMatch<'_, '_>,
+    names: &[String],
+    source: &str,
+) -> RuleMatch {
+    let mut captures = Vec::new();
+    let mut primary: Option<(usize, usize, Span)> = None;
+    for cap in m.captures() {
+        let name = names.get(cap.index as usize).cloned().unwrap_or_default();
+        let text = source
+            .get(cap.node.start_byte()..cap.node.end_byte())
+            .unwrap_or("")
+            .to_string();
+        if name == "match" {
+            let candidate = (
+                cap.node.start_byte(),
+                cap.node.end_byte(),
+                crate::metrics::span_of(cap.node),
+            );
+            let replace = primary.as_ref().is_none_or(|(start, end, _)| {
+                (candidate.1 - candidate.0, candidate.0) < (*end - *start, *start)
+            });
+            if replace {
+                primary = Some(candidate);
+            }
+        }
+        captures.push((name, text));
+    }
+    RuleMatch { captures, primary }
+}
+
+/// field_receiver 规则：`obj` 捕获必须是同类 ObjectInputStream 字段；其他规则恒为真。
+fn field_receiver_allows(
+    rule: &AstRule,
+    root: tree_sitter::Node<'_>,
+    match_start: usize,
+    captures: &[(String, String)],
+    source: &str,
+) -> bool {
+    if !rule.spec.field_receiver {
+        return true;
+    }
+    let Some((_, receiver)) = captures.iter().find(|(name, _)| name == "obj") else {
+        return false;
+    };
+    receiver_is_ois_field(root, match_start, receiver, source)
+}
+
+/// `ranges` 中是否有范围同位或包含 `[start, end)`。
+fn covers(ranges: &[(usize, usize)], start: usize, end: usize) -> bool {
+    ranges
+        .iter()
+        .any(|(range_start, range_end)| *range_start <= start && *range_end >= end)
+}
+
+/// 元变量约束：每个受约束的捕获名至少出现一次，且每次出现的文本匹配正则
+/// （或经导入别名匹配原始符号）；`no_shadow` 时本地同名定义使命中失效。
+fn metavariables_hold(
+    rule: &AstRule,
+    captures: &[(String, String)],
+    file_aliases: &[(String, String)],
+    local_definitions: &HashSet<String>,
+) -> bool {
+    for (capture, regex) in &rule.metavariables {
+        let mut matched = false;
+        for (name, text) in captures {
+            if name != capture {
+                continue;
+            }
+            matched = true;
+            let alias_match = rule.spec.imported_symbols.iter().any(|symbol| {
+                file_aliases.iter().any(|(local, original)| {
+                    local == text && original == symbol && regex.is_match(original)
+                })
+            });
+            if !regex.is_match(text) && !alias_match {
+                return false;
+            }
+            if rule.no_shadow && local_definitions.contains(text) {
+                return false;
+            }
+        }
+        if !matched {
+            return false;
+        }
+    }
+    true
 }
 
 /// Java：匹配点在 `name` 对应的 ObjectInputStream 字段所在的类内。
@@ -1296,7 +1432,10 @@ fn walk_workspace(root: &Path, options: &ScanOptions) -> Vec<(PathBuf, String)> 
     // 内置默认排除目录（best-effort：非法模式忽略）。
     let mut overrides = ignore::overrides::OverrideBuilder::new(root);
     for dir in DEFAULT_IGNORED_DIRS {
-        let _ = overrides.add(&format!("!{dir}/"));
+        let added = overrides.add(&format!("!{dir}/"));
+        // 内置目录名均为字面量，编译失败只可能是编程错误：开发期断言；
+        // 发布构建保持 best-effort（该目录不被忽略，而不是中止扫描）。
+        debug_assert!(added.is_ok(), "内置忽略目录模式编译失败：{dir}");
     }
     if let Ok(overrides) = overrides.build() {
         builder.overrides(overrides);

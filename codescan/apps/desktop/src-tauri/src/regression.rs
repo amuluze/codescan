@@ -127,8 +127,12 @@ fn regress_file(
         .ok_or_else(|| format!("不支持的语言扩展名：{file_name}"))?;
     let marker = if language == Language::Python { "#" } else { "//" };
 
-    let source = std::fs::read_to_string(&source_path)
-        .map_err(|e| format!("读取源文件失败：{}（{e}）", source_path.display()))?;
+    // 与引擎同一上限：超过 1 MiB 的文件本就不会产出发现，回归不读取。
+    let source = codescan_engine::fsutil::read_to_string_limited(
+        &source_path,
+        codescan_engine::MAX_FILE_BYTES,
+    )
+    .map_err(|e| format!("读取源文件失败：{}（{e}）", source_path.display()))?;
     let line_count = source.lines().count();
     if start_line == 0 || start_line > line_count {
         return Err(format!(
@@ -377,6 +381,11 @@ impl TempWorkspace {
 
 impl Drop for TempWorkspace {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+        if let Err(error) = std::fs::remove_dir_all(&self.path) {
+            eprintln!(
+                "codescan: 清理隔离回归临时目录失败 {}：{error}",
+                self.path.display()
+            );
+        }
     }
 }

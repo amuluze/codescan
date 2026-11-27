@@ -190,6 +190,8 @@
 | 历史 | `HistoryView` | 扫描记录表（查看 / 设为基线 / 门禁差异 / 导出 SARIF / 删除）→ 门禁差异区 → 选中扫描的发现详情 | 扫描回溯、基线设置、门禁差异、SARIF 导出、删除 |
 | 设置 | `SettingsView` | 标题区 → 模型 Provider 卡（Profile 表格 + 新建/编辑弹窗（Profile 与 Key 同表单、校验、端点预览、未保存确认））→ LLM 审查内置 Skill 卡（文件表 + 覆写状态 + 编辑弹窗）→ 应用更新卡 → 安全边界说明卡 | 多 Provider Profile 配置（新建/编辑/删除/设为默认/按 Profile 测试连接；密钥只显示状态；弹窗统一保存 Profile 与 Key；编辑行高亮与忙碌态）、内置 Skill 查看/覆写/恢复默认、更新检查与安装、安全边界说明 |
 
+**视图内部构成**：五个视图统一按「页面骨架 + 构建块」两层拆分。`views/XxxView.tsx` 是页面骨架：store 接线、挂载加载、跨区段的页面态（如选中项校正、删除确认）与弹层；同目录的 `XxxView.parts.tsx` 承载页面私有的页面态 hook（`useXxx`，成组状态与动作）与区段展示组件（props 驱动、无自有状态）。状态归属不因拆分改变：区段组件只渲染页面或 hook 传入的 props，不持有跨渲染的状态；`data-testid`、`aria-label` 与文案仍落在原来的 DOM 位置。
+
 **弹层**（应用内实现，不使用系统原生对话框）
 
 | 弹层 | 组件 | 结构 | 约束 |
@@ -273,10 +275,10 @@
 | `FindingsView` | `views/FindingsView.tsx` | 发现列表 / 详情 / 筛选 / 批量分诊 |
 | `RulesView` | `views/RulesView.tsx` | 规则目录与启停；打开新建/编辑弹窗 |
 | `RuleEditorDialog` | `components/RuleEditorDialog.tsx` | 自定义规则 YAML 编辑、校验、测试；新建追加、编辑保存完整文件 |
-| `RuleTable` | `components/RuleTable.tsx` | 规则目录表：启用开关、元数据、只读来源与选择行 |
-| `RulePacksSection` | `components/RulePacksSection.tsx` | 规则包安装入口、签名状态与卸载 |
 | `HistoryView` | `views/HistoryView.tsx` | 扫描回溯、基线、门禁差异、SARIF 导出 |
 | `SettingsView` | `views/SettingsView.tsx` | 多 Provider Profile（列表 / 编辑 / 密钥 / 测试 / 默认切换）、更新、安全边界说明 |
+| `XxxView.parts` | `views/ScanView.parts.tsx` 等 5 个（与视图同名） | 页面私有构建块。页面态 hook：`useScanReview`（审查上限 / 独立复核 / 筛选 / 导出）、`useRulePacks`、`useProviderProfiles` + `useReviewSkill`；区段展示组件：扫描页 `ScanWorkspaceCard` / `ScanRunCard` / `ScanResultCard` / `ScanReviewCard`，发现页 `FindingsToolbar` / `BatchTriageSection` / `FindingList` / `FindingDetail`，规则页 `RulesTable` / `RulePacksSection` / `RuleReadOnlyDetail`，历史页 `HistoryScanTable` / `HistoryGateDiff` / `HistoryScanFindings`，设置页 `ProviderProfilesCard` / `ReviewSkillCard` / `UpdateCard` / `SafetyNotesCard`。区段组件均为 props 驱动、无自有状态 |
+| `ProviderEditorDialog` | `components/ProviderEditorDialog.tsx` | Provider Profile 编辑弹窗：草稿 hook `useProviderEditorDraft`（Profile 字段、Key 输入、放弃确认，随打开的 Profile 重置）+ 文件内私有区段（头部 / 未保存确认 / Profile 字段 / API Key 区 / 底部操作）；Profile 与 Key 在同一次保存中提交 |
 | `DirectoryPicker` | `components/DirectoryPicker.tsx` | 工作区路径选择：应用内 Modal（Rust 列目录 + 可编辑路径），替代系统原生目录对话框 |
 | `CopyButton` | `components/CopyButton.tsx` | 复制按钮：`idle / copied / failed` 三态，1.6s 回落；**不负责脱敏**，调用方必须传入可公开文本 |
 | `scanStore` / `historyStore` / `rulesStore` / `llmStore` | `stores/*.ts` | 视图状态机与数据事实 |

@@ -7,25 +7,18 @@ pub mod regression;
 pub mod store;
 
 use commands::AppState;
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard};
 
-pub fn run() {
-    let data_root = {
-        let home = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        home.join(".codescan")
-    };
-    let _ = std::fs::create_dir_all(&data_root);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&data_root, std::fs::Permissions::from_mode(0o700));
-    }
+/// 桌面应用壳入口：初始化失败（数据目录、数据库、事件循环）返回可读错误，
+/// 由 `main` 打印并以非零码退出，启动路径上不 panic。
+pub fn run() -> Result<(), String> {
+    let data_root = data_root();
+    prepare_data_root(&data_root).map_err(|error| format!("初始化数据目录失败：{error}"))?;
     let db_path = data_root.join("codescan.db");
-    let store = store::Store::open(&db_path).expect("打开 Codescan 数据库失败");
+    let store = store::Store::open(&db_path)
+        .map_err(|error| format!("打开 Codescan 数据库失败：{error}"))?;
     let store = Arc::new(Mutex::new(store));
-
     let context = tauri::generate_context!();
     let builder = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -84,5 +77,40 @@ pub fn run() {
     builder
         .plugin(tauri_plugin_process::init())
         .run(context)
-        .expect("error while running codescan desktop");
+        .map_err(|error| format!("Codescan 桌面端运行失败：{error}"))
+}
+
+/// 数据根目录 `~/.codescan`（HOME 缺失时退回当前目录）。
+pub(crate) fn data_root() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".codescan")
+}
+
+/// 建数据根目录，并在 Unix 上收紧为仅属主可访问（目录内存放含密钥的 SQLite）。
+/// 权限收紧属纵深防御：不支持 Unix 权限的卷不应阻止启动，失败时留下可排查的告警。
+fn prepare_data_root(data_root: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(data_root)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(error) =
+            std::fs::set_permissions(data_root, std::fs::Permissions::from_mode(0o700))
+        {
+            eprintln!(
+                "codescan: 警告：无法将数据目录 {} 收紧为 0700：{error}",
+                data_root.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// 取锁：中毒只说明持锁线程曾 panic，被保护的数据（扫描登记表 / SQLite 连接）不含
+/// 需要回滚的不变量，取回继续使用，避免一次 panic 让后续命令连锁 panic。
+pub(crate) fn lock_recovering<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

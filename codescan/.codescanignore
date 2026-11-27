@@ -1,2 +1,5 @@
-# 仓库自身扫描忽略：示例工作区故意含缺陷，仅用于 README 截图
+# 仓库自身扫描忽略：
+# - examples/：示例工作区故意含缺陷，仅用于 README 截图；
+# - crates/engine/tests/fixtures/：各规则的故意命中样例（rule_suite 精确断言），不属于仓库自身发现。
 examples/
+crates/engine/tests/fixtures/

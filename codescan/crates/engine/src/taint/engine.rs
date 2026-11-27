@@ -200,32 +200,36 @@ impl<'a> Project<'a> {
                     let Some(target_path) = target_arg.paths.first() else {
                         continue;
                     };
-                    let flow = match &effect.source {
-                        EffectSource::Param { index, fields } => {
-                            let Some(source_arg) = call.args.get(*index) else {
-                                continue;
-                            };
-                            if fields.is_empty() {
-                                self.expr_flows(source_arg, state)
-                                    .first()
-                                    .copied()
-                            } else {
-                                let Some(source_path) = source_arg.paths.first() else {
-                                    continue;
-                                };
-                                let mut path = source_path.clone();
-                                path.fields.extend(fields.iter().cloned());
-                                state.read_flow(&path)
-                            }
-                        }
-                        EffectSource::Internal(position) => Some(*position),
-                    };
+                    let flow = self.effect_source_flow(&effect.source, call, state);
                     let Some(flow) = flow else {
                         continue;
                     };
                     let mut target = target_path.clone();
                     target.fields.extend(effect.target_fields.iter().cloned());
                     state.strong_write(&target, Some(flow));
+                }
+            }
+        }
+    }
+
+    /// 效果来源在调用点的污点位置：形参来源取对应实参（可带字段路径），内部来源为固定位置。
+    fn effect_source_flow(
+        &self,
+        source: &EffectSource,
+        call: &CallFact,
+        state: &PointsToState,
+    ) -> Option<Position> {
+        match source {
+            EffectSource::Internal(position) => Some(*position),
+            EffectSource::Param { index, fields } => {
+                let source_arg = call.args.get(*index)?;
+                if fields.is_empty() {
+                    self.expr_flows(source_arg, state).first().copied()
+                } else {
+                    let source_path = source_arg.paths.first()?;
+                    let mut path = source_path.clone();
+                    path.fields.extend(fields.iter().cloned());
+                    state.read_flow(&path)
                 }
             }
         }

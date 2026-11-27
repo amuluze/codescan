@@ -1,6 +1,7 @@
 //! Tauri 命令层：薄胶水。业务在 Store/ScanManager/Engine，均无头可测。
 //! 事件：`scan://progress`（阶段进度）、`scan://finished`（完成，载荷含 scan_id）。
 
+use crate::data_root;
 use crate::manager::{ManagerError, ScanManager};
 use crate::store::{ScanSummary, Store, StoreError};
 use codescan_engine::model::Finding;
@@ -40,19 +41,67 @@ pub struct ScanFinished {
     pub stats: codescan_engine::model::ScanStats,
 }
 
-fn data_root() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".codescan")
-}
+/// 自定义规则文件的读取与校验共用上限（1 MiB）：读取阶段即截断，超限视为读取失败。
+const MAX_CUSTOM_RULES_BYTES: u64 = 1024 * 1024;
 
 fn custom_rules_path() -> PathBuf {
     data_root().join("rules").join("custom.yaml")
 }
 
+/// 读取自定义规则原文；文件缺失、不可读或超过上限都按「没有自定义规则」处理。
 fn read_custom_rules() -> Option<String> {
-    std::fs::read_to_string(custom_rules_path()).ok()
+    codescan_engine::fsutil::read_to_string_limited(&custom_rules_path(), MAX_CUSTOM_RULES_BYTES)
+        .ok()
+}
+
+/// 活动 Profile id 以 JSON 字符串存储（`"id"`；无活动 Profile 时为 `null`）。
+fn active_provider_json(id: Option<&str>) -> Result<String, String> {
+    serde_json::to_string(&id).map_err(|error| error.to_string())
+}
+
+/// 已禁用规则集合；读取失败按「无禁用」处理（与扫描管理器一致）。
+fn disabled_rules(store: &Store) -> HashSet<String> {
+    store
+        .disabled_rules()
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
+}
+
+/// 事件发送失败只影响 UI 提示（webview 已关闭或载荷无法序列化）：
+/// 记录到 stderr 后继续，不打断扫描 / 审查流程。
+fn emit_event<T: Serialize + Clone>(app: &AppHandle, event: &str, payload: T) {
+    if let Err(error) = app.emit(event, payload) {
+        eprintln!("codescan: 事件 {event} 发送失败：{error}");
+    }
+}
+
+/// `temp` → `path` 的原子替换；失败时删除临时文件，并把清理失败并入错误信息。
+fn replace_file(
+    temp: &std::path::Path,
+    path: &std::path::Path,
+    describe: impl FnOnce(std::io::Error) -> String,
+) -> Result<(), String> {
+    if let Err(error) = std::fs::rename(temp, path) {
+        let cleanup = std::fs::remove_file(temp)
+            .err()
+            .map(|cleanup_error| format!("；清理临时文件失败：{cleanup_error}"))
+            .unwrap_or_default();
+        return Err(format!("{}{cleanup}", describe(error)));
+    }
+    Ok(())
+}
+
+/// 导出目录校验：非空且为已存在目录。
+fn export_directory(dest_dir: &str) -> Result<PathBuf, String> {
+    if dest_dir.trim().is_empty() {
+        return Err("导出目录不能为空".into());
+    }
+    let dir = PathBuf::from(dest_dir);
+    if !dir.is_dir() {
+        return Err(format!("导出目录不存在：{dest_dir}"));
+    }
+    Ok(dir)
 }
 
 fn read_effective_rules() -> Result<Option<String>, String> {
@@ -107,9 +156,12 @@ fn review_skill_info(overrides: &llm::ReviewSkillOverrides) -> ReviewSkillInfo {
 }
 
 /// 读取覆写：损坏 JSON、非法名称、空白或超限条目逐项跳过，回落内置正文。
+/// 文件按上限截断读取（正文合计上限 32 KiB，JSON 转义最多翻倍，另留键名与格式余量），
+/// 超限文件整体视为损坏。
 pub fn load_review_skill_overrides(path: &std::path::Path) -> llm::ReviewSkillOverrides {
     let mut overrides = llm::ReviewSkillOverrides::default();
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let limit = (llm::REVIEW_SKILL_MAX_TOTAL_BYTES as u64) * 2 + 4096;
+    let Ok(text) = codescan_engine::fsutil::read_to_string_limited(path, limit) else {
         return overrides;
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -119,8 +171,11 @@ pub fn load_review_skill_overrides(path: &std::path::Path) -> llm::ReviewSkillOv
         return overrides;
     };
     for (name, body) in files {
-        if let Some(body) = body.as_str() {
-            let _ = overrides.set(name, body);
+        let Some(body) = body.as_str() else {
+            continue;
+        };
+        if let Err(reason) = overrides.set(name, body) {
+            eprintln!("codescan: 技能覆写 {name} 已跳过：{reason}");
         }
     }
     overrides
@@ -153,10 +208,7 @@ pub fn write_review_skill_overrides(
         .unwrap_or(0);
     let temp = path.with_extension(format!("json.tmp-{}-{nonce}", std::process::id()));
     std::fs::write(&temp, text).map_err(|e| format!("写入技能覆写失败：{e}"))?;
-    std::fs::rename(&temp, path).map_err(|e| {
-        let _ = std::fs::remove_file(&temp);
-        format!("更新技能覆写失败：{e}")
-    })
+    replace_file(&temp, path, |e| format!("更新技能覆写失败：{e}"))
 }
 
 pub fn save_review_skill_override(
@@ -259,14 +311,7 @@ pub fn list_directory(path: Option<String>) -> Result<DirListing, String> {
 
 #[tauri::command]
 pub fn list_rules(state: State<'_, AppState>) -> Result<Vec<RuleInfo>, String> {
-    let disabled: HashSet<String> = state
-        .store
-        .lock()
-        .unwrap()
-        .disabled_rules()
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
+    let disabled = disabled_rules(&crate::lock_recovering(&state.store));
     let custom = match read_effective_rules() {
         Ok(custom) => custom,
         Err(_) => read_custom_rules(),
@@ -379,26 +424,16 @@ pub fn set_rule_enabled(
     rule_id: String,
     enabled: bool,
 ) -> Result<(), String> {
-    state
-        .store
-        .lock()
-        .unwrap()
+    crate::lock_recovering(&state.store)
         .set_rule_enabled(&rule_id, enabled)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn custom_rules_status(state: State<'_, AppState>) -> Result<Option<String>, String> {
-    match std::fs::read_to_string(custom_rules_path()) {
+    match codescan_engine::fsutil::read_to_string_limited(&custom_rules_path(), MAX_CUSTOM_RULES_BYTES) {
         Ok(content) => {
-            let disabled: HashSet<String> = state
-                .store
-                .lock()
-                .unwrap()
-                .disabled_rules()
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
+            let disabled = disabled_rules(&crate::lock_recovering(&state.store));
             // 校验范围 = 启用集；禁用规则的错误由 list_rules 的 error 行展示。
             match Engine::with_rules(Some(&content), &disabled) {
                 Ok(_) => Ok(Some(content)),
@@ -428,12 +463,13 @@ pub async fn start_scan(
             effective_rules.as_deref(),
             &pack_snapshot,
             &move |p| {
-                let _ = progress_app.emit("scan://progress", &p);
+                emit_event(&progress_app, "scan://progress", &p);
             },
         );
         match outcome {
             Ok(result) => {
-                let _ = app.emit(
+                emit_event(
+                    &app,
                     "scan://finished",
                     &ScanFinished {
                         scan_id: result.scan_id,
@@ -443,10 +479,10 @@ pub async fn start_scan(
                 );
             }
             Err(ManagerError::Scan(codescan_engine::ScanError::Cancelled)) => {
-                let _ = app.emit("scan://cancelled", ());
+                emit_event(&app, "scan://cancelled", ());
             }
             Err(e) => {
-                let _ = app.emit("scan://error", e.to_string());
+                emit_event(&app, "scan://error", e.to_string());
             }
         }
     });
@@ -460,7 +496,9 @@ pub fn cancel_scan(state: State<'_, AppState>) {
 
 #[tauri::command]
 pub fn list_scans(state: State<'_, AppState>) -> Result<Vec<ScanSummary>, String> {
-    state.store.lock().unwrap().list_scans().map_err(|e| e.to_string())
+    crate::lock_recovering(&state.store)
+        .list_scans()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -468,10 +506,7 @@ pub fn get_scan(
     state: State<'_, AppState>,
     scan_id: i64,
 ) -> Result<Vec<Finding>, String> {
-    state
-        .store
-        .lock()
-        .unwrap()
+    crate::lock_recovering(&state.store)
         .get_findings(scan_id)
         .map_err(|e| e.to_string())
 }
@@ -481,10 +516,7 @@ pub fn get_scan_events(
     state: State<'_, AppState>,
     scan_id: i64,
 ) -> Result<Vec<codescan_engine::ScanEvent>, String> {
-    state
-        .store
-        .lock()
-        .unwrap()
+    crate::lock_recovering(&state.store)
         .get_events(scan_id)
         .map_err(|e| e.to_string())
 }
@@ -494,10 +526,7 @@ pub fn get_scan_ruleset(
     state: State<'_, AppState>,
     scan_id: i64,
 ) -> Result<serde_json::Value, String> {
-    let text = state
-        .store
-        .lock()
-        .unwrap()
+    let text = crate::lock_recovering(&state.store)
         .scan_ruleset_json(scan_id)
         .map_err(|error| error.to_string())?;
     serde_json::from_str(&text).map_err(|error| error.to_string())
@@ -505,10 +534,7 @@ pub fn get_scan_ruleset(
 
 #[tauri::command]
 pub fn delete_scan(state: State<'_, AppState>, scan_id: i64) -> Result<(), String> {
-    state
-        .store
-        .lock()
-        .unwrap()
+    crate::lock_recovering(&state.store)
         .delete_scan(scan_id)
         .map_err(|e| e.to_string())
 }
@@ -519,10 +545,7 @@ pub fn set_baseline(state: State<'_, AppState>, scan_id: i64) -> Result<i64, Str
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0);
-    state
-        .store
-        .lock()
-        .unwrap()
+    crate::lock_recovering(&state.store)
         .set_baseline(scan_id, now)
         .map_err(|e| e.to_string())
 }
@@ -532,12 +555,14 @@ pub fn gate_diff(
     state: State<'_, AppState>,
     scan_id: i64,
 ) -> Result<Option<Vec<Finding>>, String> {
-    state.store.lock().unwrap().gate_new(scan_id).map_err(|e| e.to_string())
+    crate::lock_recovering(&state.store)
+        .gate_new(scan_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn baseline_info(state: State<'_, AppState>) -> Result<Option<serde_json::Value>, String> {
-    let store = state.store.lock().unwrap();
+    let store = crate::lock_recovering(&state.store);
     match store.current_baseline() {
         Ok(Some(b)) => Ok(Some(serde_json::json!({
             "engine_version": b.engine_version,
@@ -549,14 +574,21 @@ pub fn baseline_info(state: State<'_, AppState>) -> Result<Option<serde_json::Va
     }
 }
 
+/// SARIF 导出到用户选定目录下的 `codescan-<scan_id>.sarif.json`。
+/// 目录必须已存在、文件名由 Rust 生成：webview 不能指定任意写入路径（与 `export_report` 同一边界）。
 #[tauri::command]
-pub fn export_sarif(state: State<'_, AppState>, scan_id: i64, dest: String) -> Result<(), String> {
-    let store = state.store.lock().unwrap();
-    let findings = store.get_findings(scan_id).map_err(|e| e.to_string())?;
-    let engine_version = store
+pub fn export_sarif(
+    state: State<'_, AppState>,
+    scan_id: i64,
+    dest_dir: String,
+) -> Result<(), String> {
+    let dir = export_directory(&dest_dir)?;
+    let findings = crate::lock_recovering(&state.store)
+        .get_findings(scan_id)
+        .map_err(|e| e.to_string())?;
+    let engine_version = crate::lock_recovering(&state.store)
         .scan_engine_version(scan_id)
         .map_err(|e| e.to_string())?;
-    drop(store);
     // 从持久化发现重建报告骨架（SARIF 仅消费这些字段）。
     let report = codescan_engine::model::ScanReport {
         engine_version,
@@ -566,7 +598,8 @@ pub fn export_sarif(state: State<'_, AppState>, scan_id: i64, dest: String) -> R
     };
     let value = sarif::export(&report);
     let content = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
-    std::fs::write(dest, content).map_err(|e| e.to_string())
+    std::fs::write(dir.join(format!("codescan-{scan_id}.sarif.json")), content)
+        .map_err(|e| e.to_string())
 }
 
 /// 展示层报告导出：Markdown 与 JSON 双文件写入用户选定目录。
@@ -578,13 +611,7 @@ pub fn export_report(
     markdown: String,
     json: String,
 ) -> Result<(), String> {
-    if dest_dir.trim().is_empty() {
-        return Err("导出目录不能为空".into());
-    }
-    let dir = PathBuf::from(&dest_dir);
-    if !dir.is_dir() {
-        return Err(format!("导出目录不存在：{dest_dir}"));
-    }
+    let dir = export_directory(&dest_dir)?;
     let valid_base = !base.is_empty()
         && base.len() <= 64
         && base
@@ -634,7 +661,8 @@ fn parse_kind(kind: &str) -> Result<llm::ProviderKind, String> {
 }
 
 /// 旧版单一 Provider 配置在首次读取时迁移为 `default` Profile（含密钥迁移，Domain §3a.2）。
-/// 迁移条件：Profile 列表不存在且旧配置存在；迁移失败不影响读取（返回空列表）。
+/// 迁移条件：Profile 列表不存在且旧配置存在。三步写入在同一事务内完成：任一步失败
+/// 整体回滚，旧配置与旧密钥原样保留、下次读取重试；迁移失败不影响读取（返回空列表）。
 fn migrate_legacy_provider(store: &Store) {
     if store
         .get_meta(llm::META_PROVIDER_PROFILES)
@@ -661,22 +689,27 @@ fn migrate_legacy_provider(store: &Store) {
         base_url: config.base_url,
         model: config.model,
     };
-    if store
-        .set_meta(
+    // 读不到旧密钥时不迁移：否则事务里会删掉一个尚未复制的密钥。
+    let Ok(legacy_key) = store.get_secret(llm::SECRET_API_KEY) else {
+        return;
+    };
+    let Ok(active) = active_provider_json(Some(llm::LEGACY_PROFILE_ID)) else {
+        return;
+    };
+    let migrated = store.transaction(|| {
+        store.set_meta(
             llm::META_PROVIDER_PROFILES,
             &llm::profiles_to_json(std::slice::from_ref(&profile)),
-        )
-        .is_err()
-    {
-        return;
-    }
-    let _ = store.set_meta(
-        llm::META_ACTIVE_PROVIDER,
-        &serde_json::to_string(llm::LEGACY_PROFILE_ID).unwrap_or_else(|_| "\"default\"".into()),
-    );
-    if let Ok(Some(key)) = store.get_secret(llm::SECRET_API_KEY) {
-        let _ = store.set_secret(&llm::ProviderProfile::secret_id(llm::LEGACY_PROFILE_ID), &key);
-        let _ = store.delete_secret(llm::SECRET_API_KEY);
+        )?;
+        store.set_meta(llm::META_ACTIVE_PROVIDER, &active)?;
+        if let Some(key) = legacy_key.as_deref() {
+            store.set_secret(&llm::ProviderProfile::secret_id(llm::LEGACY_PROFILE_ID), key)?;
+            store.delete_secret(llm::SECRET_API_KEY)?;
+        }
+        Ok(())
+    });
+    if let Err(error) = migrated {
+        eprintln!("codescan: 旧版 Provider 配置迁移失败，已保留旧数据待重试：{error}");
     }
 }
 
@@ -739,7 +772,7 @@ pub fn prepare_provider_probe(
 
 #[tauri::command]
 pub fn list_providers(state: State<'_, AppState>) -> Result<ProvidersInfo, String> {
-    let store = state.store.lock().unwrap();
+    let store = crate::lock_recovering(&state.store);
     let profiles = read_profiles(&store);
     let mut infos = Vec::with_capacity(profiles.len());
     for profile in &profiles {
@@ -815,7 +848,7 @@ pub fn save_provider_profile(
         .map_err(|e| e.to_string())?;
     if was_first || read_active_id(store).is_none() {
         store
-            .set_meta(llm::META_ACTIVE_PROVIDER, &serde_json::to_string(&id).unwrap())
+            .set_meta(llm::META_ACTIVE_PROVIDER, &active_provider_json(Some(&id))?)
             .map_err(|e| e.to_string())?;
     }
     let secret_id = llm::ProviderProfile::secret_id(&id);
@@ -845,7 +878,7 @@ pub fn upsert_provider_profile(
     api_key: Option<String>,
     clear_key: Option<bool>,
 ) -> Result<String, String> {
-    let store = state.store.lock().unwrap();
+    let store = crate::lock_recovering(&state.store);
     save_provider_profile(
         &store,
         id.as_deref(),
@@ -861,41 +894,41 @@ pub fn upsert_provider_profile(
 /// 删除 Profile 及其密钥；被删的是活动 Profile 时，活动改为剩余首个（无剩余则清空）。
 #[tauri::command]
 pub fn delete_provider_profile(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let store = state.store.lock().unwrap();
+    let store = crate::lock_recovering(&state.store);
     let mut profiles = read_profiles(&store);
     let before = profiles.len();
     profiles.retain(|p| p.id != id);
     if profiles.len() == before {
         return Err(format!("Provider Profile 不存在：{id}"));
     }
+    let next_active = active_provider_json(profiles.first().map(|p| p.id.as_str()))?;
+    let was_active = read_active_id(&store).as_deref() == Some(id.as_str());
+    // Profile 与其密钥在同一事务中删除：密钥删不掉时 Profile 也保留，不留下孤儿密钥。
     store
-        .set_meta(
-            llm::META_PROVIDER_PROFILES,
-            &llm::profiles_to_json(&profiles),
-        )
-        .map_err(|e| e.to_string())?;
-    let _ = store.delete_secret(&llm::ProviderProfile::secret_id(&id));
-    if read_active_id(&store).as_deref() == Some(id.as_str()) {
-        let next = profiles
-            .first()
-            .map(|p| serde_json::to_string(&p.id).unwrap())
-            .unwrap_or_else(|| "null".into());
-        store
-            .set_meta(llm::META_ACTIVE_PROVIDER, &next)
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+        .transaction(|| {
+            store.set_meta(
+                llm::META_PROVIDER_PROFILES,
+                &llm::profiles_to_json(&profiles),
+            )?;
+            store.delete_secret(&llm::ProviderProfile::secret_id(&id))?;
+            if was_active {
+                store.set_meta(llm::META_ACTIVE_PROVIDER, &next_active)?;
+            }
+            Ok(())
+        })
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn set_active_provider(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let store = state.store.lock().unwrap();
+    let store = crate::lock_recovering(&state.store);
     let profiles = read_profiles(&store);
     if !profiles.iter().any(|p| p.id == id) {
         return Err(format!("Provider Profile 不存在：{id}"));
     }
+    let active = active_provider_json(Some(&id))?;
     store
-        .set_meta(llm::META_ACTIVE_PROVIDER, &serde_json::to_string(&id).unwrap())
+        .set_meta(llm::META_ACTIVE_PROVIDER, &active)
         .map_err(|e| e.to_string())
 }
 
@@ -914,7 +947,7 @@ pub async fn test_provider_connection(
 ) -> Result<ProviderTestResult, String> {
     let (config, key) = {
         // 不跨 await 持有数据库锁。
-        let store = state.store.lock().unwrap();
+        let store = crate::lock_recovering(&state.store);
         prepare_provider_probe(&store, profile_id.as_deref())?
     };
     let started = std::time::Instant::now();
@@ -1006,7 +1039,9 @@ pub fn collect_review_files(
         let (abs, rel) = &order[index];
         index += 1;
 
-        let Ok(bytes) = std::fs::read(abs) else {
+        let Ok(bytes) =
+            codescan_engine::fsutil::read_bytes_limited(abs, llm::REVIEW_FILE_MAX_BYTES)
+        else {
             continue;
         };
         if bytes[..bytes.len().min(8192)].contains(&0) {
@@ -1074,7 +1109,7 @@ pub async fn llm_review_workspace(
         return Err(format!("工作区不是目录：{root}"));
     }
     let (config, key) = {
-        let store = state.store.lock().unwrap();
+        let store = crate::lock_recovering(&state.store);
         // 审查可显式指定 Profile；缺省用活动 Profile（Domain §3a.2）。
         prepare_provider_probe(&store, provider_id.as_deref())?
     };
@@ -1104,7 +1139,8 @@ pub async fn llm_review_workspace(
         &skill,
         verify_enabled,
         |done, total| {
-            let _ = app.emit(
+            emit_event(
+                &app,
                 "llm://review_progress",
                 serde_json::json!({
                     "requestId": request_id,
@@ -1205,7 +1241,7 @@ pub async fn llm_triage(
 ) -> Result<llm::TriageResult, String> {
     let custom = read_custom_rules();
     let (config, key, context) = {
-        let store = state.store.lock().unwrap();
+        let store = crate::lock_recovering(&state.store);
         prepare_llm_call(&store, custom.as_deref(), scan_id, &fingerprint)?
     };
     let (system, user) = llm::triage_prompt(&context);
@@ -1232,12 +1268,13 @@ pub async fn llm_triage_stream(
 ) -> Result<String, String> {
     let custom = read_custom_rules();
     let (config, key, context) = {
-        let store = state.store.lock().unwrap();
+        let store = crate::lock_recovering(&state.store);
         prepare_llm_call(&store, custom.as_deref(), scan_id, &fingerprint)?
     };
     let (system, user) = llm::triage_prompt(&context);
     let reply = llm::complete_stream(&config, &key, &system, &user, move |text| {
-        let _ = app.emit(
+        emit_event(
+            &app,
             "llm://delta",
             LlmDeltaPayload {
                 request_id: request_id.clone(),
@@ -1298,7 +1335,7 @@ pub async fn llm_batch_triage(
     fingerprints: Vec<String>,
 ) -> Result<Vec<llm::BatchTriageEntry>, String> {
     let (config, key, findings) = {
-        let store = state.store.lock().unwrap();
+        let store = crate::lock_recovering(&state.store);
         prepare_batch_llm_call(&store, scan_id, &fingerprints)?
     };
     let expected: Vec<String> = findings.iter().map(|f| f.fingerprint.clone()).collect();
@@ -1315,7 +1352,7 @@ pub async fn llm_generate_rule(
 ) -> Result<llm::CandidateRule, String> {
     let custom = read_custom_rules();
     let (config, key, context) = {
-        let store = state.store.lock().unwrap();
+        let store = crate::lock_recovering(&state.store);
         prepare_llm_call(&store, custom.as_deref(), scan_id, &fingerprint)?
     };
     let (system, user) = llm::candidate_prompt(&context);
@@ -1347,7 +1384,7 @@ pub fn llm_candidate_regression(
     candidate_yaml: String,
     save_fixture: bool,
 ) -> Result<crate::regression::CandidateRegressionResult, String> {
-    let store = state.store.lock().unwrap();
+    let store = crate::lock_recovering(&state.store);
     crate::regression::run_from_store(
         &store,
         &data_root(),
@@ -1359,9 +1396,8 @@ pub fn llm_candidate_regression(
 }
 
 #[tauri::command]
-pub fn save_custom_rule(state: State<'_, AppState>, yaml: String) -> Result<(), String> {
-    let _ = &state;
-    let existing = std::fs::read_to_string(custom_rules_path()).ok();
+pub fn save_custom_rule(yaml: String) -> Result<(), String> {
+    let existing = read_custom_rules();
     let merged = llm::merge_custom_rules(existing.as_deref(), &yaml)
         .map_err(|errs| errs.join("\n"))?;
     if let Some(parent) = custom_rules_path().parent() {
@@ -1396,7 +1432,7 @@ pub fn remove_rule_pack(id: String, version: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_custom_rules() -> Result<Option<String>, String> {
-    match std::fs::read_to_string(custom_rules_path()) {
+    match codescan_engine::fsutil::read_to_string_limited(&custom_rules_path(), MAX_CUSTOM_RULES_BYTES) {
         Ok(content) => Ok(Some(content)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.to_string()),
@@ -1408,7 +1444,7 @@ fn validate_custom_yaml(
     yaml: &str,
     disabled: &HashSet<String>,
 ) -> Vec<String> {
-    if yaml.len() > 1024 * 1024 {
+    if yaml.len() as u64 > MAX_CUSTOM_RULES_BYTES {
         return vec!["自定义规则文件超过 1 MiB 上限".into()];
     }
     let combined = match codescan_engine::packs::combined_rules(data_root, Some(yaml)) {
@@ -1426,27 +1462,13 @@ pub fn validate_custom_rules(
     state: State<'_, AppState>,
     yaml: String,
 ) -> Result<Vec<String>, String> {
-    let disabled: HashSet<String> = state
-        .store
-        .lock()
-        .unwrap()
-        .disabled_rules()
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
+    let disabled = disabled_rules(&crate::lock_recovering(&state.store));
     Ok(validate_custom_yaml(&data_root(), &yaml, &disabled))
 }
 
 #[tauri::command]
 pub fn save_custom_rules(state: State<'_, AppState>, yaml: String) -> Result<(), String> {
-    let disabled: HashSet<String> = state
-        .store
-        .lock()
-        .unwrap()
-        .disabled_rules()
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
+    let disabled = disabled_rules(&crate::lock_recovering(&state.store));
     let errors = validate_custom_yaml(&data_root(), &yaml, &disabled);
     if !errors.is_empty() {
         return Err(errors.join("\n"));
@@ -1457,10 +1479,7 @@ pub fn save_custom_rules(state: State<'_, AppState>, yaml: String) -> Result<(),
     }
     let temp = path.with_extension("yaml.tmp");
     std::fs::write(&temp, yaml).map_err(|e| e.to_string())?;
-    if let Err(error) = std::fs::rename(&temp, &path) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(error.to_string());
-    }
+    replace_file(&temp, &path, |e| e.to_string())?;
     Ok(())
 }
 
@@ -1521,6 +1540,11 @@ pub fn test_custom_rule(
             })
             .collect())
     })();
-    let _ = std::fs::remove_dir_all(&workspace);
+    if let Err(error) = std::fs::remove_dir_all(&workspace) {
+        eprintln!(
+            "codescan: 清理规则测试临时目录失败 {}：{error}",
+            workspace.display()
+        );
+    }
     result
 }

@@ -366,42 +366,21 @@ fn build_fn(ctx: &ExtractCtx<'_>, fn_node: Node<'_>) -> FnFact {
     let mut returns: Vec<ExprFact> = Vec::new();
 
     let mut visit = |node: Node<'_>| {
-        let (ns, ne) = (node.start_byte(), node.end_byte());
-
         // sink 命中（节点种类 + 范围双等值）。先于赋值分支：
         // innerHTML 之类规则的 sink 本身就是 assignment_expression。
-        if let Some(sink) = ctx
-            .sinks
-            .iter()
-            .find(|s| s.start == ns && s.end == ne && s.kind == node.kind())
-        {
-            sinks.push(SinkFact {
-                span: sink.span,
-                text: sink.text.clone(),
-                expr: expr_fact(node, ctx),
-            });
+        if let Some(sink) = sink_endpoint(node, ctx) {
+            sinks.push(sink_fact(sink, node, ctx));
         }
 
         // 赋值/声明。
-        if let Some((_, lhs_field, rhs_field)) = prof
-            .assignments
-            .iter()
-            .find(|(kind, _, _)| *kind == node.kind())
-            .copied()
-        {
-            if let (Some(lhs), Some(rhs)) = (
-                node.child_by_field_name(lhs_field),
-                node.child_by_field_name(rhs_field),
-            ) {
-                let targets = access_paths_of(lhs, ctx.lang, ctx.source);
-                if !targets.is_empty() {
-                    stmts.push(StmtFact::Assign {
-                        targets,
-                        rhs: expr_fact(rhs, ctx),
-                    });
-                }
-                return;
+        if let Some((targets, rhs)) = assignment_parts(node, ctx, &prof) {
+            if !targets.is_empty() {
+                stmts.push(StmtFact::Assign {
+                    targets,
+                    rhs: expr_fact(rhs, ctx),
+                });
             }
+            return;
         }
 
         // 显式 return：只保留返回表达式，避免把 return 语句结构误当对象别名。
@@ -477,374 +456,340 @@ fn collect_guarded_facts(
     Vec<GuardedSink>,
 ) {
     let prof = metrics::profile(ctx.lang);
-    let mut assignments = Vec::new();
-    let mut returns = Vec::new();
-    let mut calls = Vec::new();
-    let mut sinks = Vec::new();
-    if let Some(body) = fn_node.child_by_field_name("body") {
-        if body.kind() == "block" || body.kind() == "statement_block" {
-            guarded_walk(
-                body,
-                ctx,
-                &prof,
-                params,
-                &[],
-                &mut assignments,
-                &mut returns,
-            );
-            guarded_call_walk(body, ctx, &prof, params, &[], &mut calls, &mut sinks);
-        } else {
-            returns.push(GuardedReturn {
-                guards: Vec::new(),
-                expr: expr_fact(body, ctx),
-            });
-        }
+    let mut facts = GuardedFacts::default();
+    let Some(body) = fn_node.child_by_field_name("body") else {
+        return facts.into_parts();
+    };
+    if body.kind() != "block" && body.kind() != "statement_block" {
+        // 表达式体（箭头函数等）：整体是无 guard 的返回值。
+        facts.returns.push(GuardedReturn {
+            guards: Vec::new(),
+            expr: expr_fact(body, ctx),
+        });
+        return facts.into_parts();
     }
-    (assignments, returns, calls, sinks)
+    let walk = GuardWalk {
+        ctx,
+        prof: &prof,
+        params,
+    };
+    walk.walk(
+        body,
+        &[],
+        &mut |node: Node<'_>, guards: &[GuardFact]| {
+            facts.visit_assign(node, guards, ctx, &prof)
+        },
+    );
+    walk.walk(
+        body,
+        &[],
+        &mut |node: Node<'_>, guards: &[GuardFact]| facts.visit_call(node, guards, ctx),
+    );
+    facts.into_parts()
 }
 
-fn guarded_walk(
-    node: Node<'_>,
-    ctx: &ExtractCtx<'_>,
-    prof: &crate::metrics::Profile,
-    params: &[String],
-    guards: &[GuardFact],
-    assignments: &mut Vec<GuardedAssign>,
-    returns: &mut Vec<GuardedReturn>,
-) {
-    if prof.functions.contains(&node.kind()) {
-        return;
+/// guard 遍历收集到的带 guard 事实（按类别分开存放）。
+#[derive(Default)]
+struct GuardedFacts {
+    assignments: Vec<GuardedAssign>,
+    returns: Vec<GuardedReturn>,
+    calls: Vec<GuardedCall>,
+    sinks: Vec<GuardedSink>,
+}
+
+impl GuardedFacts {
+    fn into_parts(
+        self,
+    ) -> (
+        Vec<GuardedAssign>,
+        Vec<GuardedReturn>,
+        Vec<GuardedCall>,
+        Vec<GuardedSink>,
+    ) {
+        (self.assignments, self.returns, self.calls, self.sinks)
     }
-    if matches!(node.kind(), "while_statement" | "for_statement" | "for_in_statement" | "do_statement") {
-        if node.kind() == "do_statement" {
-            for child in crate::taint::named_children(node) {
-                guarded_walk(child, ctx, prof, params, guards, assignments, returns);
-            }
-            return;
-        }
-        let condition = node.child_by_field_name("condition");
-        let literal = condition.and_then(|condition| {
-            literal_constant(condition, ctx).and_then(|value| value.truthy)
-        });
-        if literal == Some(false) {
-            return;
-        }
-        let body = node.child_by_field_name("body");
-        for child in crate::taint::named_children(node) {
-            if Some(child.id()) != body.map(|body| body.id()) {
-                guarded_walk(child, ctx, prof, params, guards, assignments, returns);
-            }
-        }
-        if let Some(body) = body {
-            let mut body_guards = guards.to_vec();
-            if literal.is_none() {
-                if let Some((param, truthy)) =
-                    condition.and_then(|condition| condition_guard(condition, ctx, params))
-                {
-                    body_guards.push(GuardFact { param, truthy, equals: None });
-                }
-            }
-            guarded_walk(body, ctx, prof, params, &body_guards, assignments, returns);
-        }
-        return;
-    }
-    if node.kind() == "switch_statement" {
-        let switch_param = node
-            .child_by_field_name("value")
-            .and_then(|value| condition_guard(value, ctx, params))
-            .map(|(param, _)| param);
-        if let Some(body) = node.child_by_field_name("body") {
-            for case in crate::taint::named_children(body) {
-                if !matches!(case.kind(), "switch_case" | "switch_default") {
-                    continue;
-                }
-                let mut case_guards = guards.to_vec();
-                if case.kind() == "switch_case" {
-                    if let (Some(param), Some(value)) =
-                        (switch_param, case.child_by_field_name("value"))
-                    {
-                        if let Some(text) = ctx.source.get(value.start_byte()..value.end_byte()) {
-                            case_guards.push(GuardFact {
-                                param,
-                                truthy: true,
-                                equals: Some(
-                                    text.trim_matches(|c| c == '"' || c == '\'' || c == '`')
-                                        .to_string(),
-                                ),
-                            });
-                        }
-                    }
-                }
-                guarded_walk(case, ctx, prof, params, &case_guards, assignments, returns);
-            }
-        }
-        return;
-    }
-    if node.kind() == "if_statement" {
-        let condition = node.child_by_field_name("condition");
-        let literal = condition.and_then(|condition| {
-            literal_constant(condition, ctx).and_then(|value| value.truthy)
-        });
-        if literal == Some(true) {
-            if let Some(consequence) = node.child_by_field_name("consequence") {
-                guarded_walk(
-                    consequence,
-                    ctx,
-                    prof,
-                    params,
-                    guards,
-                    assignments,
-                    returns,
-                );
-            }
-            return;
-        }
-        if literal == Some(false) {
-            if let Some(alternative) = node.child_by_field_name("alternative") {
-                guarded_walk(
-                    alternative,
-                    ctx,
-                    prof,
-                    params,
-                    guards,
-                    assignments,
-                    returns,
-                );
-            }
-            return;
-        }
-        if let Some((param, truthy)) = condition.and_then(|condition| condition_guard(condition, ctx, params)) {
-            let mut then_guards = guards.to_vec();
-            then_guards.push(GuardFact { param, truthy, equals: None });
-            if let Some(consequence) = node.child_by_field_name("consequence") {
-                guarded_walk(
-                    consequence,
-                    ctx,
-                    prof,
-                    params,
-                    &then_guards,
-                    assignments,
-                    returns,
-                );
-            }
-            let mut else_guards = guards.to_vec();
-            else_guards.push(GuardFact { param, truthy: !truthy, equals: None });
-            if let Some(alternative) = node.child_by_field_name("alternative") {
-                guarded_walk(
-                    alternative,
-                    ctx,
-                    prof,
-                    params,
-                    &else_guards,
-                    assignments,
-                    returns,
-                );
-            }
-        } else {
-            if let Some(consequence) = node.child_by_field_name("consequence") {
-                guarded_walk(
-                    consequence,
-                    ctx,
-                    prof,
-                    params,
-                    guards,
-                    assignments,
-                    returns,
-                );
-            }
-            if let Some(alternative) = node.child_by_field_name("alternative") {
-                guarded_walk(
-                    alternative,
-                    ctx,
-                    prof,
-                    params,
-                    guards,
-                    assignments,
-                    returns,
-                );
-            }
-        }
-        return;
-    }
-    if let Some((_, lhs_field, rhs_field)) = prof
-        .assignments
-        .iter()
-        .find(|(kind, _, _)| *kind == node.kind())
-        .copied()
-    {
-        if let (Some(lhs), Some(rhs)) = (
-            node.child_by_field_name(lhs_field),
-            node.child_by_field_name(rhs_field),
-        ) {
-            let targets = access_paths_of(lhs, ctx.lang, ctx.source);
+
+    /// 赋值遍历：带 guard 记录赋值与 return；这两类节点处理后不再下降。
+    fn visit_assign(
+        &mut self,
+        node: Node<'_>,
+        guards: &[GuardFact],
+        ctx: &ExtractCtx<'_>,
+        prof: &metrics::Profile,
+    ) -> bool {
+        if let Some((targets, rhs)) = assignment_parts(node, ctx, prof) {
             if !targets.is_empty() {
-                assignments.push(GuardedAssign {
+                self.assignments.push(GuardedAssign {
                     guards: guards.to_vec(),
                     targets,
                     rhs: expr_fact(rhs, ctx),
                 });
             }
-            return;
+            return false;
         }
+        if node.kind().contains("return") {
+            if let Some(expr) = named_children(node).into_iter().last() {
+                self.returns.push(GuardedReturn {
+                    guards: guards.to_vec(),
+                    expr: expr_fact(expr, ctx),
+                });
+            }
+            return false;
+        }
+        true
     }
-    if node.kind().contains("return") {
-        if let Some(expr) = named_children(node).into_iter().last() {
-            returns.push(GuardedReturn {
+
+    /// 调用遍历：带 guard 记录 sink 与调用，随后继续下降（嵌套调用各自成条）。
+    fn visit_call(&mut self, node: Node<'_>, guards: &[GuardFact], ctx: &ExtractCtx<'_>) -> bool {
+        if let Some(sink) = sink_endpoint(node, ctx) {
+            self.sinks.push(GuardedSink {
                 guards: guards.to_vec(),
-                expr: expr_fact(expr, ctx),
+                sink: sink_fact(sink, node, ctx),
             });
         }
-        return;
-    }
-    for child in crate::taint::named_children(node) {
-        guarded_walk(
-            child,
-            ctx,
-            prof,
-            params,
-            guards,
-            assignments,
-            returns,
-        );
+        if is_call_node(node, ctx.lang) {
+            if let Some(call) = call_fact(node, ctx) {
+                self.calls.push(GuardedCall {
+                    guards: guards.to_vec(),
+                    call,
+                });
+            }
+        }
+        true
     }
 }
 
-fn guarded_call_walk(
-    node: Node<'_>,
-    ctx: &ExtractCtx<'_>,
-    prof: &crate::metrics::Profile,
-    params: &[String],
-    guards: &[GuardFact],
-    calls: &mut Vec<GuardedCall>,
-    sinks: &mut Vec<GuardedSink>,
-) {
-    if prof.functions.contains(&node.kind()) {
-        return;
+/// 带 guard 的控制流遍历：赋值遍历与调用遍历共用同一套 guard 推导。访问者在结构
+/// 判断之前收到 (节点, 当前 guard)，并返回是否继续下降。
+struct GuardWalk<'a> {
+    ctx: &'a ExtractCtx<'a>,
+    prof: &'a metrics::Profile,
+    params: &'a [String],
+}
+
+impl<'a> GuardWalk<'a> {
+    /// 嵌套函数的 guard 作用域独立，不进入。
+    fn walk<'tree>(
+        &self,
+        node: Node<'tree>,
+        guards: &[GuardFact],
+        visit: &mut dyn FnMut(Node<'tree>, &[GuardFact]) -> bool,
+    ) {
+        if self.prof.functions.contains(&node.kind()) {
+            return;
+        }
+        if !visit(node, guards) {
+            return;
+        }
+        match node.kind() {
+            kind if is_loop_kind(kind) => self.walk_loop(node, guards, visit),
+            "switch_statement" => self.walk_switch(node, guards, visit),
+            "if_statement" => self.walk_if(node, guards, visit),
+            _ => self.walk_children(node, guards, visit),
+        }
     }
-    if let Some(endpoint) = ctx
-        .sinks
-        .iter()
-        .find(|sink| sink.start == node.start_byte() && sink.end == node.end_byte() && sink.kind == node.kind())
-    {
-        sinks.push(GuardedSink {
-            guards: guards.to_vec(),
-            sink: SinkFact {
-                span: endpoint.span,
-                text: endpoint.text.clone(),
-                expr: expr_fact(node, ctx),
-            },
-        });
+
+    fn walk_children<'tree>(
+        &self,
+        node: Node<'tree>,
+        guards: &[GuardFact],
+        visit: &mut dyn FnMut(Node<'tree>, &[GuardFact]) -> bool,
+    ) {
+        for child in named_children(node) {
+            self.walk(child, guards, visit);
+        }
     }
-    if node.kind() == "switch_statement" {
+
+    /// 循环：条件为假字面量时整体剪枝；body 之外的子节点（初始化/条件/更新）沿用当前
+    /// guard；条件非字面量且可判定为形参真值时 body 追加该 guard。do-while 的条件在
+    /// body 之后，全部子节点沿用当前 guard。
+    fn walk_loop<'tree>(
+        &self,
+        node: Node<'tree>,
+        guards: &[GuardFact],
+        visit: &mut dyn FnMut(Node<'tree>, &[GuardFact]) -> bool,
+    ) {
+        if node.kind() == "do_statement" {
+            self.walk_children(node, guards, visit);
+            return;
+        }
+        let condition = node.child_by_field_name("condition");
+        let literal = literal_truthiness(condition, self.ctx);
+        if literal == Some(false) {
+            return;
+        }
+        let body = node.child_by_field_name("body");
+        for child in named_children(node) {
+            if Some(child.id()) != body.map(|body| body.id()) {
+                self.walk(child, guards, visit);
+            }
+        }
+        let Some(body) = body else {
+            return;
+        };
+        let mut body_guards = guards.to_vec();
+        if literal.is_none() {
+            if let Some((param, truthy)) = condition
+                .and_then(|condition| condition_guard(condition, self.ctx, self.params))
+            {
+                body_guards.push(GuardFact { param, truthy, equals: None });
+            }
+        }
+        self.walk(body, &body_guards, visit);
+    }
+
+    /// switch：switch 值是形参且 case 带值时，该 case 追加「等于 case 值」guard；
+    /// default 与无法判定时沿用当前 guard。
+    fn walk_switch<'tree>(
+        &self,
+        node: Node<'tree>,
+        guards: &[GuardFact],
+        visit: &mut dyn FnMut(Node<'tree>, &[GuardFact]) -> bool,
+    ) {
         let switch_param = node
             .child_by_field_name("value")
-            .and_then(|value| condition_guard(value, ctx, params))
+            .and_then(|value| condition_guard(value, self.ctx, self.params))
             .map(|(param, _)| param);
-        if let Some(body) = node.child_by_field_name("body") {
-            for case in crate::taint::named_children(body) {
-                if !matches!(case.kind(), "switch_case" | "switch_default") {
-                    continue;
-                }
-                let mut case_guards = guards.to_vec();
-                if case.kind() == "switch_case" {
-                    if let (Some(param), Some(value)) =
-                        (switch_param, case.child_by_field_name("value"))
-                    {
-                        if let Some(text) = ctx.source.get(value.start_byte()..value.end_byte()) {
-                            case_guards.push(GuardFact {
-                                param,
-                                truthy: true,
-                                equals: Some(
-                                    text.trim_matches(|c| c == '"' || c == '\'' || c == '`')
-                                        .to_string(),
-                                ),
-                            });
-                        }
-                    }
-                }
-                guarded_call_walk(case, ctx, prof, params, &case_guards, calls, sinks);
-            }
-        }
-        return;
-    }
-    if matches!(node.kind(), "while_statement" | "for_statement" | "for_in_statement" | "do_statement") {
-        if node.kind() != "do_statement" {
-            let condition = node.child_by_field_name("condition");
-            let literal = condition.and_then(|condition| {
-                literal_constant(condition, ctx).and_then(|value| value.truthy)
-            });
-            if literal == Some(false) {
-                return;
-            }
-            let body = node.child_by_field_name("body");
-            for child in crate::taint::named_children(node) {
-                if Some(child.id()) != body.map(|body| body.id()) {
-                    guarded_call_walk(child, ctx, prof, params, guards, calls, sinks);
-                }
-            }
-            if let Some(body) = body {
-                let mut body_guards = guards.to_vec();
-                if literal.is_none() {
-                    if let Some((param, truthy)) =
-                        condition.and_then(|condition| condition_guard(condition, ctx, params))
-                    {
-                        body_guards.push(GuardFact { param, truthy, equals: None });
-                    }
-                }
-                guarded_call_walk(body, ctx, prof, params, &body_guards, calls, sinks);
-            }
+        let Some(body) = node.child_by_field_name("body") else {
             return;
+        };
+        for case in named_children(body) {
+            if !matches!(case.kind(), "switch_case" | "switch_default") {
+                continue;
+            }
+            let case_guards = case_guards(case, switch_param, guards, self.ctx);
+            self.walk(case, &case_guards, visit);
         }
-        for child in crate::taint::named_children(node) {
-            guarded_call_walk(child, ctx, prof, params, guards, calls, sinks);
-        }
-        return;
     }
-    if node.kind() == "if_statement" {
+
+    /// if：条件为字面量时只走选中分支；可判定为形参真值时 then/else 各带相反 guard；
+    /// 否则两分支沿用当前 guard。
+    fn walk_if<'tree>(
+        &self,
+        node: Node<'tree>,
+        guards: &[GuardFact],
+        visit: &mut dyn FnMut(Node<'tree>, &[GuardFact]) -> bool,
+    ) {
         let condition = node.child_by_field_name("condition");
-        let literal = condition.and_then(|condition| {
-            literal_constant(condition, ctx).and_then(|value| value.truthy)
-        });
+        let literal = literal_truthiness(condition, self.ctx);
         if literal == Some(true) || literal == Some(false) {
-            let field = if literal == Some(true) { "consequence" } else { "alternative" };
-            if let Some(branch) = node.child_by_field_name(field) {
-                guarded_call_walk(branch, ctx, prof, params, guards, calls, sinks);
-            }
+            let field = if literal == Some(true) {
+                "consequence"
+            } else {
+                "alternative"
+            };
+            self.walk_branch(node, field, guards, visit);
             return;
         }
-        if let Some((param, truthy)) =
-            condition.and_then(|condition| condition_guard(condition, ctx, params))
-        {
-            if let Some(consequence) = node.child_by_field_name("consequence") {
-                let mut then_guards = guards.to_vec();
-                then_guards.push(GuardFact { param, truthy, equals: None });
-                guarded_call_walk(consequence, ctx, prof, params, &then_guards, calls, sinks);
-            }
-            if let Some(alternative) = node.child_by_field_name("alternative") {
-                let mut else_guards = guards.to_vec();
-                else_guards.push(GuardFact { param, truthy: !truthy, equals: None });
-                guarded_call_walk(alternative, ctx, prof, params, &else_guards, calls, sinks);
-            }
-        } else {
-            for field in ["consequence", "alternative"] {
-                if let Some(branch) = node.child_by_field_name(field) {
-                    guarded_call_walk(branch, ctx, prof, params, guards, calls, sinks);
-                }
-            }
-        }
-        return;
+        let Some((param, truthy)) = condition
+            .and_then(|condition| condition_guard(condition, self.ctx, self.params))
+        else {
+            self.walk_branch(node, "consequence", guards, visit);
+            self.walk_branch(node, "alternative", guards, visit);
+            return;
+        };
+        let then_guards = guard_with(guards, GuardFact { param, truthy, equals: None });
+        self.walk_branch(node, "consequence", &then_guards, visit);
+        let else_guards = guard_with(guards, GuardFact { param, truthy: !truthy, equals: None });
+        self.walk_branch(node, "alternative", &else_guards, visit);
     }
-    if is_call_node(node, ctx.lang) {
-        if let Some(call) = call_fact(node, ctx) {
-            calls.push(GuardedCall {
-                guards: guards.to_vec(),
-                call,
-            });
+
+    /// 遍历 `if` 语句指定字段（consequence / alternative）上的分支。
+    fn walk_branch<'tree>(
+        &self,
+        node: Node<'tree>,
+        field: &str,
+        guards: &[GuardFact],
+        visit: &mut dyn FnMut(Node<'tree>, &[GuardFact]) -> bool,
+    ) {
+        if let Some(branch) = node.child_by_field_name(field) {
+            self.walk(branch, guards, visit);
         }
     }
-    for child in crate::taint::named_children(node) {
-        guarded_call_walk(child, ctx, prof, params, guards, calls, sinks);
+}
+
+/// 四种循环语句的节点种类（do-while 的条件在 body 之后）。
+fn is_loop_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "while_statement" | "for_statement" | "for_in_statement" | "do_statement"
+    )
+}
+
+/// 追加一条 guard 后的新 guard 列表。
+fn guard_with(guards: &[GuardFact], guard: GuardFact) -> Vec<GuardFact> {
+    let mut extended = guards.to_vec();
+    extended.push(guard);
+    extended
+}
+
+/// switch 分支的 guard 列表：case 带值且 switch 值是形参时追加「等于 case 值」
+///（case 值文本去掉首尾引号）。
+fn case_guards(
+    case: Node<'_>,
+    switch_param: Option<usize>,
+    guards: &[GuardFact],
+    ctx: &ExtractCtx<'_>,
+) -> Vec<GuardFact> {
+    if case.kind() != "switch_case" {
+        return guards.to_vec();
     }
+    let (Some(param), Some(value)) = (switch_param, case.child_by_field_name("value")) else {
+        return guards.to_vec();
+    };
+    let Some(text) = ctx.source.get(value.start_byte()..value.end_byte()) else {
+        return guards.to_vec();
+    };
+    let equals = text
+        .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+        .to_string();
+    guard_with(guards, GuardFact {
+        param,
+        truthy: true,
+        equals: Some(equals),
+    })
+}
+
+/// 赋值/声明节点 → (lhs 目标路径, rhs 节点)。节点种类不在档位或缺少任一字段时为
+/// `None`，调用方按普通节点继续处理。
+fn assignment_parts<'a>(
+    node: Node<'a>,
+    ctx: &ExtractCtx<'_>,
+    prof: &metrics::Profile,
+) -> Option<(Vec<AccessPath>, Node<'a>)> {
+    let (_, lhs_field, rhs_field) = prof
+        .assignments
+        .iter()
+        .find(|(kind, _, _)| *kind == node.kind())
+        .copied()?;
+    let lhs = node.child_by_field_name(lhs_field)?;
+    let rhs = node.child_by_field_name(rhs_field)?;
+    Some((access_paths_of(lhs, ctx.lang, ctx.source), rhs))
+}
+
+/// sink 端点命中：节点种类 + 字节范围双等值。
+fn sink_endpoint<'a>(node: Node<'_>, ctx: &'a ExtractCtx<'_>) -> Option<&'a Endpoint> {
+    ctx.sinks.iter().find(|sink| {
+        sink.start == node.start_byte()
+            && sink.end == node.end_byte()
+            && sink.kind == node.kind()
+    })
+}
+
+/// sink 端点命中节点的 sink 事实：span/文本取端点，表达式按节点提取。
+fn sink_fact(sink: &Endpoint, node: Node<'_>, ctx: &ExtractCtx<'_>) -> SinkFact {
+    SinkFact {
+        span: sink.span,
+        text: sink.text.clone(),
+        expr: expr_fact(node, ctx),
+    }
+}
+
+/// 条件节点的字面量真值（条件缺失或非字面量时为 `None`）。
+fn literal_truthiness(condition: Option<Node<'_>>, ctx: &ExtractCtx<'_>) -> Option<bool> {
+    condition
+        .and_then(|condition| literal_constant(condition, ctx))
+        .and_then(|value| value.truthy)
 }
 
 fn condition_guard(
@@ -1161,81 +1106,116 @@ fn collect_constants_in(
     if !is_root && prof.functions.contains(&node.kind()) {
         return;
     }
-    if node.kind() == "if_statement" {
-        let condition = node.child_by_field_name("condition");
-        if let Some(condition) = condition {
-            collect_constants_in(condition, ctx, prof, current, snapshots, false);
+    match node.kind() {
+        "if_statement" => collect_if_constants(node, ctx, prof, current, snapshots),
+        "labeled_statement" => {
+            let flow = collect_flow(node, ctx, prof, current.clone(), snapshots);
+            *current = merge_flow_normal(&flow);
         }
-        let known = condition.and_then(|condition| condition_truthiness(condition, ctx, current));
-        if known == Some(true) {
+        "while_statement" | "for_statement" | "for_in_statement" | "do_statement" => {
+            let flow = collect_loop_flow(node, ctx, prof, current.clone(), snapshots);
+            *current = merge_flow_normal(&flow);
+        }
+        "switch_statement" => {
+            let flow = collect_switch_flow(node, ctx, prof, current.clone(), snapshots);
+            *current = merge_flow_normal(&flow);
+        }
+        "try_statement" => collect_try_constants(node, ctx, prof, current, snapshots),
+        _ => {
+            for child in crate::taint::named_children(node) {
+                collect_constants_in(child, ctx, prof, current, snapshots, false);
+            }
+            snapshot_identifier(node, ctx, current, snapshots);
+            record_assignment(node, ctx, current);
+        }
+    }
+}
+
+/// if 语句的常量传播：条件先按当前状态传播；可判定时只走选中分支，否则两分支各自
+/// 传播后合并。
+fn collect_if_constants(
+    node: Node<'_>,
+    ctx: &ExtractCtx<'_>,
+    prof: &crate::metrics::Profile,
+    current: &mut HashMap<String, ConstValue>,
+    snapshots: &mut HashMap<usize, ConstValue>,
+) {
+    let condition = node.child_by_field_name("condition");
+    if let Some(condition) = condition {
+        collect_constants_in(condition, ctx, prof, current, snapshots, false);
+    }
+    let known = condition.and_then(|condition| condition_truthiness(condition, ctx, current));
+    let selected = match known {
+        Some(true) => node.child_by_field_name("consequence"),
+        Some(false) => node.child_by_field_name("alternative"),
+        None => {
+            let mut consequent = current.clone();
             if let Some(consequence) = node.child_by_field_name("consequence") {
-                let mut selected = current.clone();
-                collect_constants_in(consequence, ctx, prof, &mut selected, snapshots, false);
-                *current = selected;
+                collect_constants_in(consequence, ctx, prof, &mut consequent, snapshots, false);
             }
+            let mut alternative = current.clone();
+            if let Some(alternative_node) = node.child_by_field_name("alternative") {
+                collect_constants_in(alternative_node, ctx, prof, &mut alternative, snapshots, false);
+            }
+            *current = merge_constants(&consequent, &alternative);
             return;
         }
-        if known == Some(false) {
-            if let Some(alternative) = node.child_by_field_name("alternative") {
-                let mut selected = current.clone();
-                collect_constants_in(alternative, ctx, prof, &mut selected, snapshots, false);
-                *current = selected;
-            }
-            return;
-        }
-        let mut consequent = current.clone();
-        if let Some(consequence) = node.child_by_field_name("consequence") {
-            collect_constants_in(consequence, ctx, prof, &mut consequent, snapshots, false);
-        }
-        let mut alternative = current.clone();
-        if let Some(alternative_node) = node.child_by_field_name("alternative") {
-            collect_constants_in(alternative_node, ctx, prof, &mut alternative, snapshots, false);
-        }
-        *current = merge_constants(&consequent, &alternative);
+    };
+    if let Some(branch) = selected {
+        let mut selected_state = current.clone();
+        collect_constants_in(branch, ctx, prof, &mut selected_state, snapshots, false);
+        *current = selected_state;
+    }
+}
+
+/// try：try 体与 catch 各自从进入前的状态出发，二者合并后再走 finally。
+fn collect_try_constants(
+    node: Node<'_>,
+    ctx: &ExtractCtx<'_>,
+    prof: &crate::metrics::Profile,
+    current: &mut HashMap<String, ConstValue>,
+    snapshots: &mut HashMap<usize, ConstValue>,
+) {
+    let mut try_state = current.clone();
+    if let Some(body) = node.child_by_field_name("body") {
+        collect_constants_in(body, ctx, prof, &mut try_state, snapshots, false);
+    }
+    let mut merged = try_state;
+    if let Some(handler) = node.child_by_field_name("handler") {
+        let mut catch_state = current.clone();
+        collect_constants_in(handler, ctx, prof, &mut catch_state, snapshots, false);
+        merged = merge_constants(&merged, &catch_state);
+    }
+    if let Some(finalizer) = node.child_by_field_name("finalizer") {
+        collect_constants_in(finalizer, ctx, prof, &mut merged, snapshots, false);
+    }
+    *current = merged;
+}
+
+/// 标识符读取：把当前已知的常量值按节点字节位置记入快照。
+fn snapshot_identifier(
+    node: Node<'_>,
+    ctx: &ExtractCtx<'_>,
+    current: &HashMap<String, ConstValue>,
+    snapshots: &mut HashMap<usize, ConstValue>,
+) {
+    if node.kind() != "identifier" {
         return;
     }
-    if node.kind() == "labeled_statement" {
-        let flow = collect_flow(node, ctx, prof, current.clone(), snapshots);
-        *current = merge_flow_normal(&flow);
+    let Some(text) = ctx.source.get(node.start_byte()..node.end_byte()) else {
         return;
+    };
+    if let Some(value) = current.get(text) {
+        snapshots.insert(node.start_byte(), *value);
     }
-    if matches!(node.kind(), "while_statement" | "for_statement" | "for_in_statement" | "do_statement") {
-        let flow = collect_loop_flow(node, ctx, prof, current.clone(), snapshots);
-        *current = merge_flow_normal(&flow);
-        return;
-    }
-    if node.kind() == "switch_statement" {
-        let flow = collect_switch_flow(node, ctx, prof, current.clone(), snapshots);
-        *current = merge_flow_normal(&flow);
-        return;
-    }
-    if node.kind() == "try_statement" {
-        let mut try_state = current.clone();
-        if let Some(body) = node.child_by_field_name("body") {
-            collect_constants_in(body, ctx, prof, &mut try_state, snapshots, false);
-        }
-        let mut merged = try_state;
-        if let Some(handler) = node.child_by_field_name("handler") {
-            let mut catch_state = current.clone();
-            collect_constants_in(handler, ctx, prof, &mut catch_state, snapshots, false);
-            merged = merge_constants(&merged, &catch_state);
-        }
-        if let Some(finalizer) = node.child_by_field_name("finalizer") {
-            collect_constants_in(finalizer, ctx, prof, &mut merged, snapshots, false);
-        }
-        *current = merged;
-        return;
-    }
-    for child in crate::taint::named_children(node) {
-        collect_constants_in(child, ctx, prof, current, snapshots, false);
-    }
-    if node.kind() == "identifier" {
-        if let Some(text) = ctx.source.get(node.start_byte()..node.end_byte()) {
-            if let Some(value) = current.get(text) {
-                snapshots.insert(node.start_byte(), *value);
-            }
-        }
-    }
+}
+
+/// 赋值/声明的常量更新：右值为字面量则记录，否则清除该名字的已知值。
+fn record_assignment(
+    node: Node<'_>,
+    ctx: &ExtractCtx<'_>,
+    current: &mut HashMap<String, ConstValue>,
+) {
     let name_node = match node.kind() {
         "variable_declarator" | "var_spec" | "const_spec" | "let_spec" => {
             node.child_by_field_name("name")
@@ -1248,17 +1228,18 @@ fn collect_constants_in(
             .map(|left| (left, node.child_by_field_name("right"))),
         _ => None,
     };
-    if let Some((name, value)) = name_node {
-        let name = ctx
-            .source
-            .get(name.start_byte()..name.end_byte())
-            .unwrap_or("")
-            .to_string();
-        if let Some(value) = value.and_then(|value| literal_constant(value, ctx)) {
-            current.insert(name, value);
-        } else {
-            current.remove(&name);
-        }
+    let Some((name, value)) = name_node else {
+        return;
+    };
+    let name = ctx
+        .source
+        .get(name.start_byte()..name.end_byte())
+        .unwrap_or("")
+        .to_string();
+    if let Some(value) = value.and_then(|value| literal_constant(value, ctx)) {
+        current.insert(name, value);
+    } else {
+        current.remove(&name);
     }
 }
 
@@ -1276,6 +1257,32 @@ struct ConstFlow {
     normal: Vec<HashMap<String, ConstValue>>,
     breaks: Vec<(Option<String>, HashMap<String, ConstValue>)>,
     continues: Vec<(Option<String>, HashMap<String, ConstValue>)>,
+}
+
+impl ConstFlow {
+    /// 单一正常出口（无 break/continue）。
+    fn just(state: HashMap<String, ConstValue>) -> Self {
+        ConstFlow {
+            normal: vec![state],
+            ..Default::default()
+        }
+    }
+
+    /// 顺序并入另一段流的全部出口（不合并）。
+    fn extend_from(&mut self, other: ConstFlow) {
+        self.normal.extend(other.normal);
+        self.breaks.extend(other.breaks);
+        self.continues.extend(other.continues);
+    }
+
+    /// 正常出口合并为一个；break/continue 出口不变。
+    fn with_merged_normal(self) -> Self {
+        ConstFlow {
+            normal: vec![merge_all_constants(self.normal)],
+            breaks: self.breaks,
+            continues: self.continues,
+        }
+    }
 }
 
 fn merge_flow_normal(flow: &ConstFlow) -> HashMap<String, ConstValue> {
@@ -1296,38 +1303,7 @@ fn collect_loop_flow(
     snapshots: &mut HashMap<usize, ConstValue>,
 ) -> ConstFlow {
     if node.kind() == "do_statement" {
-        let mut states = Vec::new();
-        let mut breaks = Vec::new();
-        let mut continues = Vec::new();
-        if let Some(body) = node.child_by_field_name("body") {
-            let flow = collect_flow(body, ctx, prof, state.clone(), snapshots);
-            states.extend(flow.normal);
-            for (label, state) in flow.breaks {
-                if label.is_none() {
-                    states.push(state);
-                } else {
-                    breaks.push((label, state));
-                }
-            }
-            for (label, state) in flow.continues {
-                if label.is_none() {
-                    states.push(state);
-                } else {
-                    continues.push((label, state));
-                }
-            }
-        } else {
-            states.push(state.clone());
-        }
-        let mut body_state = merge_all_constants(states);
-        if let Some(condition) = node.child_by_field_name("condition") {
-            collect_constants_in(condition, ctx, prof, &mut body_state, snapshots, false);
-        }
-        return ConstFlow {
-            normal: vec![body_state],
-            breaks,
-            continues,
-        };
+        return collect_do_flow(node, ctx, prof, state, snapshots);
     }
     let body = node.child_by_field_name("body");
     for child in crate::taint::named_children(node) {
@@ -1340,26 +1316,65 @@ fn collect_loop_flow(
     let mut continues = Vec::new();
     if let Some(body) = body {
         let flow = collect_flow(body, ctx, prof, state, snapshots);
-        states.extend(flow.normal);
-        for (label, state) in flow.breaks {
-            if label.is_none() {
-                states.push(state);
-            } else {
-                breaks.push((label, state));
-            }
-        }
-        for (label, state) in flow.continues {
-            if label.is_none() {
-                states.push(state);
-            } else {
-                continues.push((label, state));
-            }
-        }
+        absorb_flow(flow, &mut states, &mut breaks, &mut continues);
     }
     ConstFlow {
         normal: vec![merge_all_constants(states)],
         breaks,
         continues,
+    }
+}
+
+/// do-while：body 至少执行一次，其出口直接作为循环出口；随后的条件再传播常量。
+fn collect_do_flow(
+    node: Node<'_>,
+    ctx: &ExtractCtx<'_>,
+    prof: &crate::metrics::Profile,
+    state: HashMap<String, ConstValue>,
+    snapshots: &mut HashMap<usize, ConstValue>,
+) -> ConstFlow {
+    let mut states = Vec::new();
+    let mut breaks = Vec::new();
+    let mut continues = Vec::new();
+    if let Some(body) = node.child_by_field_name("body") {
+        let flow = collect_flow(body, ctx, prof, state.clone(), snapshots);
+        absorb_flow(flow, &mut states, &mut breaks, &mut continues);
+    } else {
+        states.push(state.clone());
+    }
+    let mut body_state = merge_all_constants(states);
+    if let Some(condition) = node.child_by_field_name("condition") {
+        collect_constants_in(condition, ctx, prof, &mut body_state, snapshots, false);
+    }
+    ConstFlow {
+        normal: vec![body_state],
+        breaks,
+        continues,
+    }
+}
+
+/// 语句流的出口并入循环迭代：无标签 break/continue 结束本次迭代（并入 `states`），
+/// 带标签者向外透传。
+fn absorb_flow(
+    flow: ConstFlow,
+    states: &mut Vec<HashMap<String, ConstValue>>,
+    breaks: &mut Vec<(Option<String>, HashMap<String, ConstValue>)>,
+    continues: &mut Vec<(Option<String>, HashMap<String, ConstValue>)>,
+) {
+    states.extend(flow.normal);
+    for (label, state) in flow.breaks {
+        if label.is_none() {
+            states.push(state);
+        } else {
+            breaks.push((label, state));
+        }
+    }
+    for (label, state) in flow.continues {
+        if label.is_none() {
+            states.push(state);
+        } else {
+            continues.push((label, state));
+        }
     }
 }
 
@@ -1475,143 +1490,15 @@ fn collect_flow(
             continues: vec![(outcome_label(node, ctx), state)],
             ..Default::default()
         },
-        "labeled_statement" => {
-            let Some(label) = outcome_label(node, ctx) else {
-                return ConstFlow {
-                    normal: vec![state],
-                    ..Default::default()
-                };
-            };
-            let Some(body) = node.child_by_field_name("body") else {
-                return ConstFlow {
-                    normal: vec![state],
-                    ..Default::default()
-                };
-            };
-            let is_loop = matches!(
-                body.kind(),
-                "while_statement" | "for_statement" | "for_in_statement" | "do_statement"
-            );
-            let flow = collect_flow(body, ctx, prof, state, snapshots);
-            let mut normal = flow.normal;
-            let mut breaks = Vec::new();
-            let mut continues = Vec::new();
-            let mut pending_continues = Vec::new();
-            for (outcome_label, state) in flow.breaks {
-                if outcome_label.as_deref() == Some(label.as_str()) {
-                    normal.push(state);
-                } else {
-                    breaks.push((outcome_label, state));
-                }
-            }
-            for (outcome_label, state) in flow.continues {
-                if outcome_label.as_deref() == Some(label.as_str()) {
-                    if is_loop {
-                        pending_continues.push(state);
-                    } else {
-                        normal.push(state);
-                    }
-                } else {
-                    continues.push((outcome_label, state));
-                }
-            }
-            if is_loop {
-                let loop_body = body.child_by_field_name("body");
-                let mut iterations = 0;
-                while !pending_continues.is_empty() && iterations < 8 {
-                    let entry = merge_all_constants(pending_continues);
-                    pending_continues = Vec::new();
-                    if let Some(loop_body) = loop_body {
-                        let next = collect_flow(loop_body, ctx, prof, entry, snapshots);
-                        normal.extend(next.normal);
-                        for (outcome_label, state) in next.breaks {
-                            if outcome_label.as_deref() == Some(label.as_str()) {
-                                normal.push(state);
-                            } else {
-                                breaks.push((outcome_label, state));
-                            }
-                        }
-                        for (outcome_label, state) in next.continues {
-                            if outcome_label.as_deref() == Some(label.as_str()) {
-                                pending_continues.push(state);
-                            } else {
-                                continues.push((outcome_label, state));
-                            }
-                        }
-                    }
-                    iterations += 1;
-                }
-                if !pending_continues.is_empty() {
-                    normal.extend(pending_continues);
-                }
-            }
-            ConstFlow {
-                normal: vec![merge_all_constants(normal)],
-                breaks,
-                continues,
-            }
-        }
+        "labeled_statement" => collect_labeled_flow(node, ctx, prof, state, snapshots),
         "else_clause" => {
             if let Some(child) = crate::taint::named_children(node).last().copied() {
                 collect_flow(child, ctx, prof, state, snapshots)
             } else {
-                ConstFlow {
-                    normal: vec![state],
-                    ..Default::default()
-                }
+                ConstFlow::just(state)
             }
         }
-        "if_statement" => {
-            let mut condition_state = state;
-            if let Some(condition) = node.child_by_field_name("condition") {
-                collect_constants_in(condition, ctx, prof, &mut condition_state, snapshots, false);
-            }
-            let known = node
-                .child_by_field_name("condition")
-                .and_then(|condition| condition_truthiness(condition, ctx, &condition_state));
-            let consequence = node
-                .child_by_field_name("consequence")
-                .map(|consequence| {
-                    collect_flow(consequence, ctx, prof, condition_state.clone(), snapshots)
-                });
-            if known == Some(true) {
-                return consequence.unwrap_or_default();
-            }
-            if known == Some(false) {
-                return node
-                    .child_by_field_name("alternative")
-                    .map(|alternative| {
-                        collect_flow(alternative, ctx, prof, condition_state.clone(), snapshots)
-                    })
-                    .unwrap_or(ConstFlow {
-                        normal: vec![condition_state],
-                        ..Default::default()
-                    });
-            }
-            let mut normal = Vec::new();
-            let mut breaks = Vec::new();
-            let mut continues = Vec::new();
-            if let Some(consequence) = consequence {
-                normal.extend(consequence.normal);
-                breaks.extend(consequence.breaks);
-                continues.extend(consequence.continues);
-            } else {
-                normal.push(condition_state.clone());
-            }
-            if let Some(alternative) = node.child_by_field_name("alternative") {
-                let flow = collect_flow(alternative, ctx, prof, condition_state, snapshots);
-                normal.extend(flow.normal);
-                breaks.extend(flow.breaks);
-                continues.extend(flow.continues);
-            } else {
-                normal.push(condition_state);
-            }
-            ConstFlow {
-                normal: vec![merge_all_constants(normal)],
-                breaks,
-                continues,
-            }
-        }
+        "if_statement" => collect_if_flow(node, ctx, prof, state, snapshots),
         "while_statement" | "for_statement" | "for_in_statement" | "do_statement" => {
             collect_loop_flow(node, ctx, prof, state, snapshots)
         }
@@ -1619,12 +1506,157 @@ fn collect_flow(
         _ => {
             let mut next = state;
             collect_constants_in(node, ctx, prof, &mut next, snapshots, false);
-            ConstFlow {
-                normal: vec![next],
-                ..Default::default()
+            ConstFlow::just(next)
+        }
+    }
+}
+
+/// 带标签语句的流：目标为其它标签的 break/continue 向外透传；匹配本标签的 break 在
+/// 标签语句之后正常继续；匹配本标签的 continue 在循环上回灌下一轮循环体，在非循环上
+/// 按正常出口处理。缺少标签或 body 时状态原样流出。
+fn collect_labeled_flow(
+    node: Node<'_>,
+    ctx: &ExtractCtx<'_>,
+    prof: &crate::metrics::Profile,
+    state: HashMap<String, ConstValue>,
+    snapshots: &mut HashMap<usize, ConstValue>,
+) -> ConstFlow {
+    let (Some(label), Some(body)) =
+        (outcome_label(node, ctx), node.child_by_field_name("body"))
+    else {
+        return ConstFlow::just(state);
+    };
+    let mut flow = LabelFlow {
+        label,
+        normal: Vec::new(),
+        breaks: Vec::new(),
+        continues: Vec::new(),
+    };
+    let inner = collect_flow(body, ctx, prof, state, snapshots);
+    flow.normal.extend(inner.normal);
+    flow.route_breaks(inner.breaks);
+    let matched_continues = flow.route_continues(inner.continues);
+    if is_loop_kind(body.kind()) {
+        replay_continues(body, ctx, prof, &mut flow, matched_continues, snapshots);
+    } else {
+        flow.normal.extend(matched_continues);
+    }
+    flow.into_flow()
+}
+
+/// 循环标签上匹配的 continue：合并状态后重新进入循环体（至多 8 轮）。期间匹配本标签的
+/// break 归入正常出口，新的匹配 continue 继续回灌；未耗尽的回灌状态并入正常出口。
+fn replay_continues(
+    body: Node<'_>,
+    ctx: &ExtractCtx<'_>,
+    prof: &crate::metrics::Profile,
+    flow: &mut LabelFlow,
+    mut pending: Vec<HashMap<String, ConstValue>>,
+    snapshots: &mut HashMap<usize, ConstValue>,
+) {
+    let loop_body = body.child_by_field_name("body");
+    let mut iterations = 0;
+    while !pending.is_empty() && iterations < 8 {
+        let entry = merge_all_constants(pending);
+        pending = Vec::new();
+        if let Some(loop_body) = loop_body {
+            let next = collect_flow(loop_body, ctx, prof, entry, snapshots);
+            flow.normal.extend(next.normal);
+            flow.route_breaks(next.breaks);
+            pending = flow.route_continues(next.continues);
+        }
+        iterations += 1;
+    }
+    flow.normal.extend(pending);
+}
+
+/// 带标签语句的出口累积：按目标标签归类 break/continue。
+struct LabelFlow {
+    label: String,
+    normal: Vec<HashMap<String, ConstValue>>,
+    breaks: Vec<(Option<String>, HashMap<String, ConstValue>)>,
+    continues: Vec<(Option<String>, HashMap<String, ConstValue>)>,
+}
+
+impl LabelFlow {
+    fn targets_label(&self, label: &Option<String>) -> bool {
+        label.as_deref() == Some(self.label.as_str())
+    }
+
+    /// break：匹配本标签者并入正常出口，其余向外透传。
+    fn route_breaks(&mut self, breaks: Vec<(Option<String>, HashMap<String, ConstValue>)>) {
+        for (label, state) in breaks {
+            if self.targets_label(&label) {
+                self.normal.push(state);
+            } else {
+                self.breaks.push((label, state));
             }
         }
     }
+
+    /// continue：其余向外透传，匹配本标签者返回给调用方（回灌循环体或并入正常出口）。
+    fn route_continues(
+        &mut self,
+        continues: Vec<(Option<String>, HashMap<String, ConstValue>)>,
+    ) -> Vec<HashMap<String, ConstValue>> {
+        let mut matched = Vec::new();
+        for (label, state) in continues {
+            if self.targets_label(&label) {
+                matched.push(state);
+            } else {
+                self.continues.push((label, state));
+            }
+        }
+        matched
+    }
+
+    fn into_flow(self) -> ConstFlow {
+        ConstFlow {
+            normal: vec![merge_all_constants(self.normal)],
+            breaks: self.breaks,
+            continues: self.continues,
+        }
+    }
+}
+
+/// if 语句的流：条件先传播常量；可判定时只走选中分支，否则两分支都走后合并。
+fn collect_if_flow(
+    node: Node<'_>,
+    ctx: &ExtractCtx<'_>,
+    prof: &crate::metrics::Profile,
+    state: HashMap<String, ConstValue>,
+    snapshots: &mut HashMap<usize, ConstValue>,
+) -> ConstFlow {
+    let mut condition_state = state;
+    let condition = node.child_by_field_name("condition");
+    if let Some(condition) = condition {
+        collect_constants_in(condition, ctx, prof, &mut condition_state, snapshots, false);
+    }
+    let known =
+        condition.and_then(|condition| condition_truthiness(condition, ctx, &condition_state));
+    let consequence = node
+        .child_by_field_name("consequence")
+        .map(|consequence| {
+            collect_flow(consequence, ctx, prof, condition_state.clone(), snapshots)
+        });
+    if known == Some(true) {
+        return consequence.unwrap_or_default();
+    }
+    if known == Some(false) {
+        if let Some(alternative) = node.child_by_field_name("alternative") {
+            return collect_flow(alternative, ctx, prof, condition_state, snapshots);
+        }
+        return ConstFlow::just(condition_state);
+    }
+    // 两分支都可能执行：各自从条件后的状态出发，出口合并。
+    let mut merged = ConstFlow::default();
+    merged.extend_from(consequence.unwrap_or_else(|| ConstFlow::just(condition_state.clone())));
+    if let Some(alternative) = node.child_by_field_name("alternative") {
+        merged.extend_from(collect_flow(alternative, ctx, prof, condition_state, snapshots));
+    } else {
+        merged.normal.push(condition_state);
+    }
+    merged.with_merged_normal()
 }
 
 fn merge_constants(
@@ -2099,179 +2131,198 @@ fn extract_imports(lang: Language, root: Node<'_>, source: &str, path: &str) -> 
     let mut imports = Vec::new();
     match lang {
         Language::TypeScript | Language::Tsx | Language::JavaScript | Language::Jsx => {
-            metrics::walk_all_pub(root, &mut |node| {
-                if node.kind() != "import_statement" {
-                    return;
-                }
-                let Some(source_node) = named_children(node)
-                    .into_iter()
-                    .find(|c| c.kind() == "string")
-                else {
-                    return;
-                };
-                let spec = source
-                    .get(source_node.start_byte()..source_node.end_byte())
-                    .unwrap_or("")
-                    .trim_matches(|c| c == '"' || c == '\'' || c == '`')
-                    .to_string();
-                let Some(modules) = resolve_ts_module(path, &spec) else {
-                    return;
-                };
-                let Some(clause) = named_children(node)
-                    .into_iter()
-                    .find(|c| c.kind() == "import_clause")
-                else {
-                    return;
-                };
-                for child in named_children(clause) {
-                    match child.kind() {
-                        "identifier" => {
-                            let local = source
-                                .get(child.start_byte()..child.end_byte())
-                                .unwrap_or("")
-                                .to_string();
-                            imports.push(ImportFact {
-                                local,
-                                modules: modules.clone(),
-                                exported: "default".into(),
-                            });
-                        }
-                        "named_imports" => {
-                            for spec_node in named_children(child) {
-                                if spec_node.kind() != "import_specifier" {
-                                    continue;
-                                }
-                                let name = spec_node
-                                    .child_by_field_name("name")
-                                    .and_then(|n| source.get(n.start_byte()..n.end_byte()))
-                                    .unwrap_or("")
-                                    .to_string();
-                                let alias = spec_node
-                                    .child_by_field_name("alias")
-                                    .and_then(|n| source.get(n.start_byte()..n.end_byte()))
-                                    .map(|s| s.to_string())
-                                    .unwrap_or_else(|| name.clone());
-                                if !name.is_empty() {
-                                    imports.push(ImportFact {
-                                        local: alias,
-                                        modules: modules.clone(),
-                                        exported: name,
-                                    });
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            });
+            extract_js_imports(root, source, path, &mut imports);
         }
-        Language::Python => {
-            metrics::walk_all_pub(root, &mut |node| {
-                if node.kind() != "import_from_statement" {
-                    return;
-                }
-                let children = named_children(node);
-                let Some(module_node) = children
-                    .iter()
-                    .copied()
-                    .find(|c| matches!(c.kind(), "dotted_name" | "relative_import"))
-                else {
-                    return;
-                };
-                let Some(modules) = resolve_py_module(path, module_node, source) else {
-                    return;
-                };
-                // `import` 是匿名关键字（不在 named_children 中）：跳过模块名节点后，
-                // 其余具名子节点即导入项。
-                for child in children {
-                    if child.id() == module_node.id() {
-                        continue;
-                    }
-                    match child.kind() {
-                        "dotted_name" => {
-                            let name = source
-                                .get(child.start_byte()..child.end_byte())
-                                .unwrap_or("")
-                                .to_string();
-                            if !name.is_empty() {
-                                imports.push(ImportFact {
-                                    local: name.clone(),
-                                    modules: modules.clone(),
-                                    exported: name,
-                                });
-                            }
-                        }
-                        "aliased_import" => {
-                            let name = child
-                                .child_by_field_name("name")
-                                .and_then(|n| source.get(n.start_byte()..n.end_byte()))
-                                .unwrap_or("")
-                                .to_string();
-                            let alias = child
-                                .child_by_field_name("alias")
-                                .and_then(|n| source.get(n.start_byte()..n.end_byte()))
-                                .map(|s| s.to_string())
-                                .unwrap_or_else(|| name.clone());
-                            if !name.is_empty() {
-                                imports.push(ImportFact {
-                                    local: alias,
-                                    modules: modules.clone(),
-                                    exported: name,
-                                });
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            });
-        }
-        Language::Java => {
-            metrics::walk_all_pub(root, &mut |node| {
-                if node.kind() != "import_declaration" {
-                    return;
-                }
-                let full = source
-                    .get(node.start_byte()..node.end_byte())
-                    .unwrap_or("")
-                    .trim()
-                    .trim_end_matches(';')
-                    .to_string();
-                let body = full.trim_start_matches("import").trim();
-                if let Some(rest) = body.strip_prefix("static ") {
-                    if let Some((class_part, method)) = rest.trim().rsplit_once('.') {
-                        imports.push(ImportFact {
-                            local: method.to_string(),
-                            modules: vec![class_part.replace('.', "/")],
-                            exported: method.to_string(),
-                        });
-                    }
-                } else if !body.is_empty() {
-                    let class_id = body.replace('.', "/");
-                    let local = body.rsplit('.').next().unwrap_or(body).to_string();
-                    imports.push(ImportFact {
-                        local: local.clone(),
-                        modules: vec![class_id],
-                        exported: local,
-                    });
-                }
-            });
-        }
-        Language::Rust => {
-            metrics::walk_all_pub(root, &mut |node| {
-                if node.kind() != "use_declaration" {
-                    return;
-                }
-                if let Some(arg) = named_children(node).last() {
-                    extract_rust_use(*arg, source, &mut imports, path);
-                }
-            });
-        }
+        Language::Python => extract_python_imports(root, source, path, &mut imports),
+        Language::Java => extract_java_imports(root, source, &mut imports),
+        Language::Rust => extract_rust_imports(root, source, path, &mut imports),
         _ => {}
     }
     imports.sort_by(|a, b| {
         (a.local.as_str(), a.exported.as_str()).cmp(&(b.local.as_str(), b.exported.as_str()))
     });
     imports
+}
+
+/// TS/JS：`import defaultExport, { a, b as c } from "./mod"`。仅解析相对路径导入。
+fn extract_js_imports(root: Node<'_>, source: &str, path: &str, imports: &mut Vec<ImportFact>) {
+    metrics::walk_all_pub(root, &mut |node| {
+        if node.kind() != "import_statement" {
+            return;
+        }
+        let Some(source_node) = named_children(node)
+            .into_iter()
+            .find(|c| c.kind() == "string")
+        else {
+            return;
+        };
+        let spec = source
+            .get(source_node.start_byte()..source_node.end_byte())
+            .unwrap_or("")
+            .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+            .to_string();
+        let Some(modules) = resolve_ts_module(path, &spec) else {
+            return;
+        };
+        let Some(clause) = named_children(node)
+            .into_iter()
+            .find(|c| c.kind() == "import_clause")
+        else {
+            return;
+        };
+        for child in named_children(clause) {
+            match child.kind() {
+                "identifier" => {
+                    let local = source
+                        .get(child.start_byte()..child.end_byte())
+                        .unwrap_or("")
+                        .to_string();
+                    imports.push(ImportFact {
+                        local,
+                        modules: modules.clone(),
+                        exported: "default".into(),
+                    });
+                }
+                "named_imports" => extract_named_imports(child, source, &modules, imports),
+                _ => {}
+            }
+        }
+    });
+}
+
+/// `import { a, b as c } ...`：每个 import_specifier 一条导入。
+fn extract_named_imports(
+    node: Node<'_>,
+    source: &str,
+    modules: &[String],
+    imports: &mut Vec<ImportFact>,
+) {
+    for spec_node in named_children(node) {
+        if spec_node.kind() != "import_specifier" {
+            continue;
+        }
+        aliased_import(spec_node, "name", source, modules, imports);
+    }
+}
+
+/// 带可选别名的导入项（TS import_specifier / Python aliased_import）：`alias` 字段缺失时
+/// 本地名即导出名；导出名为空时忽略。
+fn aliased_import(
+    node: Node<'_>,
+    name_field: &str,
+    source: &str,
+    modules: &[String],
+    imports: &mut Vec<ImportFact>,
+) {
+    let Some(name) = node
+        .child_by_field_name(name_field)
+        .and_then(|n| source.get(n.start_byte()..n.end_byte()))
+    else {
+        return;
+    };
+    if name.is_empty() {
+        return;
+    }
+    let name = name.to_string();
+    let alias = node
+        .child_by_field_name("alias")
+        .and_then(|n| source.get(n.start_byte()..n.end_byte()))
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| name.clone());
+    imports.push(ImportFact {
+        local: alias,
+        modules: modules.to_vec(),
+        exported: name,
+    });
+}
+
+/// Python：`from mod import a, b as c`（含相对导入）。
+fn extract_python_imports(root: Node<'_>, source: &str, path: &str, imports: &mut Vec<ImportFact>) {
+    metrics::walk_all_pub(root, &mut |node| {
+        if node.kind() != "import_from_statement" {
+            return;
+        }
+        let children = named_children(node);
+        let Some(module_node) = children
+            .iter()
+            .copied()
+            .find(|c| matches!(c.kind(), "dotted_name" | "relative_import"))
+        else {
+            return;
+        };
+        let Some(modules) = resolve_py_module(path, module_node, source) else {
+            return;
+        };
+        // `import` 是匿名关键字（不在 named_children 中）：跳过模块名节点后，
+        // 其余具名子节点即导入项。
+        for child in children {
+            if child.id() == module_node.id() {
+                continue;
+            }
+            match child.kind() {
+                "dotted_name" => {
+                    let name = source
+                        .get(child.start_byte()..child.end_byte())
+                        .unwrap_or("")
+                        .to_string();
+                    if !name.is_empty() {
+                        imports.push(ImportFact {
+                            local: name.clone(),
+                            modules: modules.clone(),
+                            exported: name,
+                        });
+                    }
+                }
+                "aliased_import" => aliased_import(child, "name", source, &modules, imports),
+                _ => {}
+            }
+        }
+    });
+}
+
+/// Java：`import a.b.C` 与 `import static a.b.C.m`。
+fn extract_java_imports(root: Node<'_>, source: &str, imports: &mut Vec<ImportFact>) {
+    metrics::walk_all_pub(root, &mut |node| {
+        if node.kind() != "import_declaration" {
+            return;
+        }
+        let full = source
+            .get(node.start_byte()..node.end_byte())
+            .unwrap_or("")
+            .trim()
+            .trim_end_matches(';')
+            .to_string();
+        let body = full.trim_start_matches("import").trim();
+        if let Some(rest) = body.strip_prefix("static ") {
+            if let Some((class_part, method)) = rest.trim().rsplit_once('.') {
+                imports.push(ImportFact {
+                    local: method.to_string(),
+                    modules: vec![class_part.replace('.', "/")],
+                    exported: method.to_string(),
+                });
+            }
+        } else if !body.is_empty() {
+            let class_id = body.replace('.', "/");
+            let local = body.rsplit('.').next().unwrap_or(body).to_string();
+            imports.push(ImportFact {
+                local: local.clone(),
+                modules: vec![class_id],
+                exported: local,
+            });
+        }
+    });
+}
+
+/// Rust：`use a::b::{c, d as e}`（按 crate `src/` 模块树映射）。
+fn extract_rust_imports(root: Node<'_>, source: &str, path: &str, imports: &mut Vec<ImportFact>) {
+    metrics::walk_all_pub(root, &mut |node| {
+        if node.kind() != "use_declaration" {
+            return;
+        }
+        if let Some(arg) = named_children(node).last() {
+            extract_rust_use(*arg, source, imports, path);
+        }
+    });
 }
 
 fn normalize_join(dir: &str, spec: &str) -> String {

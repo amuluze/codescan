@@ -2,5 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    codescan_lib::run()
+    if let Err(error) = codescan_lib::run() {
+        eprintln!("codescan: {error}");
+        std::process::exit(1);
+    }
 }

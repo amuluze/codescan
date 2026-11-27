@@ -1408,7 +1408,8 @@ async fn send_completion_request(
     retries: usize,
 ) -> Result<String, String> {
     let url = endpoint(config);
-    for attempt in 0..=retries {
+    let mut attempt = 0;
+    loop {
         let request = match config.kind {
             ProviderKind::OpenAi => client.post(&url).bearer_auth(api_key),
             ProviderKind::Anthropic => client
@@ -1430,13 +1431,13 @@ async fn send_completion_request(
         if status.is_success() {
             return Ok(text);
         }
-        if is_retryable_status(status) && attempt < retries {
-            tokio::time::sleep(retry_delay(attempt, retry_after, RETRY_BASE_DELAY_MS)).await;
-            continue;
+        // 不可重试的状态，或重试次数已用尽：返回可读错误。
+        if !is_retryable_status(status) || attempt >= retries {
+            return Err(format!("Provider 返回 {status}：{}", truncate(&text, 500)));
         }
-        return Err(format!("Provider 返回 {status}：{}", truncate(&text, 500)));
+        tokio::time::sleep(retry_delay(attempt, retry_after, RETRY_BASE_DELAY_MS)).await;
+        attempt += 1;
     }
-    unreachable!("retry loop returns on success or final failure")
 }
 
 /// 调用 Provider 完成一次补全。错误信息不得包含 API Key。

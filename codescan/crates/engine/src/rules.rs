@@ -174,165 +174,24 @@ pub fn parse_rule_set(yaml: &str) -> Result<Vec<RuleSpec>, Vec<RuleError>> {
 
     for raw_rule in raw.rules {
         let id = raw_rule.id.clone();
-        let mut push_error = |field: &str, message: String| {
-            errors.push(RuleError {
-                rule_id: id.clone(),
-                field: field.into(),
-                message,
-            });
-        };
-
         if !seen_ids.insert(id.clone()) {
-            push_error("id", format!("规则 id 重复：{id}"));
+            errors.push(rule_error(&id, "id", format!("规则 id 重复：{id}")));
             continue;
         }
-        if id.is_empty()
-            || !id
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '/' || c == '-')
-        {
-            push_error("id", "id 只允许小写字母/数字/`-`/`/`".into());
-        }
-
-        let dimension = match raw_rule.dimension.as_str() {
-            "security" => Dimension::Security,
-            "business-logic" => Dimension::BusinessLogic,
-            "quality" => Dimension::Quality,
-            other => {
-                push_error(
-                    "dimension",
-                    format!("非法值 {other:?}，允许 security|business-logic|quality"),
-                );
-                Dimension::Quality
-            }
+        // 校验顺序即错误输出顺序（单测与 UI 断言）。
+        let mut check = RuleCheck {
+            id: &id,
+            errors: &mut errors,
         };
-        let severity = match raw_rule.severity.as_str() {
-            "error" => Severity::Error,
-            "warning" => Severity::Warning,
-            "info" => Severity::Info,
-            other => {
-                push_error(
-                    "severity",
-                    format!("非法值 {other:?}，允许 error|warning|info"),
-                );
-                Severity::Info
-            }
-        };
-        let language = if raw_rule.language == "*" {
-            RuleLanguage::All
-        } else if let Some(lang) = crate::language::Language::from_rule_value(&raw_rule.language)
-        {
-            RuleLanguage::One(lang)
-        } else {
-            push_error("language", format!("非法值 {:?}", raw_rule.language));
-            RuleLanguage::All
-        };
-
-        let body_kinds = [
-            raw_rule.pattern.is_some(),
-            raw_rule.text.is_some(),
-            raw_rule.metric.is_some(),
-            raw_rule.taint.is_some(),
-            raw_rule.inheritance.is_some(),
-        ]
-        .iter()
-        .filter(|b| **b)
-        .count();
-        if body_kinds != 1 {
-            push_error(
-                "pattern|text|metric|taint|inheritance",
-                "pattern / text / metric / taint / inheritance 必须且只能提供其一".into(),
-            );
-        }
-        if raw_rule.pattern.is_some() && language == RuleLanguage::All {
-            push_error("language", "AST 规则不允许 `*`，必须指定具体语言".into());
-        }
-        if raw_rule.text.is_some() && raw_rule.language != "*" {
-            push_error("language", "文本规则 language 必须为 `*`".into());
-        }
-        if raw_rule.text_exclude.is_some() && raw_rule.text.is_none() {
-            push_error("text_exclude", "text_exclude 仅适用于 text 规则".into());
-        }
-        if raw_rule.metric.is_some() && raw_rule.language != "*" {
-            push_error("language", "度量规则 language 必须为 `*`".into());
-        }
-        if let Some(taint) = &raw_rule.taint {
-            if language == RuleLanguage::All {
-                push_error("language", "污点规则不允许 `*`，必须指定具体语言".into());
-            }
-            if taint.sources.is_empty() {
-                push_error("taint.sources", "污点规则至少需要一个 source".into());
-            }
-            if taint.sinks.is_empty() {
-                push_error("taint.sinks", "污点规则至少需要一个 sink".into());
-            }
-        }
-        if let Some(inheritance) = &raw_rule.inheritance {
-            if language != RuleLanguage::One(crate::language::Language::Java) {
-                push_error("language", "继承规则当前仅支持 java".into());
-            }
-            if inheritance.target.trim().is_empty() {
-                push_error("inheritance.target", "必须提供 target 类型".into());
-            }
-            if inheritance.methods.is_empty() {
-                push_error("inheritance.methods", "至少需要一个方法名".into());
-            }
-            if inheritance
-                .methods
-                .iter()
-                .any(|method| method.trim().is_empty())
-            {
-                push_error("inheritance.methods", "方法名不能为空".into());
-            }
-        }
-        if raw_rule.pattern.is_none() {
-            if !raw_rule.filters.is_empty() {
-                push_error("filters", "filters 仅适用于 pattern 规则".into());
-            }
-            if !raw_rule.metavariables.is_empty() {
-                push_error("metavariables", "metavariables 仅适用于 pattern 规则".into());
-            }
-            if !raw_rule.imports.is_empty() && raw_rule.taint.is_none() {
-                push_error("imports", "imports 仅适用于 pattern 或 taint 规则".into());
-            }
-            if !raw_rule.imported_symbols.is_empty() && raw_rule.taint.is_none() {
-                push_error("imported_symbols", "imported_symbols 仅适用于 pattern 或 taint 规则".into());
-            }
-        }
-        if raw_rule.metric.is_none() && !raw_rule.options.is_empty() {
-            push_error("options", "options 仅适用于 metric 规则".into());
-        }
-        if !raw_rule.exclude_paths.is_empty()
-            && raw_rule.pattern.is_none()
-            && raw_rule.text.is_none()
-        {
-            push_error("exclude_paths", "exclude_paths 仅适用于 pattern/text 规则".into());
-        }
-
-        let mut filters_not = Vec::new();
-        let mut filters_inside = Vec::new();
-        for filter in &raw_rule.filters {
-            if filter.not.is_none() && filter.inside.is_none() {
-                push_error("filters", "filters 条目必须提供 not 或 inside".into());
-            }
-            if let Some(not) = &filter.not {
-                filters_not.push(not.pattern.clone());
-            }
-            if let Some(inside) = &filter.inside {
-                filters_inside.push(inside.pattern.clone());
-            }
-        }
-
-        let mut options = Vec::new();
-        for (key, value) in &raw_rule.options {
-            match value {
-                serde_yaml::Value::Number(number) => match number.as_f64() {
-                    Some(number) => options.push((key.clone(), number)),
-                    None => push_error("options", format!("option {key} 不是可表示的数值")),
-                },
-                _ => push_error("options", format!("option {key} 必须是数字")),
-            }
-        }
+        check_id(&mut check, &raw_rule);
+        let (dimension, severity, language) = check_enums(&mut check, &raw_rule);
+        check_body(&mut check, &raw_rule, language);
+        check_taint(&mut check, &raw_rule, language);
+        check_inheritance(&mut check, &raw_rule, language);
+        check_pattern_extras(&mut check, &raw_rule);
+        let options = check_options(&mut check, &raw_rule);
+        check_exclude_paths(&mut check, &raw_rule);
+        let (filters_not, filters_inside) = collect_filters(&mut check, &raw_rule);
 
         specs.push(RuleSpec {
             id,
@@ -376,6 +235,219 @@ pub fn parse_rule_set(yaml: &str) -> Result<Vec<RuleSpec>, Vec<RuleError>> {
     } else {
         Err(errors)
     }
+}
+
+fn rule_error(rule_id: &str, field: &str, message: String) -> RuleError {
+    RuleError {
+        rule_id: rule_id.into(),
+        field: field.into(),
+        message,
+    }
+}
+
+/// 单条规则的校验上下文：把字段错误以该规则的 id 累积到规则集错误列表。
+struct RuleCheck<'a> {
+    id: &'a str,
+    errors: &'a mut Vec<RuleError>,
+}
+
+impl RuleCheck<'_> {
+    fn error(&mut self, field: &str, message: String) {
+        self.errors.push(rule_error(self.id, field, message));
+    }
+}
+
+/// id 合法性（重复 id 在调用方判定并跳过该规则）。
+fn check_id(check: &mut RuleCheck<'_>, raw_rule: &RawRule) {
+    let id = &raw_rule.id;
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '/' || c == '-')
+    {
+        check.error("id", "id 只允许小写字母/数字/`-`/`/`".into());
+    }
+}
+
+/// 枚举字段（dimension / severity / language）；非法值回退到默认值以便继续校验。
+fn check_enums(check: &mut RuleCheck<'_>, raw_rule: &RawRule) -> (Dimension, Severity, RuleLanguage) {
+    let dimension = match raw_rule.dimension.as_str() {
+        "security" => Dimension::Security,
+        "business-logic" => Dimension::BusinessLogic,
+        "quality" => Dimension::Quality,
+        other => {
+            check.error(
+                "dimension",
+                format!("非法值 {other:?}，允许 security|business-logic|quality"),
+            );
+            Dimension::Quality
+        }
+    };
+    let severity = match raw_rule.severity.as_str() {
+        "error" => Severity::Error,
+        "warning" => Severity::Warning,
+        "info" => Severity::Info,
+        other => {
+            check.error(
+                "severity",
+                format!("非法值 {other:?}，允许 error|warning|info"),
+            );
+            Severity::Info
+        }
+    };
+    let language = if raw_rule.language == "*" {
+        RuleLanguage::All
+    } else if let Some(lang) = crate::language::Language::from_rule_value(&raw_rule.language) {
+        RuleLanguage::One(lang)
+    } else {
+        check.error("language", format!("非法值 {:?}", raw_rule.language));
+        RuleLanguage::All
+    };
+    (dimension, severity, language)
+}
+
+/// 规则形态：pattern / text / metric / taint / inheritance 必须且只能提供其一，
+/// 并按形态约束 language。
+fn check_body(check: &mut RuleCheck<'_>, raw_rule: &RawRule, language: RuleLanguage) {
+    let body_kinds = [
+        raw_rule.pattern.is_some(),
+        raw_rule.text.is_some(),
+        raw_rule.metric.is_some(),
+        raw_rule.taint.is_some(),
+        raw_rule.inheritance.is_some(),
+    ]
+    .iter()
+    .filter(|b| **b)
+    .count();
+    if body_kinds != 1 {
+        check.error(
+            "pattern|text|metric|taint|inheritance",
+            "pattern / text / metric / taint / inheritance 必须且只能提供其一".into(),
+        );
+    }
+    if raw_rule.pattern.is_some() && language == RuleLanguage::All {
+        check.error("language", "AST 规则不允许 `*`，必须指定具体语言".into());
+    }
+    if raw_rule.text.is_some() && raw_rule.language != "*" {
+        check.error("language", "文本规则 language 必须为 `*`".into());
+    }
+    if raw_rule.text_exclude.is_some() && raw_rule.text.is_none() {
+        check.error("text_exclude", "text_exclude 仅适用于 text 规则".into());
+    }
+    if raw_rule.metric.is_some() && raw_rule.language != "*" {
+        check.error("language", "度量规则 language 必须为 `*`".into());
+    }
+}
+
+/// 污点规则：须指定具体语言，source 与 sink 至少各一个。
+fn check_taint(check: &mut RuleCheck<'_>, raw_rule: &RawRule, language: RuleLanguage) {
+    let Some(taint) = &raw_rule.taint else {
+        return;
+    };
+    if language == RuleLanguage::All {
+        check.error("language", "污点规则不允许 `*`，必须指定具体语言".into());
+    }
+    if taint.sources.is_empty() {
+        check.error("taint.sources", "污点规则至少需要一个 source".into());
+    }
+    if taint.sinks.is_empty() {
+        check.error("taint.sinks", "污点规则至少需要一个 sink".into());
+    }
+}
+
+/// 继承规则：仅支持 java；target 与方法名必填且方法名非空。
+fn check_inheritance(check: &mut RuleCheck<'_>, raw_rule: &RawRule, language: RuleLanguage) {
+    let Some(inheritance) = &raw_rule.inheritance else {
+        return;
+    };
+    if language != RuleLanguage::One(crate::language::Language::Java) {
+        check.error("language", "继承规则当前仅支持 java".into());
+    }
+    if inheritance.target.trim().is_empty() {
+        check.error("inheritance.target", "必须提供 target 类型".into());
+    }
+    if inheritance.methods.is_empty() {
+        check.error("inheritance.methods", "至少需要一个方法名".into());
+    }
+    if inheritance
+        .methods
+        .iter()
+        .any(|method| method.trim().is_empty())
+    {
+        check.error("inheritance.methods", "方法名不能为空".into());
+    }
+}
+
+/// 非 pattern 规则不得使用 filters / metavariables；imports / imported_symbols
+/// 仅适用于 pattern 或 taint 规则。
+fn check_pattern_extras(check: &mut RuleCheck<'_>, raw_rule: &RawRule) {
+    if raw_rule.pattern.is_some() {
+        return;
+    }
+    if !raw_rule.filters.is_empty() {
+        check.error("filters", "filters 仅适用于 pattern 规则".into());
+    }
+    if !raw_rule.metavariables.is_empty() {
+        check.error("metavariables", "metavariables 仅适用于 pattern 规则".into());
+    }
+    if !raw_rule.imports.is_empty() && raw_rule.taint.is_none() {
+        check.error("imports", "imports 仅适用于 pattern 或 taint 规则".into());
+    }
+    if !raw_rule.imported_symbols.is_empty() && raw_rule.taint.is_none() {
+        check.error(
+            "imported_symbols",
+            "imported_symbols 仅适用于 pattern 或 taint 规则".into(),
+        );
+    }
+}
+
+/// options 仅适用于 metric 规则，且每项必须是可表示的数字；返回解析后的选项。
+fn check_options(check: &mut RuleCheck<'_>, raw_rule: &RawRule) -> Vec<(String, f64)> {
+    if raw_rule.metric.is_none() && !raw_rule.options.is_empty() {
+        check.error("options", "options 仅适用于 metric 规则".into());
+    }
+    let mut options = Vec::new();
+    for (key, value) in &raw_rule.options {
+        match value {
+            serde_yaml::Value::Number(number) => match number.as_f64() {
+                Some(number) => options.push((key.clone(), number)),
+                None => check.error("options", format!("option {key} 不是可表示的数值")),
+            },
+            _ => check.error("options", format!("option {key} 必须是数字")),
+        }
+    }
+    options
+}
+
+/// 路径排除仅适用于 pattern / text 规则（metric / taint / inheritance 无路径命中）。
+fn check_exclude_paths(check: &mut RuleCheck<'_>, raw_rule: &RawRule) {
+    if !raw_rule.exclude_paths.is_empty()
+        && raw_rule.pattern.is_none()
+        && raw_rule.text.is_none()
+    {
+        check.error(
+            "exclude_paths",
+            "exclude_paths 仅适用于 pattern/text 规则".into(),
+        );
+    }
+}
+
+/// filters → (not 模式, inside 模式)。
+fn collect_filters(check: &mut RuleCheck<'_>, raw_rule: &RawRule) -> (Vec<String>, Vec<String>) {
+    let mut filters_not = Vec::new();
+    let mut filters_inside = Vec::new();
+    for filter in &raw_rule.filters {
+        if filter.not.is_none() && filter.inside.is_none() {
+            check.error("filters", "filters 条目必须提供 not 或 inside".into());
+        }
+        if let Some(not) = &filter.not {
+            filters_not.push(not.pattern.clone());
+        }
+        if let Some(inside) = &filter.inside {
+            filters_inside.push(inside.pattern.clone());
+        }
+    }
+    (filters_not, filters_inside)
 }
 
 /// 逐条解析规则集：单条规则的 YAML/字段错误不会拖垮整份文件。

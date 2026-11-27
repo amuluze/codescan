@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file. The format is b
 
 
 
+## [1.6.2] - 2026-11-27
+
+### Changed
+
+- Rule page: the rule table, pack management and read-only rule detail now live in `views/RulesView.parts.tsx` as view-private blocks (the editor stays a `components/` dialog); `useRulePacks` owns pack state and actions.
+
+### Fixed
+
+- Self-scan remediation: file reads carry explicit upper bounds (`codescan_engine::fsutil`); no `unwrap`/`expect`/`unreachable!` on reachable paths in the desktop command layer, scan manager, store, LLM retry loop, parser and CLI. Lock poisoning is recovered instead of panicking, a panicking scan thread releases the "scan in progress" registration, schema migrations surface real errors, and legacy Provider profile/key migration plus profile deletion run in a single transaction (a failed key copy no longer deletes the old key).
+- `export_sarif` takes a directory and derives `codescan-<scan_id>.sarif.json` in Rust, matching `export_report`'s path boundary.
+- Metric clean-up: split the guarded/flow/constant walkers, per-language import extraction, rule-set validation, and the remaining large views into smaller units without changing scan output (`rule_suite` and integration fixtures unchanged).
+- `.codescanignore` now skips `crates/engine/tests/fixtures/`: rule fixtures are deliberate hits verified by `rule_suite`, not repository findings.
+
 ## [1.6.1] - 2026-11-27
 
 ### Added
