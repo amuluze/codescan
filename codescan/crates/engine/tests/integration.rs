@@ -232,6 +232,29 @@ fn a7_language_matrix() {
 }
 
 #[test]
+fn rust_rule_exclude_paths_skips_top_level_tests() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(
+        dir.path(),
+        "src/read.rs",
+        "fn read(path: &str) -> std::io::Result<String> { std::fs::read_to_string(path) }\n",
+    );
+    write_file(
+        dir.path(),
+        "tests/read.rs",
+        "fn read(path: &str) -> std::io::Result<String> { std::fs::read_to_string(path) }\n",
+    );
+    let report = scan_root(dir.path());
+    let reads: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|finding| finding.rule_id == "rust/fs-read-unbounded")
+        .collect();
+    assert_eq!(reads.len(), 1, "{reads:?}");
+    assert_eq!(reads[0].path, "src/read.rs");
+}
+
+#[test]
 fn a9_performance_1000_files() {
     let dir = tempfile::tempdir().unwrap();
     for i in 0..1000 {

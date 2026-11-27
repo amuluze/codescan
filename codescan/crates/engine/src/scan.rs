@@ -256,7 +256,7 @@ impl Engine {
         progress(Progress::Finalizing);
         let mut findings: Vec<Finding> = Vec::new();
         let mut events: Vec<ScanEvent> = Vec::new();
-        let mut corpus: Vec<(String, Vec<(String, usize)>)> = Vec::new();
+        let mut corpus: Vec<crate::metrics::CorpusFile> = Vec::new();
         let mut taint_facts: std::collections::HashMap<
             String,
             Vec<crate::taint::FileFacts>,
@@ -270,12 +270,17 @@ impl Engine {
                     mut file_findings,
                     mut file_events,
                     normalized_lines,
+                    test_ranges,
                     taint_facts: file_taint,
                     type_facts: file_types,
                 } => {
                     scanned += 1;
                     if let Some(lines) = normalized_lines {
-                        corpus.push((rel.clone(), lines));
+                        corpus.push(crate::metrics::CorpusFile {
+                            path: rel.clone(),
+                            lines,
+                            test_ranges,
+                        });
                     }
                     findings.append(&mut file_findings);
                     events.append(&mut file_events);
@@ -389,12 +394,16 @@ impl Engine {
             let source = String::from_utf8_lossy(&bytes).into_owned();
             let mut findings = Vec::new();
             for rule in &self.text_rules {
+                if path_excluded(&rule.exclude_paths, rel) {
+                    continue;
+                }
                 findings.extend(run_text_rule(rule, &source, rel, false));
             }
             return FileOutcome::Scanned {
                 file_findings: findings,
                 file_events: Vec::new(),
                 normalized_lines: None,
+                test_ranges: Vec::new(),
                 taint_facts: Vec::new(),
                 type_facts: None,
             };
@@ -453,10 +462,16 @@ impl Engine {
                 if l != lang {
                     continue;
                 }
+                if path_excluded(&rule.exclude_paths, rel) {
+                    continue;
+                }
                 findings.extend(run_ast_rule(rule, &ast_context));
             }
         }
         for rule in &self.text_rules {
+            if path_excluded(&rule.exclude_paths, rel) {
+                continue;
+            }
             findings.extend(run_text_rule(rule, source, rel, degraded));
         }
         let mut taint_facts: Vec<(String, crate::taint::FileFacts)> = Vec::new();
@@ -474,13 +489,15 @@ impl Engine {
                 ));
             }
         }
-        findings.extend(metrics::file_metrics(
+        let test_ranges = test_code_ranges(lang, tree, rel, source);
+        findings.extend(metrics::file_metrics_with_tests(
             lang,
             tree,
             source,
             rel,
             degraded,
             &self.metric_rules,
+            &test_ranges,
         ));
 
         // 重复块语料输入：非空、非纯注释的规范化行（注释不算重复代码）。
@@ -504,6 +521,7 @@ impl Engine {
             file_findings: findings,
             file_events: events,
             normalized_lines: Some(normalized_lines),
+            test_ranges,
             taint_facts,
             type_facts,
         }
@@ -575,6 +593,7 @@ enum FileOutcome {
         file_findings: Vec<Finding>,
         file_events: Vec<ScanEvent>,
         normalized_lines: Option<Vec<(String, usize)>>,
+        test_ranges: Vec<(usize, usize)>,
         taint_facts: Vec<(String, crate::taint::FileFacts)>,
         type_facts: Option<Box<crate::types::TypeFacts>>,
     },
@@ -1149,6 +1168,51 @@ fn match_range(m: &tree_sitter::QueryMatch<'_, '_>) -> Option<(usize, usize)> {
     }
 }
 
+fn test_code_ranges(
+    lang: Language,
+    tree: &tree_sitter::Tree,
+    rel: &str,
+    source: &str,
+) -> Vec<(usize, usize)> {
+    let line_count = source.lines().count().max(1);
+    if is_test_path(rel) {
+        return vec![(1, line_count)];
+    }
+    if lang != Language::Rust {
+        return Vec::new();
+    }
+    let mut ranges = Vec::new();
+    crate::metrics::walk_all_pub(tree.root_node(), &mut |node| {
+        if node.kind() != "mod_item" {
+            return;
+        }
+        let is_tests = node
+            .child_by_field_name("name")
+            .and_then(|name| source.get(name.start_byte()..name.end_byte()))
+            .is_some_and(|name| name == "tests");
+        if is_tests {
+            ranges.push((
+                node.start_position().row + 1,
+                node.end_position().row + 1,
+            ));
+        }
+    });
+    ranges
+}
+
+fn is_test_path(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    name.contains(".test.")
+        || name.contains(".spec.")
+        || name.starts_with("test_")
+        || name.ends_with("_test.rs")
+        || rel.rsplit('/').nth(1) == Some("tests")
+}
+
+fn path_excluded(exclude_paths: &[regex::Regex], path: &str) -> bool {
+    exclude_paths.iter().any(|pattern| pattern.is_match(path))
+}
+
 fn run_text_rule(rule: &TextRule, source: &str, path: &str, degraded: bool) -> Vec<Finding> {
     let line_starts: Vec<usize> = std::iter::once(0usize)
         .chain(
@@ -1168,6 +1232,13 @@ fn run_text_rule(rule: &TextRule, source: &str, path: &str, degraded: bool) -> V
 
     let mut findings = Vec::new();
     for m in rule.regex.find_iter(source) {
+        if rule
+            .exclude
+            .as_ref()
+            .is_some_and(|exclude| exclude.is_match(m.as_str()))
+        {
+            continue;
+        }
         let (start_line, start_col) = locate(m.start());
         let (end_line, end_col) = locate(m.end());
         findings.push(Finding {

@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file. The format is b
 
 
 
+## [1.6.1] - 2026-11-27
+
+### Added
+
+- Custom-rule creation now opens a rule editor dialog and appends a single rule through `save_custom_rule`, preserving existing custom rules; editing an existing custom rule still saves the full `custom.yaml`.
+- Text rules support optional `text_exclude` regexes; `text/http-url` ignores XML/SVG namespaces, Apple plist DTDs, MPL license URLs, and local IPC URLs.
+
+### Fixed
+
+- `metric/unreachable-code` now ignores `line_comment`/`block_comment` nodes and does not treat `panic!`/`unreachable!()` nested inside loops or match arms as terminating the enclosing statement.
+- `rust/fs-read-unbounded` now skips reads in functions that already gate on `metadata.len()`, and Rust heuristic rules skip `mod tests` code.
+- Pattern/text rules support `exclude_paths`; Rust heuristics skip top-level `tests/*.rs` and `text/todo-debt` skips docs/specs/rule definitions.
+- `metric/duplicate-block` supports `skip_tests`; test files and Rust `mod tests` no longer dominate duplicate-code findings.
+- All file-level metrics support `skip_tests`; built-in complexity/length/nesting/unreachable metrics skip test files and Rust `mod tests` by default.
+- Split the rules table and rule-pack management out of `RulesView`; the view function is no longer flagged as overlong.
+
 ## [1.6.0] - 2026-11-27
 
 ### Added

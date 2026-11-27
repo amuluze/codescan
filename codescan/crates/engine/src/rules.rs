@@ -15,6 +15,8 @@ pub struct RuleSpec {
     pub message: String,
     pub pattern: Option<String>,
     pub text: Option<String>,
+    /// 文本规则命中文本的排除正则（如 XML 命名空间 URL）。
+    pub text_exclude: Option<String>,
     pub metric: Option<String>,
     pub taint: Option<TaintSpec>,
     pub inheritance: Option<InheritanceSpec>,
@@ -30,6 +32,8 @@ pub struct RuleSpec {
     pub no_shadow: bool,
     /// Java：接收者名必须匹配同类中的 ObjectInputStream 字段。
     pub field_receiver: bool,
+    /// 路径排除正则（应用于 pattern/text 规则）：命中路径的规则不执行。
+    pub exclude_paths: Vec<String>,
 }
 
 /// 污点端点声明（Domain §4a）：source/sink 必填，sanitizer 可选，均为该语言 query。
@@ -83,6 +87,8 @@ struct RawRule {
     #[serde(default)]
     text: Option<String>,
     #[serde(default)]
+    text_exclude: Option<String>,
+    #[serde(default)]
     metric: Option<String>,
     #[serde(default)]
     taint: Option<RawTaint>,
@@ -102,6 +108,8 @@ struct RawRule {
     no_shadow: bool,
     #[serde(default)]
     field_receiver: bool,
+    #[serde(default)]
+    exclude_paths: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -242,6 +250,9 @@ pub fn parse_rule_set(yaml: &str) -> Result<Vec<RuleSpec>, Vec<RuleError>> {
         if raw_rule.text.is_some() && raw_rule.language != "*" {
             push_error("language", "文本规则 language 必须为 `*`".into());
         }
+        if raw_rule.text_exclude.is_some() && raw_rule.text.is_none() {
+            push_error("text_exclude", "text_exclude 仅适用于 text 规则".into());
+        }
         if raw_rule.metric.is_some() && raw_rule.language != "*" {
             push_error("language", "度量规则 language 必须为 `*`".into());
         }
@@ -291,6 +302,12 @@ pub fn parse_rule_set(yaml: &str) -> Result<Vec<RuleSpec>, Vec<RuleError>> {
         if raw_rule.metric.is_none() && !raw_rule.options.is_empty() {
             push_error("options", "options 仅适用于 metric 规则".into());
         }
+        if !raw_rule.exclude_paths.is_empty()
+            && raw_rule.pattern.is_none()
+            && raw_rule.text.is_none()
+        {
+            push_error("exclude_paths", "exclude_paths 仅适用于 pattern/text 规则".into());
+        }
 
         let mut filters_not = Vec::new();
         let mut filters_inside = Vec::new();
@@ -325,6 +342,7 @@ pub fn parse_rule_set(yaml: &str) -> Result<Vec<RuleSpec>, Vec<RuleError>> {
             message: raw_rule.message,
             pattern: raw_rule.pattern,
             text: raw_rule.text,
+            text_exclude: raw_rule.text_exclude,
             metric: raw_rule.metric,
             taint: raw_rule.taint.map(|t| TaintSpec {
                 sources: t.sources,
@@ -349,6 +367,7 @@ pub fn parse_rule_set(yaml: &str) -> Result<Vec<RuleSpec>, Vec<RuleError>> {
             imported_symbols: raw_rule.imported_symbols,
             no_shadow: raw_rule.no_shadow,
             field_receiver: raw_rule.field_receiver,
+            exclude_paths: raw_rule.exclude_paths,
         });
     }
 

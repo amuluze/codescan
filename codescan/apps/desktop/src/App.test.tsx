@@ -507,10 +507,36 @@ describe("App 主链路", () => {
         expect.objectContaining({ yaml: expect.stringContaining("custom/eval") }),
       );
     });
+    await screen.findByText("自定义规则已保存");
 
     await user.click(screen.getByRole("button", { name: "运行测试" }));
     const hits = await screen.findByTestId("rule-test-hits");
     expect(hits.textContent).toContain("custom/eval");
+  });
+
+  it("新建自定义规则使用弹窗并追加保存", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "规则" }));
+    await user.click(screen.getByRole("button", { name: "新建自定义规则" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "新建自定义规则" });
+    const textarea = within(dialog).getByLabelText("自定义规则 YAML");
+    expect((textarea as HTMLTextAreaElement).value).toContain("custom/my-rule");
+    expect(within(dialog).getByText(/追加到 custom\.yaml/)).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("save_custom_rule", {
+        yaml: expect.stringContaining("custom/my-rule"),
+      });
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(invokeMock).not.toHaveBeenCalledWith(
+      "save_custom_rules",
+      expect.objectContaining({ yaml: expect.stringContaining("custom/my-rule") }),
+    );
   });
 
   it("点击选择工作区必定打开选择器；列表失败时在模态内呈现错误", async () => {

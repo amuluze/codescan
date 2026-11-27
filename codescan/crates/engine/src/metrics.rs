@@ -289,6 +289,19 @@ pub fn file_metrics(
     degraded: bool,
     metric_rules: &[MetricRule],
 ) -> Vec<Finding> {
+    file_metrics_with_tests(lang, tree, source, path, degraded, metric_rules, &[])
+}
+
+/// 带测试代码行区间的文件级度量；`skip_tests` 规则跳过测试函数/块。
+pub fn file_metrics_with_tests(
+    lang: Language,
+    tree: &tree_sitter::Tree,
+    source: &str,
+    path: &str,
+    degraded: bool,
+    metric_rules: &[MetricRule],
+    test_ranges: &[(usize, usize)],
+) -> Vec<Finding> {
     let mut findings = Vec::new();
     let root = tree.root_node();
     let prof = profile(lang);
@@ -324,6 +337,11 @@ pub fn file_metrics(
             let text = node_text(func, source).to_string();
 
             for rule in &function_rules {
+                if option(&rule.options, "skip_tests", 0.0) > 0.0
+                    && span_in_ranges(&span, test_ranges)
+                {
+                    continue;
+                }
                 match rule.kind {
                     MetricKind::FunctionLength => {
                         let threshold = option(&rule.options, "threshold", 80.0);
@@ -384,7 +402,15 @@ pub fn file_metrics(
         .iter()
         .filter(|rule| rule.kind == MetricKind::UnreachableCode)
     {
-        findings.extend(unreachable_findings(rule, lang, root, source, path, degraded, &prof));
+        findings.extend(unreachable_findings(
+            rule,
+            lang,
+            root,
+            source,
+            path,
+            degraded,
+            test_ranges,
+        ));
     }
 
     findings
@@ -454,34 +480,27 @@ fn is_terminal_statement(node: Node<'_>, prof: &Profile, source: &str, lang: Lan
         }
     }
     match lang {
-        // Go: panic 调用的表达式语句视为终止。
+        // Go: 只有表达式语句本身是 panic(...) 才终止；嵌套在 if/for 内不算。
         Language::Go if node.kind() == "expression_statement" => {
-            let mut is_panic = false;
-            walk_all(node, &mut |n| {
-                if n.kind() == "call_expression" {
-                    if let Some(fname) = n.child_by_field_name("function") {
-                        if node_text(fname, source) == "panic" {
-                            is_panic = true;
-                        }
-                    }
-                }
-            });
-            is_panic
+            node.named_child(0).is_some_and(|inner| {
+                inner.kind() == "call_expression"
+                    && inner
+                        .child_by_field_name("function")
+                        .is_some_and(|function| node_text(function, source) == "panic")
+            })
         }
-        // Rust: panic!/unreachable!/todo!/unimplemented! 宏表达式语句视为终止。
+        // Rust: 只有表达式语句本身是 panic!/unreachable!/todo!/unimplemented! 才终止；
+        // 嵌套在 for/match/if 内不能把整个控制流语句标成不可达。
         Language::Rust if node.kind() == "expression_statement" => {
-            let mut is_panic = false;
-            walk_all(node, &mut |n| {
-                if n.kind() == "macro_invocation" {
-                    let text = node_text(n, source);
-                    let head = text.split('(').next().unwrap_or("");
-                    let bare = head.trim_end_matches('!').rsplit("::").next().unwrap_or(head);
-                    if matches!(bare, "panic" | "unreachable" | "todo" | "unimplemented") {
-                        is_panic = true;
-                    }
+            node.named_child(0).is_some_and(|inner| {
+                if inner.kind() != "macro_invocation" {
+                    return false;
                 }
-            });
-            is_panic
+                let text = node_text(inner, source);
+                let head = text.split('(').next().unwrap_or("");
+                let bare = head.trim_end_matches('!').rsplit("::").next().unwrap_or(head);
+                matches!(bare, "panic" | "unreachable" | "todo" | "unimplemented")
+            })
         }
         _ => false,
     }
@@ -494,8 +513,9 @@ fn unreachable_findings(
     source: &str,
     path: &str,
     degraded: bool,
-    prof: &Profile,
+    test_ranges: &[(usize, usize)],
 ) -> Vec<Finding> {
+    let prof = profile(lang);
     let mut findings = Vec::new();
     let mut blocks = Vec::new();
     walk_all(root, &mut |node| {
@@ -504,6 +524,11 @@ fn unreachable_findings(
         }
     });
     for block in blocks {
+        if option(&rule.options, "skip_tests", 0.0) > 0.0
+            && span_in_ranges(&span_of(block), test_ranges)
+        {
+            continue;
+        }
         let mut children = named_children(block);
         // tree-sitter-go 0.25 wraps block statements in a single statement_list.
         // Flatten it so terminal statements and their successors stay in lexical order.
@@ -513,7 +538,7 @@ fn unreachable_findings(
         let mut terminal_seen = false;
         for child in children {
             // 注释是 extra 节点，不占语句序位（否则「return 后注释」会顶替首个不可达语句）。
-            if child.kind() == "comment" {
+            if matches!(child.kind(), "comment" | "line_comment" | "block_comment") {
                 continue;
             }
             let stmt = match prof.statement_wrapper {
@@ -538,7 +563,7 @@ fn unreachable_findings(
                 ));
                 break; // 每个块只报第一条不可达区域
             }
-            if is_terminal_statement(stmt, prof, source, lang) {
+            if is_terminal_statement(stmt, &prof, source, lang) {
                 terminal_seen = true;
             }
         }
@@ -546,12 +571,35 @@ fn unreachable_findings(
     findings
 }
 
+fn span_in_ranges(span: &Span, ranges: &[(usize, usize)]) -> bool {
+    ranges.iter().any(|(start, end)| {
+        span.start.line >= *start && span.end.line <= *end
+    })
+}
+
+fn window_in_test(
+    ranges: &[(usize, usize)],
+    lines: &[(String, usize)],
+    start: usize,
+    window: usize,
+) -> bool {
+    let start_line = lines[start].1;
+    let end_line = lines[start + window - 1].1;
+    ranges
+        .iter()
+        .any(|(range_start, range_end)| start_line >= *range_start && end_line <= *range_end)
+}
+
+/// 重复块语料：路径、规范化行与测试代码行区间（1-based，含端点）。
+pub struct CorpusFile {
+    pub path: String,
+    pub lines: Vec<(String, usize)>,
+    pub test_ranges: Vec<(usize, usize)>,
+}
+
 /// 跨文件重复块（语料级）。每处副本各发一条发现（Domain §1 多位置度量）。
 /// 只有启用（已编译）的 `duplicate-block` 规则参与；规则禁用时不执行任何默认检测。
-pub fn duplicate_blocks(
-    corpus: &[(String, Vec<(String, usize)>)], // (path, [(normalized_line, original_line)])
-    metric_rules: &[MetricRule],
-) -> Vec<Finding> {
+pub fn duplicate_blocks(corpus: &[CorpusFile], metric_rules: &[MetricRule]) -> Vec<Finding> {
     let mut findings = Vec::new();
     for rule in metric_rules
         .iter()
@@ -562,23 +610,25 @@ pub fn duplicate_blocks(
     findings
 }
 
-fn duplicate_blocks_for_rule(
-    corpus: &[(String, Vec<(String, usize)>)],
-    rule: &MetricRule,
-) -> Vec<Finding> {
+fn duplicate_blocks_for_rule(corpus: &[CorpusFile], rule: &MetricRule) -> Vec<Finding> {
     let window = option(&rule.options, "window", 10.0) as usize;
     let min_occurrences = option(&rule.options, "min_occurrences", 2.0) as usize;
+    let skip_tests = option(&rule.options, "skip_tests", 0.0) > 0.0;
     if window == 0 {
         return Vec::new();
     }
 
     // 窗口内容哈希 → 出现位置列表；SHA-256 避免短哈希碰撞合并无关块。
     let mut groups: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
-    for (file_idx, (_, lines)) in corpus.iter().enumerate() {
+    for (file_idx, file) in corpus.iter().enumerate() {
+        let lines = &file.lines;
         if lines.len() < window {
             continue;
         }
         for seq_idx in 0..=(lines.len() - window) {
+            if skip_tests && window_in_test(&file.test_ranges, lines, seq_idx, window) {
+                continue;
+            }
             let signature = lines[seq_idx..seq_idx + window]
                 .iter()
                 .map(|(text, _)| text.as_str())
@@ -617,7 +667,9 @@ fn duplicate_blocks_for_rule(
     }
 
     let mut findings = Vec::new();
-    for (file_idx, (path, lines)) in corpus.iter().enumerate() {
+    for (file_idx, file) in corpus.iter().enumerate() {
+        let path = &file.path;
+        let lines = &file.lines;
         let Some(mut intervals) = per_file_intervals.remove(&file_idx) else {
             continue;
         };
@@ -678,6 +730,7 @@ mod tests {
                 message: String::new(),
                 pattern: None,
                 text: None,
+                text_exclude: None,
                 metric: Some("test".into()),
                 taint: None,
                 inheritance: None,
@@ -692,6 +745,7 @@ mod tests {
                 imported_symbols: Vec::new(),
                 no_shadow: false,
                 field_receiver: false,
+                exclude_paths: Vec::new(),
             },
             kind,
             options: options

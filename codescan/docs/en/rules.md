@@ -64,14 +64,15 @@ Key points:
 - `imports` is allowed on `pattern` and `taint` rules to gate endpoints by file imports; `imported_symbols` is pattern-only. `text` and `metric` rules cannot declare them.
 - `no_shadow: true` drops a pattern-rule match when the file defines a same-named local that is not initialized by `require(...)`; use it to avoid treating a local function/variable as an imported symbol.
 - Java `field_receiver: true` requires an `obj` capture; the match is kept only when that name is an `ObjectInputStream` field of the enclosing class. This keeps field-receiver rules from confusing method parameters or locals with fields.
+- `exclude_paths` is an optional list of path regexes for pattern/text rules, matched against the workspace-relative path; the rule is skipped for files matching any path. Built-in Rust heuristics use it to skip top-level `tests/*.rs`, and `text/todo-debt` uses it to skip docs, task specs, and rule definitions.
 
 ### Text rules (regex)
 
-`language: "*"`, with `text:` in Rust `regex` syntax. **Lookahead/lookbehind are not supported** (the biggest difference from PCRE) — rewrite using character classes and anchors. Text rules scan every non-binary text file, including comments, strings, hidden files (such as `.env` and `.config/`), and unknown extensions; `.git` is always excluded. AST/taint/metric rules only run on recognized languages.
+`language: "*"`, with `text:` in Rust `regex` syntax. **Lookahead/lookbehind are not supported** (the biggest difference from PCRE) — rewrite using character classes and anchors. Optional `text_exclude:` is an exclusion regex in the same syntax: a match is not reported when the matched text matches it (for example XML namespaces and local IPC URLs). Text rules scan every non-binary text file, including comments, strings, hidden files (such as `.env` and `.config/`), and unknown extensions; `.git` is always excluded. AST/taint/metric rules only run on recognized languages.
 
 ### Metrics (built-in; do not redeclare in language files)
 
-`metric/cyclomatic-complexity` (threshold 25), `metric/function-length` (200 lines), `metric/nesting-depth` (5), `metric/duplicate-block` (window of 12 lines, ≥2 occurrences), `metric/unreachable-code`. Thresholds are declared in `builtin.yaml` under `options`; custom rules may declare a metric rule of the same kind, and findings use that rule's id/severity/dimension/message.
+`metric/cyclomatic-complexity` (threshold 25), `metric/function-length` (200 lines), `metric/nesting-depth` (5), `metric/duplicate-block` (window of 12 lines, ≥2 occurrences), `metric/unreachable-code`. Thresholds are declared in `builtin.yaml` under `options`; custom rules may declare a metric rule of the same kind, and findings use that rule's id/severity/dimension/message. All file-level metrics and `metric/duplicate-block` support `options.skip_tests: 1`: test files (direct `tests/` files, `.test.`/`.spec.`, `test_*`) and Rust `mod tests` ranges are skipped; built-in metrics enable it by default.
 
 ## Rule packs (local MVP)
 

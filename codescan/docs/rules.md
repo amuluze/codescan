@@ -62,15 +62,16 @@ rules:
 - `imports` 可用于 `pattern` 与 `taint` 规则，用于按文件 import 限定端点；`imported_symbols` 仅用于 `pattern` 规则。`text`、`metric` 规则不能声明。
 - `no_shadow: true`：文件内存在同名非 `require(...)` 本地定义时丢弃该 pattern 规则命中；用于避免同名局部函数/变量被当作导入符号。
 - Java `field_receiver: true`：规则必须捕获名为 `obj` 的接收者；仅当该名称是匹配点所在类中 `ObjectInputStream` 字段时命中。用于字段接收者规则，避免把方法参数或局部变量误判为字段。
+- `exclude_paths`：pattern/text 规则可选的路径正则列表，对工作区相对路径匹配；命中任一路径正则时该规则不在此文件执行。内置 Rust 启发式规则用它跳过顶层 `tests/*.rs`，`text/todo-debt` 用它跳过文档/任务规格/规则定义。
 
 ### 文本规则（正则）
 
-`language: "*"`，`text:` 为 Rust `regex` 语法。**不支持 lookahead/lookbehind**（与 PCRE 差异最大处），请用字符类与锚点改写。对工作区全部非二进制文本文件逐文件扫描，含注释、字符串、隐藏文件（如 `.env`、`.config/`）与未知扩展名；`.git` 始终排除。AST/污点/度量只对已识别语言执行。
+`language: "*"`，`text:` 为 Rust `regex` 语法。**不支持 lookahead/lookbehind**（与 PCRE 差异最大处），请用字符类与锚点改写。可选 `text_exclude:` 为同语法的排除正则：命中文本匹配该正则时不报告（如 XML 命名空间与本地 IPC URL）。对工作区全部非二进制文本文件逐文件扫描，含注释、字符串、隐藏文件（如 `.env`、`.config/`）与未知扩展名；`.git` 始终排除。AST/污点/度量只对已识别语言执行。
 
 
 ### 度量（内置，勿在语言文件中重复声明）
 
-`metric/cyclomatic-complexity`（阈值 25）、`metric/function-length`（200 行）、`metric/nesting-depth`（5）、`metric/duplicate-block`（窗口 12 行、≥2 处）、`metric/unreachable-code`。阈值改动在 `builtin.yaml` 的 `options` 中进行；自定义规则可声明同 kind 的 metric 规则，发现的 id/severity/dimension/message 以该规则声明为准。
+`metric/cyclomatic-complexity`（阈值 25）、`metric/function-length`（200 行）、`metric/nesting-depth`（5）、`metric/duplicate-block`（窗口 12 行、≥2 处）、`metric/unreachable-code`。阈值改动在 `builtin.yaml` 的 `options` 中进行；自定义规则可声明同 kind 的 metric 规则，发现的 id/severity/dimension/message 以该规则声明为准。所有文件级度量与 `metric/duplicate-block` 均支持 `options.skip_tests: 1`：跳过测试文件（`tests/` 直属文件、`.test.`/`.spec.`、`test_*`）及 Rust `mod tests` 区间；内置度量默认开启。
 
 ## 规则包（本地 MVP）
 

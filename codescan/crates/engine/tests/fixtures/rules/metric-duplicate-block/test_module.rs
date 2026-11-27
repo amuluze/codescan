@@ -1,0 +1,38 @@
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn first() {
+        let a = 1;
+        let b = 2;
+        let c = 3;
+        let d = 4;
+        let e = 5;
+        let f = 6;
+        let g = 7;
+        let h = 8;
+        let i = 9;
+        let j = 10;
+        let k = 11;
+        let l = 12;
+        let m = 13;
+        assert_eq!(a + b + c + d + e + f + g + h + i + j + k + l + m, 91);
+    }
+
+    #[test]
+    fn second() {
+        let a = 1;
+        let b = 2;
+        let c = 3;
+        let d = 4;
+        let e = 5;
+        let f = 6;
+        let g = 7;
+        let h = 8;
+        let i = 9;
+        let j = 10;
+        let k = 11;
+        let l = 12;
+        let m = 13;
+        assert_eq!(a + b + c + d + e + f + g + h + i + j + k + l + m, 91);
+    }
+}
