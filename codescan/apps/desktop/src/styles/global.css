@@ -1408,6 +1408,27 @@ pre {
   margin-top: 4px;
 }
 
+.rule-editor-modal {
+  width: min(900px, 100%);
+  max-height: min(820px, 92vh);
+}
+
+.rule-editor-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-right: 2px;
+}
+
+.rule-editor-body .rule-editor {
+  flex: 1;
+  min-height: 280px;
+  resize: vertical;
+}
+
 /* 正在编辑的行：左侧强调条 + 底色，避免编辑器与表格行失去对应关系。 */
 .provider-table tbody tr.editing,
 .provider-table tbody tr.editing:hover {

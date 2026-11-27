@@ -17,11 +17,14 @@ pub struct AstRule {
     /// 允许以导入别名满足 metavariable 的原始符号名。
     pub imported_symbols: Vec<String>,
     pub no_shadow: bool,
+    pub exclude_paths: Vec<Regex>,
 }
 
 pub struct TextRule {
     pub spec: RuleSpec,
     pub regex: Regex,
+    pub exclude: Option<Regex>,
+    pub exclude_paths: Vec<Regex>,
 }
 
 /// 度量配置：kind 由 metrics.rs 解释，阈值来自 options。
@@ -76,6 +79,26 @@ fn query_has_match(query: &Query) -> bool {
     query.capture_names().contains(&"match")
 }
 
+fn compile_path_excludes(
+    spec: &RuleSpec,
+    errors: &mut Vec<RuleError>,
+) -> Vec<Regex> {
+    spec.exclude_paths
+        .iter()
+        .filter_map(|pattern| match Regex::new(pattern) {
+            Ok(regex) => Some(regex),
+            Err(error) => {
+                errors.push(RuleError {
+                    rule_id: spec.id.clone(),
+                    field: "exclude_paths".into(),
+                    message: error.to_string(),
+                });
+                None
+            }
+        })
+        .collect()
+}
+
 fn compile_metric(spec: &RuleSpec, metric: &str) -> Result<MetricRule, Vec<RuleError>> {
     let Some(kind) = MetricKind::parse(metric) else {
         return Err(vec![RuleError {
@@ -86,10 +109,10 @@ fn compile_metric(spec: &RuleSpec, metric: &str) -> Result<MetricRule, Vec<RuleE
     };
     let allowed: &[&str] = match kind {
         MetricKind::CyclomaticComplexity | MetricKind::FunctionLength | MetricKind::NestingDepth => {
-            &["threshold"]
+            &["threshold", "skip_tests"]
         }
-        MetricKind::DuplicateBlock => &["window", "min_occurrences"],
-        MetricKind::UnreachableCode => &[],
+        MetricKind::DuplicateBlock => &["window", "min_occurrences", "skip_tests"],
+        MetricKind::UnreachableCode => &["skip_tests"],
     };
     let mut errors = Vec::new();
     for (name, value) in &spec.options {
@@ -172,17 +195,40 @@ pub fn compile(specs: Vec<RuleSpec>) -> Result<Vec<CompiledRule>, Vec<RuleError>
                 Ok(rule) => compiled.push(CompiledRule::Ast(rule)),
                 Err(mut errs) => errors.append(&mut errs),
             },
-            (None, Some(text), None, None, None) => match Regex::new(text) {
-                Ok(regex) => compiled.push(CompiledRule::Text(TextRule {
-                    spec: clone_spec(&spec),
-                    regex,
-                })),
-                Err(e) => errors.push(RuleError {
+            (None, Some(text), None, None, None) => {
+                let regex = Regex::new(text).map_err(|e| RuleError {
                     rule_id: spec.id.clone(),
                     field: "text".into(),
                     message: e.to_string(),
-                }),
-            },
+                });
+                let exclude = spec
+                    .text_exclude
+                    .as_deref()
+                    .map(Regex::new)
+                    .transpose()
+                    .map_err(|e| RuleError {
+                        rule_id: spec.id.clone(),
+                        field: "text_exclude".into(),
+                        message: e.to_string(),
+                    });
+                let mut path_errors = Vec::new();
+                let exclude_paths = compile_path_excludes(&spec, &mut path_errors);
+                match (regex, exclude) {
+                    (Ok(regex), Ok(exclude)) => {
+                        if path_errors.is_empty() {
+                            compiled.push(CompiledRule::Text(TextRule {
+                                spec: clone_spec(&spec),
+                                regex,
+                                exclude,
+                                exclude_paths,
+                            }));
+                        } else {
+                            errors.append(&mut path_errors);
+                        }
+                    }
+                    (Err(error), _) | (_, Err(error)) => errors.push(error),
+                }
+            }
             (None, None, Some(metric), None, None) => match compile_metric(&spec, metric) {
                 Ok(rule) => compiled.push(CompiledRule::Metric(rule)),
                 Err(mut errs) => errors.append(&mut errs),
@@ -297,6 +343,7 @@ fn clone_spec(spec: &RuleSpec) -> RuleSpec {
         message: spec.message.clone(),
         pattern: None,
         text: None,
+        text_exclude: None,
         metric: None,
         taint: None,
         inheritance: None,
@@ -308,6 +355,7 @@ fn clone_spec(spec: &RuleSpec) -> RuleSpec {
         imported_symbols: Vec::new(),
         no_shadow: false,
         field_receiver: false,
+        exclude_paths: Vec::new(),
     }
 }
 
@@ -423,6 +471,7 @@ fn compile_ast(spec: &RuleSpec, pattern: &str) -> Result<AstRule, Vec<RuleError>
             imports,
             imported_symbols: spec.imported_symbols.clone(),
             no_shadow: spec.no_shadow,
+            exclude_paths: compile_path_excludes(spec, &mut errors),
         })
     } else {
         Err(errors)

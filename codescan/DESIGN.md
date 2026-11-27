@@ -186,7 +186,7 @@
 |---|---|---|---|
 | 扫描 | `ScanView` | 标题区 → 工作区路径行（选择工作区 + 历史快捷下拉）→ 扫描卡（状态 + 进度 + 统计网格）→ 扫描结果卡 → LLM 源码审查卡（参考：操作行含独立复核开关 + 模型切换下拉 + 审查统计网格 + 筛选 + 建议列表（复核徽标）） | 选择工作区、历史工作区快捷选择（去重、最新在前，最多 8 条）、启动/取消扫描、进度与统计、LLM 审查入口（自动分页、独立复核开关、按 Profile 切换模型、结果统计、筛选、导出） |
 | 发现 | `FindingsView` | 标题区 → 工具栏（筛选 / 搜索 / 计数 / 导出 / 批量分诊）→ 汇总条 → 左列表 ↔ 右详情 → 批量分诊卡（参考） | 发现浏览、筛选、证据与污点链详情、筛选结果导出（Markdown/JSON）、LLM 分诊 |
-| 规则 | `RulesView` | 加载态文案 → 自定义规则加载错误 → 规则表（启用 / id / 语言 / 维度 / 严重级 / 说明） | 内置与自定义规则目录、启停、编译错误展示 |
+| 规则 | `RulesView` | 加载态文案 → 自定义规则加载错误 → 规则表（启用 / id / 语言 / 维度 / 严重级 / 说明）→ 新建/编辑弹窗 | 内置与自定义规则目录、启停、编译错误展示；新建追加保存，编辑保存完整 custom.yaml |
 | 历史 | `HistoryView` | 扫描记录表（查看 / 设为基线 / 门禁差异 / 导出 SARIF / 删除）→ 门禁差异区 → 选中扫描的发现详情 | 扫描回溯、基线设置、门禁差异、SARIF 导出、删除 |
 | 设置 | `SettingsView` | 标题区 → 模型 Provider 卡（Profile 表格 + 新建/编辑弹窗（Profile 与 Key 同表单、校验、端点预览、未保存确认））→ LLM 审查内置 Skill 卡（文件表 + 覆写状态 + 编辑弹窗）→ 应用更新卡 → 安全边界说明卡 | 多 Provider Profile 配置（新建/编辑/删除/设为默认/按 Profile 测试连接；密钥只显示状态；弹窗统一保存 Profile 与 Key；编辑行高亮与忙碌态）、内置 Skill 查看/覆写/恢复默认、更新检查与安装、安全边界说明 |
 
@@ -195,6 +195,7 @@
 | 弹层 | 组件 | 结构 | 约束 |
 |---|---|---|---|
 | 目录选择器 | `DirectoryPicker` | 头部（标题 + 关闭）→ 路径输入 → 上级 / 子目录列表 → 底部（当前路径 + 取消 / 选择此目录） | `role="dialog"` + `aria-modal="true"` + `aria-label`；列表空态「此目录没有可进入的子目录」，读取中「读取目录…」，读取失败 `role="alert"` |
+| 自定义规则编辑 | `RuleEditorDialog` | 头部（新建 / 编辑标题 + 关闭）→ YAML 编辑器 → 校验 / 测试区 → 底部（取消 / 保存） | 新建只追加入口，不覆盖既有 custom.yaml；编辑保存完整 custom.yaml；未保存关闭需确认；错误 `role="alert"` |
 
 ### 4.1 全应用状态与边界态
 
@@ -270,7 +271,10 @@
 | `App` | `apps/desktop/src/App.tsx` | 窗口骨架与视图切换 |
 | `ScanView` | `views/ScanView.tsx` | 工作区选择、扫描控制、进度与统计、LLM 审查（按 Profile 切换模型）及其结果统计 |
 | `FindingsView` | `views/FindingsView.tsx` | 发现列表 / 详情 / 筛选 / 批量分诊 |
-| `RulesView` | `views/RulesView.tsx` | 规则目录与启停 |
+| `RulesView` | `views/RulesView.tsx` | 规则目录与启停；打开新建/编辑弹窗 |
+| `RuleEditorDialog` | `components/RuleEditorDialog.tsx` | 自定义规则 YAML 编辑、校验、测试；新建追加、编辑保存完整文件 |
+| `RuleTable` | `components/RuleTable.tsx` | 规则目录表：启用开关、元数据、只读来源与选择行 |
+| `RulePacksSection` | `components/RulePacksSection.tsx` | 规则包安装入口、签名状态与卸载 |
 | `HistoryView` | `views/HistoryView.tsx` | 扫描回溯、基线、门禁差异、SARIF 导出 |
 | `SettingsView` | `views/SettingsView.tsx` | 多 Provider Profile（列表 / 编辑 / 密钥 / 测试 / 默认切换）、更新、安全边界说明 |
 | `DirectoryPicker` | `components/DirectoryPicker.tsx` | 工作区路径选择：应用内 Modal（Rust 列目录 + 可编辑路径），替代系统原生目录对话框 |

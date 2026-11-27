@@ -33,7 +33,14 @@ rules:
         function: (field_expression
           field: (field_identifier) @name
           (#match? @name "^(unwrap|expect)$"))) @match
+    exclude_paths:
+      - '(^|/)tests/[^/]+\.rs$'
     filters:
+      - not:
+          pattern: |
+            (mod_item
+              name: (identifier) @name
+              (#eq? @name "tests")) @match
       - inside:
           pattern: |
             (function_item
@@ -57,6 +64,27 @@ rules:
         regex: '^(std::)?fs$'
     imported_symbols:
       - std::fs
+    exclude_paths:
+      - '(^|/)tests/[^/]+\.rs$'
+    filters:
+      # 同一函数内出现 metadata.len() 比较（如读取前的大小保护），不再重复报整读。
+      - not:
+          pattern: |
+            (function_item
+              body: (block
+                (expression_statement
+                  (if_expression
+                    condition: (binary_expression
+                      left: (call_expression
+                        function: (field_expression
+                          field: (field_identifier) @len
+                          (#eq? @len "len")))))))) @match
+      - not:
+          pattern: |
+            (mod_item
+              name: (identifier) @name
+              (#eq? @name "tests")) @match
+
 
   # transmute：含 turbofish（generic_function 包装）与普通两种调用形态。
   - id: rust/mem-transmute
@@ -110,7 +138,14 @@ rules:
       (macro_invocation
         macro: (identifier) @name
         (#match? @name "^(panic|unreachable|todo|unimplemented)$")) @match
+    exclude_paths:
+      - '(^|/)tests/[^/]+\.rs$'
     filters:
+      - not:
+          pattern: |
+            (mod_item
+              name: (identifier) @name
+              (#eq? @name "tests")) @match
       - not:
           pattern: |
             (function_item
@@ -196,6 +231,14 @@ rules:
         value: (macro_invocation
           macro: (identifier) @name
           (#match? @name "^(write|writeln)$"))) @match
+    exclude_paths:
+      - '(^|/)tests/[^/]+\.rs$'
+    filters:
+      - not:
+          pattern: |
+            (mod_item
+              name: (identifier) @name
+              (#eq? @name "tests")) @match
 
   # ---------- 污点（v2.2，过程内近似，Domain §4a） ----------
   - id: rust/taint-command-param
