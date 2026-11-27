@@ -28,9 +28,9 @@ All notable changes to this project are documented in this file. The format is b
 
 ### Fixed
 
-- Taint call/effect flow now skips unreachable branches, applies loop-condition guards, and ignores unmodelled switch effects; child_process bare calls skip local shadowing; readObject field receivers are name-bounded; Flask module aliases (`flask.request.args`) resolve as sources.
+- Taint call/effect flow now skips unreachable branches, applies loop/switch guards with case-value matching; child_process bare/member calls skip local shadowing; readObject field receivers are type-bound; Flask module aliases (`flask.request.args`) resolve as sources.
 
-- `java/read-object` now recognizes classes that hold an `ObjectInputStream` field, covering field-based cross-method reads in addition to parameters and locals.
+- `java/read-object-field` recognizes classes that hold an `ObjectInputStream` field, covering field-based cross-method reads in addition to `java/read-object` parameters and locals.
 
 - Go `tls-insecure-skip-verify` now resolves `crypto/tls` import aliases; `java/read-object` only reports inside methods that expose an `ObjectInputStream` parameter or local.
 
