@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file. The format is b
 
 
 
+## [1.6.3] - 2026-11-28
+
+### Changed
+
+- History page: gate diffs are bound to their source scan and render loading, missing-baseline, empty and new-finding states; historical rule-set summaries distinguish an unrecorded snapshot from explicitly empty rules/packs, and pack integrity shows an explicit unrecorded state.
+- History page: row actions surface IPC errors; scan findings remain visible when events or ruleset metadata fails; baseline state distinguishes unknown from explicitly unset; stale gate results are invalidated after successful baseline switches or history deletions.
+
+### Fixed
+
+- Baseline snapshots and the active baseline pointer now switch in one SQLite transaction, so a failed pointer update leaves no orphan snapshot and preserves the previous active baseline.
+
 ## [1.6.2] - 2026-11-27
 
 ### Changed

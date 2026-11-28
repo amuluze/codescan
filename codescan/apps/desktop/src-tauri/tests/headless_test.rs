@@ -5,6 +5,7 @@ use codescan_lib::manager::ScanManager;
 use codescan_lib::store::Store;
 use codescan_engine::model::{Dimension, Finding, Position, ScanReport, Severity, Span};
 use std::sync::{Arc, Mutex};
+use rusqlite::Connection;
 
 fn finding(rule: &str, path: &str, line: usize, fingerprint: &str) -> Finding {
     Finding {
@@ -186,6 +187,59 @@ fn delete_scan_cascades_findings_and_baseline() {
     assert!(store.current_baseline().unwrap().is_none(), "基线应随来源扫描删除");
     assert!(store.get_findings(scan_id).is_err());
     assert!(store.delete_scan(scan_id).is_err(), "重复删除应报错");
+}
+
+/// 基线快照插入与活动指针切换必须同事务：活动 upsert 失败时不得留下新快照。
+#[test]
+fn set_baseline_is_atomic_when_active_pointer_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let store = Store::open(&db_path).unwrap();
+    let scan_id = store
+        .insert_scan(
+            "/tmp/ws",
+            &report(vec![finding("r/a", "a.ts", 1, "fp-a")]),
+            1,
+            1,
+            "{}",
+        )
+        .unwrap();
+    let scan_id2 = store
+        .insert_scan(
+            "/tmp/ws",
+            &report(vec![finding("r/b", "b.ts", 1, "fp-b")]),
+            1,
+            2,
+            "{}",
+        )
+        .unwrap();
+
+    store.set_baseline(scan_id, 2).unwrap();
+    let blocker = Connection::open(&db_path).unwrap();
+    blocker
+        .execute_batch(
+            "CREATE TRIGGER reject_active_baseline_update
+             BEFORE UPDATE ON active_baseline
+             BEGIN
+               SELECT RAISE(ABORT, 'baseline switch blocked');
+             END;",
+        )
+        .unwrap();
+
+    let error = store.set_baseline(scan_id2, 3).unwrap_err();
+    assert!(
+        error.to_string().contains("baseline switch blocked"),
+        "应因活动指针更新失败而报错：{error}"
+    );
+
+    drop(blocker);
+    let checker = Connection::open(&db_path).unwrap();
+    let baseline_count: i64 = checker
+        .query_row("SELECT COUNT(*) FROM baselines", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(baseline_count, 1, "失败的基线切换不得留下新快照");
+    let baseline = store.current_baseline().unwrap().unwrap();
+    assert_eq!(baseline.entries, vec!["fp-a".to_string()]);
 }
 
 // ---------- v3：LLM 辅助层（Domain §3a） ----------

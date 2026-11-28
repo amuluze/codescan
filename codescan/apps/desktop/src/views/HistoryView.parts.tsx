@@ -2,6 +2,7 @@
  * 历史页的区段组件：扫描记录表、门禁差异、选中扫描的下钻面板。
  * 均为 props 驱动、无自有状态；页面骨架、删除确认态与 SARIF 导出见 HistoryView.tsx。
  */
+import type { GateState } from "../stores/historyStore";
 import type { ScanRuleset, ScanSummary } from "../platform";
 import type { Finding, ScanEvent } from "../types";
 import { formatScanEvent } from "../labels";
@@ -125,22 +126,32 @@ function HistoryScanRow({
   );
 }
 
-/** 门禁差异：不在基线内的新增发现。 */
-export function HistoryGateDiff({ gateNew }: { gateNew: Finding[] }) {
+/** 门禁差异：结果绑定扫描 id；无基线是可解释空态，不是错误。 */
+export function HistoryGateDiff({ gate }: { gate: GateState }) {
+  if (gate.status === "idle") return null;
   return (
     <div data-testid="gate-diff">
-      <h3>门禁差异（不在基线内）</h3>
-      {gateNew.length === 0 ? (
-        <p className="muted">无新增发现</p>
+      {gate.status === "loading" ? (
+        <h3>门禁差异 · 扫描 #{gate.scanId} 加载中…</h3>
       ) : (
-        <ul>
-          {gateNew.map((f) => (
-            <li key={f.fingerprint}>
-              {f.path}:{f.span.start.line} {f.rule_id}
-            </li>
-          ))}
-        </ul>
+        <h3>门禁差异（不在基线内） · 扫描 #{gate.scanId}</h3>
       )}
+      {gate.status === "loading" && <p className="muted">正在对比当前基线…</p>}
+      {gate.status === "no-baseline" && (
+        <p className="muted">未设置基线。先选择一次扫描并「设为基线」。</p>
+      )}
+      {gate.status === "ready" &&
+        (gate.findings.length === 0 ? (
+          <p className="muted">无新增发现</p>
+        ) : (
+          <ul>
+            {gate.findings.map((f) => (
+              <li key={f.fingerprint}>
+                {f.path}:{f.span.start.line} {f.rule_id}
+              </li>
+            ))}
+          </ul>
+        ))}
     </div>
   );
 }
@@ -150,36 +161,59 @@ type OpenScanProps = {
   findings: Finding[];
   events: ScanEvent[];
   ruleset: ScanRuleset | null;
+  warnings: string[];
   selectedFingerprint: string | null;
   onSelect: (fingerprint: string) => void;
 };
 
-/** 选中扫描的下钻面板：规则集与扫描事件（折叠）→ 发现列表 ↔ 详情。 */
+/** 选中扫描的下钻面板：元数据警告 → 规则集与扫描事件（折叠）→ 发现列表 ↔ 详情。 */
 export function HistoryScanFindings({
   scanId,
   findings,
   events,
   ruleset,
+  warnings,
   selectedFingerprint,
   onSelect,
 }: OpenScanProps) {
   const selected = findings.find((f) => f.fingerprint === selectedFingerprint);
+  const enabledRules = Array.isArray(ruleset?.enabled_rules)
+    ? ruleset.enabled_rules
+    : null;
+  const packs = Array.isArray(ruleset?.packs) ? ruleset.packs : null;
+  const hasRulesetSnapshot = enabledRules !== null || packs !== null;
   return (
     <div className="history-findings" data-testid="history-findings">
       <h3>
         扫描 #{scanId} 的发现（{findings.length} 条）
       </h3>
+      {warnings.length > 0 && (
+        <div data-testid="history-warnings" role="status" className="muted">
+          <ul>
+            {warnings.map((warning) => (
+              <li key={warning}>{warning}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       {ruleset && (
         <details data-testid="history-ruleset">
           <summary>
-            规则集（启用 {ruleset.enabled_rules?.length ?? 0} 条，规则包{" "}
-            {ruleset.packs?.length ?? 0} 个）
+            {hasRulesetSnapshot ? (
+              <>
+                规则集（启用 {enabledRules === null ? "未记录" : enabledRules.length}{" "}
+                条，规则包 {packs === null ? "未记录" : packs.length} 个）
+              </>
+            ) : (
+              "规则集快照未记录"
+            )}
           </summary>
           {ruleset.packs && ruleset.packs.length > 0 && (
             <ul>
               {ruleset.packs.map((pack) => (
                 <li key={`${pack.id}@${pack.version}`}>
                   {pack.id}@{pack.version}
+                  {pack.integrity ? ` · ${pack.integrity}` : " · integrity 未记录"}
                 </li>
               ))}
             </ul>

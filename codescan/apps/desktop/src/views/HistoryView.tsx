@@ -17,7 +17,8 @@ export function HistoryView() {
     openFindings,
     openEvents,
     openRuleset,
-    gateNew,
+    openWarnings,
+    gate,
     load,
     openScan,
     setBaseline,
@@ -30,6 +31,12 @@ export function HistoryView() {
   /** 待确认删除的扫描 id（二次确认，避免误删）。 */
   const [confirmingId, setConfirmingId] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+
+  /** 行操作统一走页面错误出口；store 内部保证过期响应不提交。 */
+  const runAction = (action: () => Promise<void>) => {
+    setError(null);
+    void action().catch((e) => setError(String(e)));
+  };
 
   const removeScan = async (scanId: number) => {
     setDeletingId(scanId);
@@ -76,9 +83,11 @@ export function HistoryView() {
         />
       )}
       <p data-testid="baseline-info" className="muted">
-        {baseline
-          ? `当前基线：${baseline.entries} 条（引擎 ${baseline.engine_version}）`
-          : "未设置基线"}
+        {baseline === undefined
+          ? "基线状态未知"
+          : baseline
+            ? `当前基线：${baseline.entries} 条（引擎 ${baseline.engine_version}）`
+            : "未设置基线"}
       </p>
       <HistoryScanTable
         scans={scans}
@@ -87,22 +96,23 @@ export function HistoryView() {
         deletingId={deletingId}
         onOpen={(scanId) => {
           setSelectedFingerprint(null);
-          void openScan(scanId);
+          runAction(() => openScan(scanId));
         }}
-        onSetBaseline={(scanId) => void setBaseline(scanId)}
-        onRefreshGate={(scanId) => void refreshGate(scanId)}
+        onSetBaseline={(scanId) => runAction(() => setBaseline(scanId))}
+        onRefreshGate={(scanId) => runAction(() => refreshGate(scanId))}
         onExportSarif={exportSarif}
         onAskDelete={setConfirmingId}
         onCancelDelete={() => setConfirmingId(null)}
         onConfirmDelete={removeScan}
       />
-      {gateNew && <HistoryGateDiff gateNew={gateNew} />}
+      <HistoryGateDiff gate={gate} />
       {openScanId && (
         <HistoryScanFindings
           scanId={openScanId}
           findings={openFindings}
           events={openEvents}
           ruleset={openRuleset}
+          warnings={openWarnings}
           selectedFingerprint={selectedFingerprint}
           onSelect={setSelectedFingerprint}
         />

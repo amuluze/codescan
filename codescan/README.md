@@ -42,7 +42,7 @@ CodeScan takes the deterministic path and makes it explicit:
 | Taint analysis | Intra-procedural approximation plus cross-file propagation for explicit imports (TS/JS, Python, Go same-package, Java class/static imports, Rust `use` paths), with points-to object sets and field sensitivity |
 | Baseline & gate | Freeze a scan as a baseline; gate on *new* findings only, by fingerprint equality |
 | SARIF 2.1.0 | One-to-one mapping with internal findings, including the `degraded` marker |
-| Desktop app | Scan, findings, rules, history, settings — local SQLite, local data root |
+| Desktop app | Scan, findings, rules, history, settings — local SQLite, local data root; history gate diffs are scan-scoped and explain a missing baseline |
 | CLI | `codescan scan` for local checks and CI gating, `codescan pack` (install/list/remove/sign/trust) for local rule packs, `codescan github-upload` for SARIF upload |
 | LLM assist (BYO key) | Triage, streaming triage, batch triage, workspace source review, candidate rule generation — advisory only |
 | Privacy | Scanning is read-only; no telemetry (the only outbound request is the GitHub Releases update check); API keys live in a Rust-owned secrets table |
