@@ -68,9 +68,10 @@ task-id: `codescan-history-actions-repair`
 
 ## 实施记录（2026-11-28）
 
-- 自动化证据：`pnpm exec vitest run src/App.test.tsx`（52/52 通过）、`cargo test -p codescan-desktop --test headless_test`（27/27 通过）、`pnpm exec tsc -b --pretty false` 通过、`cargo clippy -p codescan-desktop --all-targets -- -D warnings` 通过。
+- 自动化证据：`task check` 全量通过；其中 Vitest 52/52、Rust workspace 测试全绿、TypeScript 与 Clippy 干净。
 - 真实 Tauri 走查（隔离 `HOME` + 临时 SQLite fixture）：历史页显示扫描记录；无基线差异显示扫描归属空态；「查看」显示发现列表与规则包 `demo.pack@1.2.0 · sha256-demo`；「设为基线」更新为 2 条并作废旧差异；随后「门禁差异」显示 `扫描 #1 · 无新增发现`。精确逆序与 IPC 故障由 Vitest 覆盖。
-- 临时数据根、截图和点击辅助文件已清理；未提交 git。
+- 提交与发布：私有修复提交 `2c281211a1`、release 提交 `dc99b89b19`；公开同步 PR [amuLuze/codescan#52](https://github.com/amuLuze/codescan/pull/52) 合并为 `756b5973a4`，tag `v1.6.3` 的 Release workflow 通过并已发布 [v1.6.3](https://github.com/amuLuze/codescan/releases/tag/v1.6.3)，updater `latest.json` 指向 1.6.3。
+- 临时数据根、截图和点击辅助文件已清理。
 
 ## 关联
 
