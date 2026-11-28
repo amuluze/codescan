@@ -42,7 +42,7 @@ CodeScan 走确定性路线，并把这些边界写进代码：
 | 污点分析 | 同文件过程间近似 + 显式导入的跨文件传播（TS/JS、Python、Go 同包、Java 类/静态导入、Rust `use` 路径），含 points-to 对象集合与字段敏感 |
 | 基线与门禁 | 冻结一次扫描为基线，仅按指纹拦截**新增**发现 |
 | SARIF 2.1.0 | 与内部发现一一对应，携带 `degraded` 标记 |
-| 桌面应用 | 扫描 / 发现 / 规则 / 历史 / 设置，本地 SQLite 与本地数据根 |
+| 桌面应用 | 扫描 / 发现 / 规则 / 历史 / 设置，本地 SQLite 与本地数据根；历史门禁差异按扫描归属展示，并解释未设置基线状态 |
 | CLI | `codescan scan` 用于本地检查与 CI 门禁，`codescan pack`（install/list/remove/sign/trust）管理本地规则包，`codescan github-upload` 上传 SARIF |
 | LLM 辅助（自带 Key） | 分诊、流式分诊、批量分诊、工作区源码审查、候选规则生成——仅供参考 |
 | 隐私 | 扫描只读、无遥测（唯一出站请求是 GitHub Releases 更新检查）、密钥存于 Rust 独占的 secrets 表 |

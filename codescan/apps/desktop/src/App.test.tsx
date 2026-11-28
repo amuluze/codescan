@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
 import { updater } from "./platform";
 import { useLlmStore } from "./stores/llmStore";
+import { useHistoryStore } from "./stores/historyStore";
 import { useScanStore } from "./stores/scanStore";
 import { useUpdateStore } from "./stores/updateStore";
 import { UPDATE_CHECK_INTERVAL_MS } from "./useUpdateCheck";
@@ -184,6 +185,17 @@ beforeEach(() => {
     filter: { dimension: "all", severity: "all", query: "" },
     selected: null,
   });
+  useHistoryStore.setState({
+    scans: [],
+    baseline: undefined,
+    openScanId: null,
+    openFindings: [],
+    openEvents: [],
+    openRuleset: null,
+    openWarnings: [],
+    gate: { status: "idle" },
+    loading: false,
+  });
   useLlmStore.setState({
     providers: null,
     testing: false,
@@ -282,6 +294,10 @@ beforeEach(() => {
           packs: [],
         };
       case "delete_scan":
+        return null;
+      case "set_baseline":
+        return ((args?.scanId as number | undefined) ?? 0) + 100;
+      case "gate_diff":
         return null;
       case "list_directory": {
         const path = (args?.path as string | undefined) ?? "/tmp/ws";
@@ -1177,6 +1193,370 @@ describe("App 主链路", () => {
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith("delete_scan", { scanId: 7 }),
     );
+  });
+
+  function mockHistoryCommands(
+    overrides: Record<string, (args?: InvokeArgs) => unknown>,
+  ) {
+    const base = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (cmd: string, args?: InvokeArgs) => {
+      const override = overrides[cmd];
+      if (override) return override(args);
+      return base?.(cmd, args);
+    });
+  }
+
+  it("历史页门禁差异显示加载、无基线和归属扫描", async () => {
+    const gate = Promise.withResolvers<Finding[] | null>();
+    mockHistoryCommands({ gate_diff: () => gate.promise });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "历史" }));
+    await screen.findByTestId("history-table");
+    await user.click(screen.getByRole("button", { name: "门禁差异" }));
+
+    const loading = await screen.findByTestId("gate-diff");
+    expect(loading.textContent).toContain("扫描 #7");
+    expect(loading.textContent).toContain("加载中");
+
+    await act(async () => {
+      gate.resolve(null);
+    });
+    const noBaseline = await screen.findByTestId("gate-diff");
+    expect(noBaseline.textContent).toContain("未设置基线");
+    expect(noBaseline.textContent).toContain("扫描 #7");
+  });
+
+  it("历史页门禁差异区分无新增与新增列表", async () => {
+    let gateResponse: Finding[] = [];
+    const newFinding = finding({
+      rule_id: "new/rule",
+      path: "src/new.ts",
+      span: { start: { line: 9, column: 1 }, end: { line: 9, column: 8 } },
+      fingerprint: "fp-new",
+    });
+    mockHistoryCommands({
+      baseline_info: () => ({ engine_version: "0.2.0", entries: 2 }),
+      gate_diff: () => gateResponse,
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "历史" }));
+    await screen.findByTestId("history-table");
+
+    await user.click(screen.getByRole("button", { name: "门禁差异" }));
+    const empty = await screen.findByTestId("gate-diff");
+    expect(empty.textContent).toContain("扫描 #7");
+    expect(empty.textContent).toContain("无新增发现");
+
+    gateResponse = [newFinding];
+    await user.click(screen.getByRole("button", { name: "门禁差异" }));
+    const ready = await screen.findByTestId("gate-diff");
+    expect(ready.textContent).toContain("扫描 #7");
+    expect(ready.textContent).toContain("src/new.ts:9");
+    expect(ready.textContent).toContain("new/rule");
+  });
+
+  it("历史页连续查看按最后意图显示详情与自动差异", async () => {
+    const scan7 = Promise.withResolvers<Finding[]>();
+    const scan8 = Promise.withResolvers<Finding[]>();
+    mockHistoryCommands({
+      list_scans: () => [
+        { id: 7, root: "/tmp/ws-7", engine_version: "0.2.0", started_at_ms: 1, duration_ms: 1, findings: 1, files_scanned: 1 },
+        { id: 8, root: "/tmp/ws-8", engine_version: "0.2.0", started_at_ms: 2, duration_ms: 1, findings: 1, files_scanned: 1 },
+      ],
+      get_scan: (args) =>
+        (args?.scanId as number) === 8 ? scan8.promise : scan7.promise,
+      get_scan_events: (args) =>
+        (args?.scanId as number) === 8
+          ? [{ kind: "binary", path: "bin-8" }]
+          : [{ kind: "binary", path: "bin-7" }],
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "历史" }));
+    const views = screen.getAllByRole("button", { name: "查看" });
+    await user.click(views[0]);
+    await user.click(views[1]);
+
+    await act(async () => {
+      scan8.resolve([finding({ path: "src/eight.ts", fingerprint: "fp-8" })]);
+    });
+    const eight = await screen.findByTestId("history-findings");
+    expect(eight.textContent).toContain("扫描 #8 的发现");
+    expect(screen.getByTestId("gate-diff").textContent).toContain("扫描 #8");
+
+    await act(async () => {
+      scan7.resolve([finding({ path: "src/seven.ts", fingerprint: "fp-7" })]);
+    });
+    await act(async () => {});
+    expect(screen.getByTestId("history-findings").textContent).toContain(
+      "扫描 #8 的发现",
+    );
+    expect(screen.getByTestId("gate-diff").textContent).toContain("扫描 #8");
+    expect(screen.getByTestId("history-findings").textContent).not.toContain(
+      "src/seven.ts",
+    );
+  });
+
+  it("历史页查看期间的显式差异不被旧查看自动差异覆盖", async () => {
+    const scan7 = Promise.withResolvers<Finding[]>();
+    const gate7 = Promise.withResolvers<Finding[] | null>();
+    const gate8 = Promise.withResolvers<Finding[] | null>();
+    mockHistoryCommands({
+      list_scans: () => [
+        { id: 7, root: "/tmp/ws-7", engine_version: "0.2.0", started_at_ms: 1, duration_ms: 1, findings: 1, files_scanned: 1 },
+        { id: 8, root: "/tmp/ws-8", engine_version: "0.2.0", started_at_ms: 2, duration_ms: 1, findings: 1, files_scanned: 1 },
+      ],
+      get_scan: (args) =>
+        (args?.scanId as number) === 8
+          ? Promise.resolve([finding({ path: "src/eight.ts", fingerprint: "fp-8" })])
+          : scan7.promise,
+      gate_diff: (args) =>
+        (args?.scanId as number) === 8 ? gate8.promise : gate7.promise,
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "历史" }));
+    const views = screen.getAllByRole("button", { name: "查看" });
+    await user.click(views[0]);
+    await user.click(screen.getAllByRole("button", { name: "门禁差异" })[1]);
+
+    await act(async () => {
+      scan7.resolve([finding({ path: "src/seven.ts", fingerprint: "fp-7" })]);
+    });
+    await act(async () => {
+      gate8.resolve([finding({ rule_id: "new/eight", fingerprint: "fp-new-8" })]);
+    });
+    const drilldown = await screen.findByTestId("history-findings");
+    expect(drilldown.textContent).toContain("扫描 #7 的发现");
+    expect(screen.getByTestId("gate-diff").textContent).toContain("扫描 #8");
+    expect(screen.getByTestId("gate-diff").textContent).toContain("new/eight");
+
+    await act(async () => {
+      gate7.resolve([finding({ rule_id: "new/seven", fingerprint: "fp-new-7" })]);
+    });
+    await act(async () => {});
+    expect(screen.getByTestId("history-findings").textContent).toContain(
+      "扫描 #7 的发现",
+    );
+    expect(screen.getByTestId("gate-diff").textContent).toContain("new/eight");
+    expect(screen.getByTestId("gate-diff").textContent).not.toContain("new/seven");
+  });
+
+  it("历史页行操作失败显示可读错误", async () => {
+    let failCommand = "get_scan";
+    mockHistoryCommands({
+      get_scan: () => {
+        if (failCommand === "get_scan") throw new Error("发现读取失败");
+        return findings;
+      },
+      set_baseline: () => {
+        if (failCommand === "set_baseline") throw new Error("基线写入失败");
+        return 100;
+      },
+      gate_diff: () => {
+        if (failCommand === "gate_diff") throw new Error("差异读取失败");
+        return [];
+      },
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "历史" }));
+    await screen.findByTestId("history-table");
+
+    await user.click(screen.getByRole("button", { name: "查看" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("发现读取失败");
+
+    failCommand = "set_baseline";
+    await user.click(screen.getByRole("button", { name: "设为基线" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("基线写入失败");
+
+    failCommand = "gate_diff";
+    await user.click(screen.getByRole("button", { name: "门禁差异" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("差异读取失败");
+  });
+
+  it("基线切换成功后作废旧差异", async () => {
+    let baselineEntries = 1;
+    mockHistoryCommands({
+      baseline_info: () => ({ engine_version: "0.2.0", entries: baselineEntries }),
+      gate_diff: () => [finding({ rule_id: "new/rule", fingerprint: "fp-new" })],
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "历史" }));
+    await screen.findByTestId("history-table");
+    await user.click(screen.getByRole("button", { name: "门禁差异" }));
+    expect(await screen.findByTestId("gate-diff")).toBeTruthy();
+
+    baselineEntries = 2;
+    await user.click(screen.getByRole("button", { name: "设为基线" }));
+    const baseline = await screen.findByTestId("baseline-info");
+    expect(baseline.textContent).toContain("当前基线：2 条");
+    expect(screen.queryByTestId("gate-diff")).toBeNull();
+  });
+
+  it("基线写入失败保留旧差异，信息刷新失败显示未知并仍失效", async () => {
+    let baselineInfoShouldFail = false;
+    mockHistoryCommands({
+      baseline_info: () => {
+        if (baselineInfoShouldFail) throw new Error("基线状态读取失败");
+        return { engine_version: "0.2.0", entries: 1 };
+      },
+      gate_diff: () => [finding({ rule_id: "new/rule", fingerprint: "fp-new" })],
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "历史" }));
+    await screen.findByTestId("history-table");
+    await user.click(screen.getByRole("button", { name: "门禁差异" }));
+    expect(await screen.findByTestId("gate-diff")).toBeTruthy();
+
+    const base = invokeMock.getMockImplementation();
+    invokeMock.mockImplementation(async (cmd: string, args?: InvokeArgs) => {
+      if (cmd === "set_baseline") throw new Error("基线写入失败");
+      return base?.(cmd, args);
+    });
+    await user.click(screen.getByRole("button", { name: "设为基线" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("基线写入失败");
+    expect(screen.getByTestId("gate-diff")).toBeTruthy();
+
+    invokeMock.mockImplementation(async (cmd: string, args?: InvokeArgs) => {
+      if (cmd === "set_baseline") return 101;
+      return base?.(cmd, args);
+    });
+    baselineInfoShouldFail = true;
+    await user.click(screen.getByRole("button", { name: "设为基线" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "基线已切换，但信息刷新失败",
+    );
+    expect(screen.getByTestId("baseline-info").textContent).toContain(
+      "基线状态未知",
+    );
+    expect(screen.queryByTestId("gate-diff")).toBeNull();
+  });
+
+  it("删除任意扫描后失效差异且基线状态不伪装", async () => {
+    let baselineInfoShouldFail = false;
+    mockHistoryCommands({
+      list_scans: () => [
+        { id: 7, root: "/tmp/ws-7", engine_version: "0.2.0", started_at_ms: 1, duration_ms: 1, findings: 1, files_scanned: 1 },
+        { id: 8, root: "/tmp/ws-8", engine_version: "0.2.0", started_at_ms: 2, duration_ms: 1, findings: 1, files_scanned: 1 },
+      ],
+      baseline_info: () => {
+        if (baselineInfoShouldFail) throw new Error("基线状态读取失败");
+        return { engine_version: "0.2.0", entries: 1 };
+      },
+      gate_diff: () => [finding({ rule_id: "new/rule", fingerprint: "fp-new" })],
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "历史" }));
+    await screen.findByTestId("history-table");
+    await user.click(screen.getAllByRole("button", { name: "门禁差异" })[0]);
+    expect(await screen.findByTestId("gate-diff")).toBeTruthy();
+
+    baselineInfoShouldFail = true;
+    await user.click(screen.getAllByRole("button", { name: "删除" })[1]);
+    await user.click(screen.getByRole("button", { name: "确认删除" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "历史已删除，但基线状态刷新失败",
+    );
+    expect(screen.getByTestId("baseline-info").textContent).toContain(
+      "基线状态未知",
+    );
+    expect(screen.queryByTestId("gate-diff")).toBeNull();
+  });
+
+  it("历史页初始加载时区分基线未知与未设置", async () => {
+    mockHistoryCommands({ baseline_info: () => {
+      throw new Error("基线状态读取失败");
+    } });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "历史" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("基线状态读取失败");
+    expect(screen.getByTestId("baseline-info").textContent).toContain(
+      "基线状态未知",
+    );
+    expect(screen.getByTestId("history-table").textContent).toContain("/tmp/ws");
+  });
+
+  it("事件或规则集失败时保留发现并显示元数据警告", async () => {
+    mockHistoryCommands({
+      get_scan_events: () => {
+        throw new Error("事件读取失败");
+      },
+      get_scan_ruleset: () => {
+        throw new Error("规则集读取失败");
+      },
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: "历史" }));
+    await user.click(await screen.findByRole("button", { name: "查看" }));
+
+    const list = await screen.findByTestId("history-findings");
+    expect(list.textContent).toContain("src/a.ts:3");
+    expect(screen.getByTestId("history-warnings").textContent).toContain(
+      "扫描事件不可用",
+    );
+    expect(screen.getByTestId("history-warnings").textContent).toContain(
+      "规则集不可用",
+    );
+  });
+
+  it("历史页区分规则包 integrity 与未记录快照", async () => {
+    let ruleset: unknown = {
+      enabled_rules: ["ts/no-eval"],
+      packs: [
+        {
+          id: "com.example.rules",
+          version: "1.2.0",
+          integrity: "sha256-abc",
+        },
+      ],
+    };
+    mockHistoryCommands({ get_scan_ruleset: () => ruleset });
+    const user = userEvent.setup();
+    const first = render(<App />);
+    await user.click(screen.getByRole("button", { name: "历史" }));
+    await user.click(await screen.findByRole("button", { name: "查看" }));
+    const withPack = await screen.findByTestId("history-ruleset");
+    expect(withPack.textContent).toContain("com.example.rules@1.2.0");
+    expect(withPack.textContent).toContain("sha256-abc");
+    first.unmount();
+
+    ruleset = {
+      enabled_rules: [],
+      packs: [{ id: "old.pack", version: "2.0.0" }],
+    };
+    const second = render(<App />);
+    await user.click(screen.getByRole("button", { name: "历史" }));
+    await user.click(await screen.findByRole("button", { name: "查看" }));
+    const missingIntegrity = await screen.findByTestId("history-ruleset");
+    expect(missingIntegrity.textContent).toContain("integrity 未记录");
+    second.unmount();
+
+    ruleset = {};
+    const third = render(<App />);
+    await user.click(screen.getByRole("button", { name: "历史" }));
+    await user.click(await screen.findByRole("button", { name: "查看" }));
+    const missingSnapshot = await screen.findByTestId("history-ruleset");
+    expect(missingSnapshot.textContent).toContain("规则集快照未记录");
+    expect(missingSnapshot.textContent).not.toContain("启用 0 条");
+    expect(missingSnapshot.textContent).not.toContain("规则包 0 个");
+    third.unmount();
+
+    ruleset = { enabled_rules: [], packs: [] };
+    const fourth = render(<App />);
+    await user.click(screen.getByRole("button", { name: "历史" }));
+    await user.click(await screen.findByRole("button", { name: "查看" }));
+    const emptySnapshot = await screen.findByTestId("history-ruleset");
+    expect(emptySnapshot.textContent).toContain("启用 0 条");
+    expect(emptySnapshot.textContent).toContain("规则包 0 个");
+    fourth.unmount();
   });
 
   it("扫描页可发起 LLM 源码审查并自动分页覆盖全部候选", async () => {

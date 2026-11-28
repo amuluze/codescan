@@ -424,18 +424,21 @@ impl Store {
         let entries_json = serde_json::to_string(&entries).map_err(|e| {
             StoreError::Db(rusqlite::Error::ToSqlConversionFailure(e.into()))
         })?;
-        self.conn.execute(
-            "INSERT INTO baselines(created_at_ms, scan_id, engine_version, entries_json)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![now_ms, scan_id, engine_version, entries_json],
-        )?;
-        let baseline_id = self.conn.last_insert_rowid();
-        self.conn.execute(
-            "INSERT INTO active_baseline(key, baseline_id) VALUES (1, ?1)
-             ON CONFLICT(key) DO UPDATE SET baseline_id = excluded.baseline_id",
-            [baseline_id],
-        )?;
-        Ok(baseline_id)
+        // 快照与活动指针必须同时生效：指针写入失败时整体回滚，不留孤立基线。
+        self.transaction(|| {
+            self.conn.execute(
+                "INSERT INTO baselines(created_at_ms, scan_id, engine_version, entries_json)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![now_ms, scan_id, engine_version, entries_json],
+            )?;
+            let baseline_id = self.conn.last_insert_rowid();
+            self.conn.execute(
+                "INSERT INTO active_baseline(key, baseline_id) VALUES (1, ?1)
+                 ON CONFLICT(key) DO UPDATE SET baseline_id = excluded.baseline_id",
+                [baseline_id],
+            )?;
+            Ok(baseline_id)
+        })
     }
 
     pub fn current_baseline(&self) -> Result<Option<Baseline>> {
